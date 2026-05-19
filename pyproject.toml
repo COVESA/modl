@@ -1,0 +1,57 @@
+
+
+[project]
+name = "modl"
+dynamic = ["version"]
+description = "A tool for managing the identity registry of a data model"
+authors = [{name = "jdacoello", email="8550265+jdacoello@users.noreply.github.com"}]
+license-files = ["LICENSE"]
+readme = "README.md"
+dependencies = [
+    "click>=8.1.7",
+    "rich-click>=1.8.3",
+    "rich>=13.9.4",
+]
+requires-python = ">=3.11"
+
+[project.urls]
+homepage = "https://github.com/COVESA/model-ledger"
+documentation = "https://github.com/COVESA/model-ledger/blob/main/README.md"
+
+[project.scripts]
+modl = "modl.cli:cli"
+
+[tool.uv]
+package = true
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/modl/__init__.py"
+
+[dependency-groups]
+dev = [
+    "ruff",
+    "pre-commit",
+    "pytest-cov",
+    "pytest",
+    "nox",
+    "bump-my-version",
+    "ty"
+]
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "PGH", "B", "SIM"]
+
+[tool.bumpversion]
+current_version = "0"
+
+[[tool.bumpversion.files]]
+filename = "./src/modl/__init__.py"
