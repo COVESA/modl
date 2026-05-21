@@ -1,20 +1,28 @@
+"""Pydantic row models and shared enums for the four ledger tables."""
+
 from enum import StrEnum
 
 from pydantic import BaseModel, Field
 
 
 class ElementStatus(StrEnum):
+    """Lifecycle state of a ledger record."""
+
     ACTIVE = "ACTIVE"
     SUPERSEDED = "SUPERSEDED"
     REMOVED = "REMOVED"
 
 
 class ElementKind(StrEnum):
+    """Distinguishes top-level objects (ENTITY) from their fields (PROPERTY)."""
+
     ENTITY = "ENTITY"
     PROPERTY = "PROPERTY"
 
 
 class ConceptRow(BaseModel):
+    """One row of concepts.csv — the agreed meaning of a model element."""
+
     id: int = Field(ge=0)
     concept_uri: str
     current_label: str
@@ -23,6 +31,8 @@ class ConceptRow(BaseModel):
 
 
 class RevisionRow(BaseModel):
+    """One row of revisions.csv — assigned to every detected change regardless of whether it is breaking."""
+
     id: int = Field(ge=0)
     concept_uri: str
     revision_uri: str
@@ -31,6 +41,8 @@ class RevisionRow(BaseModel):
 
 
 class VariantRow(BaseModel):
+    """One row of variants.csv — a snapshot of the essential metadata that constitutes a data contract."""
+
     id: int = Field(ge=0)
     concept_uri: str
     variant_uri: str
@@ -39,6 +51,8 @@ class VariantRow(BaseModel):
 
 
 class BindingRow(BaseModel):
+    """One row of bindings.csv — maps a property variant to a concrete runtime path via an instance label."""
+
     id: int = Field(ge=0)
     variant_uri: str
     binding_uri: str

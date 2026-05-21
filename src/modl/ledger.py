@@ -1,3 +1,5 @@
+"""Ledger I/O, schema validation, and ID minting for the four ledger CSV tables."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -46,7 +48,7 @@ REQUIRED_COLUMNS: dict[str, list[str]] = {
 
 
 class LedgerValidationError(Exception):
-    pass
+    """Raised when a ledger table violates a schema, uniqueness, or referential integrity constraint."""
 
 
 # ── Core functions ────────────────────────────────────────────────────────────
@@ -115,14 +117,26 @@ def next_id(table: pd.DataFrame) -> int:
     return int(table["id"].max()) + 1
 
 
+def validate_ledger_dir(ledger_dir: Path) -> None:
+    """Validate that an existing directory contains exactly the four expected ledger CSV files and nothing else."""
+    if not ledger_dir.is_dir():
+        raise LedgerValidationError(f"Ledger path is not a directory: {ledger_dir}")
+    expected = {f"{name}.csv" for name in TABLES}
+    actual = {f.name for f in ledger_dir.iterdir()}
+    missing = expected - actual
+    extra = actual - expected
+    if missing:
+        raise LedgerValidationError(f"Ledger directory is missing files: {sorted(missing)}")
+    if extra:
+        raise LedgerValidationError(f"Ledger directory contains unexpected files: {sorted(extra)}")
+
+
 def read_ledger(ledger_dir: Path) -> dict[str, pd.DataFrame]:
-    """Read the four ledger CSVs from a directory and validate them immediately."""
+    """Read the four ledger CSVs from a directory, validating both directory contents and table schemas."""
+    validate_ledger_dir(ledger_dir)
     tables: dict[str, pd.DataFrame] = {}
     for name in TABLES:
-        path = ledger_dir / f"{name}.csv"
-        if not path.exists():
-            raise FileNotFoundError(f"Ledger file not found: {path}")
-        tables[name] = pd.read_csv(path)
+        tables[name] = pd.read_csv(ledger_dir / f"{name}.csv")
     validate_ledger(tables)
     return tables
 

@@ -14,16 +14,17 @@ As a domain data model evolves, producers and consumers need stable answers to q
 
 ## How It Works
 
-`ModL` is language-agnostic. It does not parse model files directly. A language-specific diff tool produces a **diff report**, which is translated into a common intermediate representation and fed into `ModL` along with the previous ledger state and a user-defined breaking change configuration.
+`ModL` is language-agnostic. It does not parse model files directly. A language-specific adapter produces a **diff report** in `modl`'s intermediate representation (IR), which is fed into `modl` along with the previous ledger state and a breaking change configuration.
 
 ```mermaid
 flowchart LR
-    A[Model snapshot] --> B[Language diff tool]
-    B --> C[Diff report]
-    C --> E[modl]
-    D[Previous ledger] --> E
-    F[Breaking change config] --> E
-    E --> G[Updated ledger]
+    A[Model snapshot] --> |Previous| DIFF[Model-specific diff]
+    B[Model snapshot] --> |Current| DIFF
+    DIFF --> |Diff report| ADAPTER[Intermediate Representation Adapter]
+    ADAPTER --> |Diff in IR| SYNC
+    LEDGER[Ledger] --> |Previous| SYNC
+    F[Breaking change config] --> SYNC
+    SYNC --> |Updated| LEDGER
 ```
 
 The diff report describes changes at the level of objects and their fields:
@@ -194,6 +195,79 @@ erDiagram
     }
 ```
 
+
+## Usage
+
+The following commands assume an active enrironment, see [CONTRIBUTING](./CONTRIBUTING.md) for instructions on how to set it up.
+
+### `modl sync`
+
+Synchronises the ledger with a diff report. If no ledger exists yet, it is created. If no diff report is provided, an empty ledger is initialised.
+
+```shell
+modl sync [DIFF_REPORT] --ledger-dir PATH --config PATH [--dry-run]
+```
+
+| Argument / Option | Description |
+|---|---|
+| `DIFF_REPORT` | Path to the diff report JSON file (optional). Omit to initialise an empty ledger. |
+| `--ledger-dir` | Directory where the four ledger CSV files are read from and written to. |
+| `--config` | Path to the breaking change config YAML file. |
+| `--dry-run` | Preview what would change without writing anything to disk. Exits with code `1` if changes would be made. |
+
+#### Config file format
+
+```yaml
+namespace:
+  namespace: "https://myproject.org/model"  # base URI for all ledger entries
+  prefix: "mp"                               # optional short prefix; URIs render as mp-c:0 instead of the full namespace
+
+entity:
+  essential_attributes:
+    - instances   # a change to the instance list is a breaking change
+    - type
+
+property:
+  essential_attributes:
+    - datatype    # standard attribute
+    - unit        # standard attribute
+    - accuracy    # user-defined domain-specific attribute
+```
+
+Only `namespace.namespace` is required. The `entity` and `property` sections default to empty — all changes are treated as non-breaking if omitted.
+
+#### Diff report format
+
+The diff report is a JSON file that describes what changed between two model snapshots. It uses the intermediate representation that `modl` understands:
+
+```json
+{
+  "changes": [
+    {
+      "label": "Vehicle.Door",
+      "kind": "ENTITY",
+      "change_type": "MODIFIED",
+      "changed_attributes": { "instances": ["Left", "Right", "Center"] }
+    },
+    {
+      "label": "Vehicle.Speed",
+      "parent_label": "Vehicle",
+      "kind": "PROPERTY",
+      "change_type": "MODIFIED",
+      "changed_attributes": { "datatype": "Float" }
+    }
+  ]
+}
+```
+
+| Field | Values |
+|---|---|
+| `kind` | `ENTITY` (branch/object type/class) or `PROPERTY` (field/attribute/signal) |
+| `change_type` | `ADDED`, `REMOVED`, or `MODIFIED` |
+| `changed_attributes` | Key-value map of what changed. Required for `MODIFIED`; empty `{}` for `ADDED`/`REMOVED`. |
+| `parent_label` | Required for `PROPERTY` — the label of the owning entity. |
+
+A language-specific adapter (e.g. for vspec, GraphQL SDL) is responsible for producing this JSON from a model diff.
 
 ## Contributing
 

@@ -1,10 +1,12 @@
+"""Breaking change configuration and namespace settings, loaded from a YAML file."""
+
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from modl.models import ElementKind
 
@@ -17,6 +19,10 @@ _TABLE_SUFFIXES: dict[str, str] = {
 
 
 class NamespaceConfig(BaseModel):
+    """Base URI and optional short prefix used to generate ledger URIs (e.g. mp-c:0)."""
+
+    model_config = ConfigDict(extra="forbid")
+
     namespace: str
     prefix: str | None = None
 
@@ -28,10 +34,18 @@ class NamespaceConfig(BaseModel):
 
 
 class ElementBreakingConfig(BaseModel):
+    """Attributes whose change triggers a new variant (i.e., a breaking change) for an element kind."""
+
+    model_config = ConfigDict(extra="forbid")
+
     essential_attributes: list[str] = Field(default_factory=list)
 
 
 class BreakingChangeConfig(BaseModel):
+    """Root configuration for a modl project, combining namespace settings and per-kind breaking change rules."""
+
+    model_config = ConfigDict(extra="forbid")
+
     namespace: NamespaceConfig
     entity: ElementBreakingConfig = Field(default_factory=ElementBreakingConfig)
     property: ElementBreakingConfig = Field(default_factory=ElementBreakingConfig)
@@ -43,5 +57,6 @@ class BreakingChangeConfig(BaseModel):
 
     @classmethod
     def from_yaml(cls, path: Path) -> BreakingChangeConfig:
+        """Load and validate a BreakingChangeConfig from a YAML file."""
         raw = yaml.safe_load(path.read_text())
         return cls.model_validate(raw)
