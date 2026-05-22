@@ -286,3 +286,94 @@ A language-specific adapter (e.g. for vspec, GraphQL SDL) is responsible for pro
 ## Contributing
 
 See [here](CONTRIBUTING.md) if you would like to contribute.
+
+## Design Decisions and Discarded Alternatives
+
+This section documents the rationale behind key design decisions and the alternatives that were considered and rejected. It serves as a reference when the design is challenged.
+
+### Why four tables?
+
+One could argue that concepts and variants are sufficient: concepts capture identity, variants capture the data contract. This is true only if what constitutes a breaking change is known a priori and applies uniformly to all downstream consumers. In practice, different teams have different definitions of "breaking". The four-table split reflects this:
+
+- **concepts** — stable identity; what a thing *is*, regardless of how it changes
+- **revisions** — a complete, unfiltered audit log of every detected change; does not judge whether a change is breaking
+- **variants** — derived from revisions using a user-configurable set of essential attributes; two rows share a variant only if nothing essential to *that project's* definition of "breaking" changed
+- **bindings** — some modeling languages define entity instances (e.g., `Door: [Left, Right]`), which expand fields into multiple individually addressable runtime paths; bindings assign a stable identity to each such path
+
+Merging revisions and variants would either force a single global breaking-change policy or lose the audit trail. Merging bindings into variants would require variants to know about instance expansion, coupling two independent concepts.
+
+### Why URIs as identifiers?
+
+The alternative is opaque integers or short labels. URIs were chosen because:
+
+- They are globally unique without coordination — two independent projects can mint records and their identifiers will never collide
+- They are self-describing: a URI encodes the namespace (who minted it), the table (what kind of record it is), and the serial (which record)
+- They are dereferenceable in principle — a namespace owner can publish human-readable documentation at the URI
+- They compose naturally across namespaces: FK columns in one project's ledger can reference URIs minted by another project without any registry or mapping table
+
+Plain integers require a global registry to avoid collisions across projects. Short labels (CURIEs) require a prefix resolution context that must travel with every document that uses them.
+
+### Why full URIs stored in the CSV tables, not CURIEs?
+
+CURIEs such as `ns:0` are shorter but require the prefix-to-namespace map to be present and unambiguous at read time. A CSV file is a standalone artifact — it may be opened months later, sent to another team, or imported by a tool that has no knowledge of the original prefix declarations. Full URIs make each CSV self-contained: the namespace authority, the table name, and the serial are all recoverable from the value itself without external context.
+
+The config file's `prefix` field is an optional display alias used by inspection commands to shorten output. It is never stored in the ledger.
+
+### Why base36 for the URI suffix, not decimal?
+
+The serial is a decimal integer internally. Decimal would be the simplest choice, but base36 was chosen for URI compactness. A model with tens of thousands of records would produce 5-digit decimal suffixes; the same range in base36 fits in 3 characters. Compact URIs matter in serialisation-heavy use cases (payloads, QR codes, logs).
+
+Hexadecimal (base16) was rejected because it is less compact than base36 and gains nothing beyond familiarity.
+
+### Why base36 and not base62 or base64?
+
+Base62 (`0-9A-Za-z`) and base64 (`0-9A-Za-z+/=`) are more compact than base36 for the same integer range. They were rejected because:
+
+- **Case ambiguity**: base62 uses both uppercase and lowercase letters. URIs are technically case-sensitive, but in practice URLs are routinely lowercased by proxies, logs, and developers. A URI like `.../revisions/1K` and `.../revisions/1k` would decode to different serials — a silent data corruption hazard.
+- **No stdlib decode**: Python has no built-in base62 decoder. `int(s, 36)` is part of the language; base62 requires a third-party library or hand-rolled code.
+- **URL safety**: base64 uses `+`, `/`, and `=`, which require percent-encoding in URIs. Base64url replaces them with `-` and `_`, but introduces yet another non-standard alphabet.
+
+Base36 uses only `0-9a-z` — all characters that are unambiguous in URLs, universally lowercased, and directly supported by Python's `int(s, 36)`.
+
+### Why a language-agnostic intermediate representation?
+
+ModL does not parse model files directly. A language-specific adapter produces a diff report in a simple JSON format, which ModL then processes. This separation exists because:
+
+- The identity ledger is valuable across modeling languages (vspec, GraphQL SDL, JSON Schema, etc.). The four-table structure and URI semantics are language-agnostic; only the diff production is language-specific.
+- Migrations and imports between modeling languages should preserve identity: if a concept previously defined in vspec is migrated to another language, its URI should not change. A shared IR makes this possible.
+- The adapter is a thin, replaceable component. ModL's validation, minting, and audit logic does not need to change when a new modeling language is supported.
+
+### Why CSV and not SQLite or another format?
+
+- **Git-friendly**: CSV produces line-level diffs in `git diff`. A change to a single record is visible as a single changed line. Binary formats (SQLite, Parquet) produce opaque binary diffs.
+- **Human-readable**: CSV files can be opened directly in a spreadsheet or text editor. They are suitable as release artifacts that non-technical stakeholders can inspect.
+- **No tooling dependency**: reading a CSV requires no database engine, no schema migration, no driver. Any language or environment with a standard library can parse it.
+- **Easy manipulation**: pandas, polars, and the Python `csv` module all handle CSV natively.
+
+SQLite may be offered as an optional release artifact in the future to support consumers who prefer to run SQL queries over the ledger.
+
+### Why append-only? Why are records never deleted?
+
+The ledger is designed for transparent governance, traceability, and provenance in data modeling projects. Deleting or modifying a record would:
+
+- Break any downstream system that holds a reference to the deleted URI
+- Make it impossible to reconstruct the state of the model at a past point in time without relying solely on git history
+- Undermine the audit trail needed to answer questions like "what did this field mean at the time this data was produced?"
+
+Records that are no longer current are marked `SUPERSEDED` or `REMOVED`. The full history remains readable. The git history provides point-in-time reproducibility at the repository level; the ledger tables provide it at the record level without requiring a git checkout.
+
+### Why `previous_labels` as a list column in `concepts.csv`?
+
+An alternative is a separate rename-history table (e.g., `concept_label_history.csv`) with one row per rename event. That would be more normalised and queryable. The list column was chosen for simplicity: label history is rarely queried independently, and the added table would require its own schema validation, FK constraints, and serial management. A flat list in the concepts table is sufficient for the primary use case — knowing what a concept used to be called — without adding a fifth table to the ledger.
+
+If richer label history (timestamps, attribution) becomes necessary, a dedicated table is the natural upgrade path.
+
+### Why co-release the ledger in the same repository as the model?
+
+Each model release produces a snapshot. A diff between two snapshots produces a diff report. That diff report is passed directly to ModL to update the ledger. Keeping the ledger in the same repository means:
+
+- Every model release tag also tags the corresponding ledger state; consumers can check out any release and find a consistent pair
+- The ledger is a self-contained artifact: it does not require references to an external repository to be meaningful
+- CI/CD pipelines operate on a single repository checkout
+
+A separate ledger repository would require coordinated releases across two repositories, introduce the risk of the ledger falling out of sync with the model, and require consumers to know about and access a second repository.
