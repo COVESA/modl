@@ -23,7 +23,7 @@ class TestCli:
     def test_sync_no_diff_report(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
         """No diff report → initialises empty ledger and logs it."""
         config = tmp_path / "modl.yaml"
-        config.write_text("namespace:\n  namespace: myns\n")
+        config.write_text("namespace:\n  namespace: http://example.org/myns/\n")
         result = CliRunner().invoke(
             cli,
             ["sync", "--ledger-dir", str(tmp_path / "ledger"), "--config", str(config)],
@@ -34,7 +34,7 @@ class TestCli:
     def test_sync_dry_run_flag(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
         """--dry-run prevents writes and logs a dry-run notice."""
         config = tmp_path / "modl.yaml"
-        config.write_text("namespace:\n  namespace: myns\n")
+        config.write_text("namespace:\n  namespace: http://example.org/myns/\n")
         result = CliRunner().invoke(
             cli,
             ["sync", "--ledger-dir", str(tmp_path / "ledger"), "--config", str(config), "--dry-run"],
@@ -45,7 +45,7 @@ class TestCli:
     def test_sync_with_diff_report(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
         """Provided diff report path appears in log output."""
         config = tmp_path / "modl.yaml"
-        config.write_text("namespace:\n  namespace: myns\n")
+        config.write_text("namespace:\n  namespace: http://example.org/myns/\n")
         diff = tmp_path / "diff.json"
         diff.write_text('{"changes": []}')
         result = CliRunner().invoke(
@@ -66,14 +66,14 @@ class TestCli:
     def test_sync_missing_ledger_dir_option_errors(self, tmp_path: Path) -> None:
         """Omitting required --ledger-dir causes non-zero exit."""
         config = tmp_path / "modl.yaml"
-        config.write_text("namespace:\n  namespace: myns\n")
+        config.write_text("namespace:\n  namespace: http://example.org/myns/\n")
         result = CliRunner().invoke(cli, ["sync", "--config", str(config)])
         assert result.exit_code != 0
 
     def test_sync_dirty_ledger_dir_errors(self, tmp_path: Path) -> None:
         """Dir with unrecognised files causes non-zero exit before any write."""
         config = tmp_path / "modl.yaml"
-        config.write_text("namespace:\n  namespace: myns\n")
+        config.write_text("namespace:\n  namespace: http://example.org/myns/\n")
         ledger_dir = tmp_path / "ledger"
         ledger_dir.mkdir()
         (ledger_dir / "unrelated.txt").write_text("oops")

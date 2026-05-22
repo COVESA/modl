@@ -4,33 +4,45 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from modl.models import ElementKind
 
-_TABLE_SUFFIXES: dict[str, str] = {
-    "concepts": "-c",
-    "revisions": "-r",
-    "variants": "-v",
-    "bindings": "-b",
-}
-
 
 class NamespaceConfig(BaseModel):
-    """Base URI and optional short prefix used to generate ledger URIs (e.g. mp-c:0)."""
+    """Base URI and optional display prefix for a modl project.
+
+    The full URI is always used in stored ledger records. The prefix is a
+    display-only alias for use in inspection and query output.
+
+    The namespace must end with '/' or '#' so that URIs are formed by direct
+    concatenation: ``namespace + table + '/' + id``.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     namespace: str
     prefix: str | None = None
 
+    @field_validator("namespace")
+    @classmethod
+    def namespace_must_be_valid(cls, v: str) -> str:
+        """Reject namespace strings that are not absolute URIs ending with '/' or '#'."""
+        if " " in v:
+            raise ValueError("namespace must not contain spaces")
+        parsed = urlparse(v)
+        if not parsed.scheme or not (parsed.netloc or parsed.path):
+            raise ValueError("namespace must be an absolute URI (e.g. http://example.org/model/)")
+        if not v.endswith(("/", "#")):
+            raise ValueError("namespace must end with '/' or '#'")
+        return v
+
     def uri_base(self, table: str) -> str:
-        """Return the URI base for a given table name (e.g. 'concepts' → 'mp-c')."""
-        suffix = _TABLE_SUFFIXES[table]
-        root = self.prefix if self.prefix is not None else self.namespace
-        return f"{root}{suffix}"
+        """Return the full base URI for minting identifiers in the given table (e.g. 'http://namespace.example/concepts')."""
+        return f"{self.namespace}{table}"
 
 
 class ElementBreakingConfig(BaseModel):

@@ -2,6 +2,7 @@ import logging
 from pathlib import Path
 
 import rich_click as click
+from pydantic import ValidationError as PydanticValidationError
 from rich.traceback import install
 
 from . import __version__, log
@@ -58,7 +59,12 @@ def cli(ctx: click.Context, log_level: str, log_file: Path | None) -> None:
 @click.option("-n", "--dry-run", is_flag=True, default=False, help="Preview changes without writing to disk")
 def sync(diff_report: Path | None, ledger_dir: Path, config: Path, dry_run: bool) -> None:
     """Synchronise the ledger with a diff report, or initialise it if none exists."""
-    cfg = BreakingChangeConfig.from_yaml(config)
+    try:
+        cfg = BreakingChangeConfig.from_yaml(config)
+    except PydanticValidationError as exc:
+        for error in exc.errors():
+            log.error("Invalid config — %s: %s", error["loc"][-1], error["msg"])
+        raise SystemExit(1) from exc
     log.debug("Loaded config: namespace=%s prefix=%s", cfg.namespace.namespace, cfg.namespace.prefix)
 
     # Fail early: if the directory exists and is non-empty it must be a valid ledger
@@ -67,7 +73,8 @@ def sync(diff_report: Path | None, ledger_dir: Path, config: Path, dry_run: bool
         try:
             validate_ledger_dir(ledger_dir)
         except LedgerValidationError as exc:
-            raise SystemExit(f"Error: {exc}") from exc
+            log.error("%s", exc)
+            raise SystemExit(1) from exc
 
     ledger_exists = dir_is_non_empty
 

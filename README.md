@@ -91,8 +91,8 @@ For example, if `datatype` is declared essential for `Vehicle.Speed`:
 
 | variant_uri | Snapshot | Status |
 |---|---|---|
-| `ns-v:10` | `Vehicle.Speed { datatype: Int }` | SUPERSEDED |
-| `ns-v:40` | `Vehicle.Speed { datatype: Float }` | ACTIVE |
+| `http://namespace.example/variants/10` | `Vehicle.Speed { datatype: Int }` | SUPERSEDED |
+| `http://namespace.example/variants/40` | `Vehicle.Speed { datatype: Float }` | ACTIVE |
 
 These are two variants of the same concept — the meaning of "speed" has not changed, but the data contract has.
 
@@ -106,8 +106,8 @@ For `Vehicle.Door` with `instances: [Left, Right]`, the field `Door.IsOpen` expa
 
 | binding_uri | Runtime path |
 |---|---|
-| `ns-b:24` | `Vehicle.Door.Left.IsOpen` |
-| `ns-b:25` | `Vehicle.Door.Right.IsOpen` |
+| `http://namespace.example/bindings/24` | `Vehicle.Door.Left.IsOpen` |
+| `http://namespace.example/bindings/25` | `Vehicle.Door.Right.IsOpen` |
 
 A system can then write a compact payload like `24: true` to mean *"the left door is open"*, without encoding the full path.
 
@@ -130,31 +130,31 @@ In the non-breaking case, existing binding IDs remain stable and consumers are u
 
 | id | concept_uri | current_label | previous_labels | status |
 |---|---|---|---|---|
-| 0 | ns-c:0 | Vehicle | — | ACTIVE |
-| 1 | ns-c:1 | Vehicle.Speed | Vehicle.Velocity | ACTIVE |
-| 2 | ns-c:2 | Vehicle.Door | — | ACTIVE |
-| 8 | ns-c:8 | Vehicle.Door.IsOpen | — | ACTIVE |
+| 0 | `http://namespace.example/concepts/0` | Vehicle | — | ACTIVE |
+| 1 | `http://namespace.example/concepts/1` | Vehicle.Speed | Vehicle.Velocity | ACTIVE |
+| 2 | `http://namespace.example/concepts/2` | Vehicle.Door | — | ACTIVE |
+| 8 | `http://namespace.example/concepts/8` | Vehicle.Door.IsOpen | — | ACTIVE |
 
 ### `revisions.csv`
 
 | id | concept_uri | revision_uri | previous_revision_uri | status |
 |---|---|---|---|---|
-| 56 | ns-c:0 | ns-r:56 | — | ACTIVE |
-| 57 | ns-c:8 | ns-r:57 | — | SUPERSEDED |
-| 103 | ns-c:8 | ns-r:103 | ns-r:57 | ACTIVE |
+| 56 | `http://namespace.example/concepts/0` | `http://namespace.example/revisions/56` | — | ACTIVE |
+| 57 | `http://namespace.example/concepts/8` | `http://namespace.example/revisions/57` | — | SUPERSEDED |
+| 103 | `http://namespace.example/concepts/8` | `http://namespace.example/revisions/103` | `http://namespace.example/revisions/57` | ACTIVE |
 
 ### `variants.csv`
 
 | id | concept_uri | variant_uri | revision_uri | status |
 |---|---|---|---|---|
-| 40 | ns-c:8 | ns-v:40 | ns-r:103 | ACTIVE |
+| 40 | `http://namespace.example/concepts/8` | `http://namespace.example/variants/40` | `http://namespace.example/revisions/103` | ACTIVE |
 
 ### `bindings.csv`
 
 | id | variant_uri | binding_uri | instance_label | status |
 |---|---|---|---|---|
-| 24 | ns-v:40 | ns-b:24 | Left | ACTIVE |
-| 25 | ns-v:40 | ns-b:25 | Right | ACTIVE |
+| 24 | `http://namespace.example/variants/40` | `http://namespace.example/bindings/24` | Left | ACTIVE |
+| 25 | `http://namespace.example/variants/40` | `http://namespace.example/bindings/25` | Right | ACTIVE |
 
 ### Table relationships
 
@@ -219,8 +219,8 @@ modl sync [DIFF_REPORT] --ledger-dir PATH --config PATH [--dry-run]
 
 ```yaml
 namespace:
-  namespace: "https://myproject.org/model"  # base URI for all ledger entries
-  prefix: "mp"                               # optional short prefix; URIs render as mp-c:0 instead of the full namespace
+  namespace: "http://namespace.example/"  # must end with '/' or '#'; full URIs are stored in the ledger
+  prefix: "ns"                            # optional display alias; used by inspection commands to shorten output
 
 entity:
   essential_attributes:
