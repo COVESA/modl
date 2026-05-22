@@ -23,7 +23,7 @@ class ElementKind(StrEnum):
 class ConceptRow(BaseModel):
     """One row of concepts.csv — the agreed meaning of a model element."""
 
-    id: int = Field(ge=0)
+    serial: int = Field(ge=0)
     concept_uri: str
     current_label: str
     previous_labels: list[str] = Field(default_factory=list)
@@ -33,7 +33,7 @@ class ConceptRow(BaseModel):
 class RevisionRow(BaseModel):
     """One row of revisions.csv — assigned to every detected change regardless of whether it is breaking."""
 
-    id: int = Field(ge=0)
+    serial: int = Field(ge=0)
     concept_uri: str
     revision_uri: str
     previous_revision_uri: str | None = None
@@ -43,7 +43,7 @@ class RevisionRow(BaseModel):
 class VariantRow(BaseModel):
     """One row of variants.csv — a snapshot of the essential metadata that constitutes a data contract."""
 
-    id: int = Field(ge=0)
+    serial: int = Field(ge=0)
     concept_uri: str
     variant_uri: str
     revision_uri: str
@@ -53,7 +53,7 @@ class VariantRow(BaseModel):
 class BindingRow(BaseModel):
     """One row of bindings.csv — maps a property variant to a concrete runtime path via an instance label."""
 
-    id: int = Field(ge=0)
+    serial: int = Field(ge=0)
     variant_uri: str
     binding_uri: str
     instance_label: str

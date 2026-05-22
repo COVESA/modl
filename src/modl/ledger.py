@@ -13,22 +13,23 @@ from modl.models import ElementStatus
 TABLES = ("concepts", "revisions", "variants", "bindings")
 
 EXPECTED_COLUMNS: dict[str, list[str]] = {
-    "concepts": ["id", "concept_uri", "current_label", "previous_labels", "status"],
-    "revisions": ["id", "concept_uri", "revision_uri", "previous_revision_uri", "status"],
-    "variants": ["id", "concept_uri", "variant_uri", "revision_uri", "status"],
-    "bindings": ["id", "variant_uri", "binding_uri", "instance_label", "status"],
+    "concepts": ["serial", "concept_uri", "current_label", "previous_labels", "status"],
+    "revisions": ["serial", "concept_uri", "revision_uri", "previous_revision_uri", "status"],
+    "variants": ["serial", "concept_uri", "variant_uri", "revision_uri", "status"],
+    "bindings": ["serial", "variant_uri", "binding_uri", "instance_label", "status"],
 }
 
 UNIQUE_COLUMNS: dict[str, list[str]] = {
-    "concepts": ["id", "concept_uri"],
-    "revisions": ["id", "revision_uri"],
-    "variants": ["id", "variant_uri"],
-    "bindings": ["id", "binding_uri"],
+    "concepts": ["serial", "concept_uri"],
+    "revisions": ["serial", "revision_uri"],
+    "variants": ["serial", "variant_uri"],
+    "bindings": ["serial", "binding_uri"],
 }
 
 # (child_table, child_column, parent_table, parent_column)
 FK_CONSTRAINTS: list[tuple[str, str, str, str]] = [
     ("revisions", "concept_uri", "concepts", "concept_uri"),
+    ("revisions", "previous_revision_uri", "revisions", "revision_uri"),
     ("variants", "concept_uri", "concepts", "concept_uri"),
     ("variants", "revision_uri", "revisions", "revision_uri"),
     ("bindings", "variant_uri", "variants", "variant_uri"),
@@ -38,10 +39,10 @@ VALID_STATUSES = {s.value for s in ElementStatus}
 
 # Required (non-nullable) columns per table — previous_revision_uri is nullable
 REQUIRED_COLUMNS: dict[str, list[str]] = {
-    "concepts": ["id", "concept_uri", "current_label", "status"],
-    "revisions": ["id", "concept_uri", "revision_uri", "status"],
-    "variants": ["id", "concept_uri", "variant_uri", "revision_uri", "status"],
-    "bindings": ["id", "variant_uri", "binding_uri", "instance_label", "status"],
+    "concepts": ["serial", "concept_uri", "current_label", "status"],
+    "revisions": ["serial", "concept_uri", "revision_uri", "status"],
+    "variants": ["serial", "concept_uri", "variant_uri", "revision_uri", "status"],
+    "bindings": ["serial", "variant_uri", "binding_uri", "instance_label", "status"],
 }
 
 # ── Exception ─────────────────────────────────────────────────────────────────
@@ -49,6 +50,29 @@ REQUIRED_COLUMNS: dict[str, list[str]] = {
 
 class LedgerValidationError(Exception):
     """Raised when a ledger table violates a schema, uniqueness, or referential integrity constraint."""
+
+
+# ── Base-36 URI serial encoding ───────────────────────────────────────────────
+
+_B36_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyz"
+
+
+def b36encode(n: int) -> str:
+    """Encode a non-negative integer as a lowercase base-36 string (alphabet 0-9a-z)."""
+    if n < 0:
+        raise ValueError(f"serial must be non-negative, got {n}")
+    if n == 0:
+        return "0"
+    digits: list[str] = []
+    while n:
+        digits.append(_B36_ALPHABET[n % 36])
+        n //= 36
+    return "".join(reversed(digits))
+
+
+def b36decode(s: str) -> int:
+    """Decode a lowercase base-36 string to a non-negative integer."""
+    return int(s, 36)
 
 
 # ── Core functions ────────────────────────────────────────────────────────────
@@ -87,7 +111,11 @@ def validate_ledger(tables: dict[str, pd.DataFrame]) -> None:
             if df[col].isnull().any():
                 raise LedgerValidationError(f"[{name}] Column '{col}' contains null values")
 
-        # Uniqueness constraints
+        # Serial must be non-negative
+        if (df["serial"] < 0).any():
+            raise LedgerValidationError(f"[{name}] Column 'serial' contains negative values")
+
+        # Uniqueness constraints (PK: serial; UK: URI column)
         for col in UNIQUE_COLUMNS[name]:
             if df[col].duplicated().any():
                 raise LedgerValidationError(f"[{name}] Column '{col}' contains duplicate values")
@@ -109,12 +137,28 @@ def validate_ledger(tables: dict[str, pd.DataFrame]) -> None:
                 f"[{child_table}.{child_col}] References missing from [{parent_table}.{parent_col}]: {sorted(orphans)}"
             )
 
+    # Cross-concept consistency: each variant's revision must belong to the same concept
+    variants_df = tables["variants"]
+    revisions_df = tables["revisions"]
+    if not variants_df.empty and not revisions_df.empty:
+        merged = variants_df[["concept_uri", "revision_uri"]].merge(
+            revisions_df[["revision_uri", "concept_uri"]].rename(columns={"concept_uri": "rev_concept_uri"}),
+            on="revision_uri",
+            how="left",
+        )
+        mismatch = merged[merged["concept_uri"] != merged["rev_concept_uri"]]
+        if not mismatch.empty:
+            bad = sorted(mismatch["revision_uri"].dropna().tolist())
+            raise LedgerValidationError(
+                f"[variants.revision_uri] References a revision belonging to a different concept: {bad}"
+            )
 
-def next_id(table: pd.DataFrame) -> int:
-    """Return the next available integer ID for a ledger table."""
-    if table.empty or table["id"].isnull().all():
+
+def next_serial(table: pd.DataFrame) -> int:
+    """Return the next available serial integer for a ledger table."""
+    if table.empty or table["serial"].isnull().all():
         return 0
-    return int(table["id"].max()) + 1
+    return int(table["serial"].max()) + 1
 
 
 def validate_ledger_dir(ledger_dir: Path) -> None:

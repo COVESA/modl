@@ -5,8 +5,10 @@ import pytest
 
 from modl.ledger import (
     LedgerValidationError,
+    b36decode,
+    b36encode,
     empty_ledger,
-    next_id,
+    next_serial,
     read_ledger,
     validate_ledger,
     validate_ledger_dir,
@@ -28,16 +30,22 @@ class TestEmptyLedger:
     def test_correct_columns(self) -> None:
         """Each table has exactly the expected column schema."""
         ledger = empty_ledger()
-        assert list(ledger["concepts"].columns) == ["id", "concept_uri", "current_label", "previous_labels", "status"]
+        assert list(ledger["concepts"].columns) == [
+            "serial",
+            "concept_uri",
+            "current_label",
+            "previous_labels",
+            "status",
+        ]
         assert list(ledger["revisions"].columns) == [
-            "id",
+            "serial",
             "concept_uri",
             "revision_uri",
             "previous_revision_uri",
             "status",
         ]
-        assert list(ledger["variants"].columns) == ["id", "concept_uri", "variant_uri", "revision_uri", "status"]
-        assert list(ledger["bindings"].columns) == ["id", "variant_uri", "binding_uri", "instance_label", "status"]
+        assert list(ledger["variants"].columns) == ["serial", "concept_uri", "variant_uri", "revision_uri", "status"]
+        assert list(ledger["bindings"].columns) == ["serial", "variant_uri", "binding_uri", "instance_label", "status"]
 
     def test_empty_ledger_passes_validation(self) -> None:
         """Empty ledger satisfies all schema constraints."""
@@ -55,7 +63,7 @@ class TestValidateLedger:
     def test_missing_column_raises(self) -> None:
         """Incomplete column set triggers validation failure."""
         ledger = empty_ledger()
-        ledger["concepts"] = pd.DataFrame(columns=["id", "concept_uri"])
+        ledger["concepts"] = pd.DataFrame(columns=["serial", "concept_uri"])
         with pytest.raises(LedgerValidationError, match="Missing columns"):
             validate_ledger(ledger)
 
@@ -63,17 +71,17 @@ class TestValidateLedger:
         """Unexpected extra column triggers validation failure."""
         ledger = empty_ledger()
         ledger["concepts"] = pd.DataFrame(
-            columns=["id", "concept_uri", "current_label", "previous_labels", "status", "extra"]
+            columns=["serial", "concept_uri", "current_label", "previous_labels", "status", "extra"]
         )
         with pytest.raises(LedgerValidationError, match="Unexpected columns"):
             validate_ledger(ledger)
 
-    def test_duplicate_id_raises(self) -> None:
-        """Duplicate id within a table triggers validation failure."""
+    def test_duplicate_serial_raises(self) -> None:
+        """Duplicate serial within a table triggers validation failure."""
         ledger = empty_ledger()
         ledger["concepts"] = pd.DataFrame(
             {
-                "id": [0, 0],
+                "serial": [0, 0],
                 "concept_uri": ["ns-c:0", "ns-c:1"],
                 "current_label": ["Vehicle", "Door"],
                 "previous_labels": [None, None],
@@ -88,7 +96,7 @@ class TestValidateLedger:
         ledger = empty_ledger()
         ledger["concepts"] = pd.DataFrame(
             {
-                "id": [0, 1],
+                "serial": [0, 1],
                 "concept_uri": ["ns-c:0", "ns-c:0"],
                 "current_label": ["Vehicle", "Door"],
                 "previous_labels": [None, None],
@@ -103,7 +111,7 @@ class TestValidateLedger:
         ledger = empty_ledger()
         ledger["concepts"] = pd.DataFrame(
             {
-                "id": [0],
+                "serial": [0],
                 "concept_uri": [None],
                 "current_label": ["Vehicle"],
                 "previous_labels": [None],
@@ -118,7 +126,7 @@ class TestValidateLedger:
         ledger = empty_ledger()
         ledger["concepts"] = pd.DataFrame(
             {
-                "id": [0],
+                "serial": [0],
                 "concept_uri": ["ns-c:0"],
                 "current_label": ["Vehicle"],
                 "previous_labels": [None],
@@ -133,7 +141,7 @@ class TestValidateLedger:
         ledger = empty_ledger()
         ledger["revisions"] = pd.DataFrame(
             {
-                "id": [0],
+                "serial": [0],
                 "concept_uri": ["ns-c:99"],  # does not exist in concepts
                 "revision_uri": ["ns-r:0"],
                 "previous_revision_uri": [None],
@@ -143,12 +151,27 @@ class TestValidateLedger:
         with pytest.raises(LedgerValidationError, match="References missing"):
             validate_ledger(ledger)
 
-    def test_valid_populated_ledger_passes(self) -> None:
-        """Fully cross-linked four-table ledger passes all constraints."""
+    def test_negative_serial_raises(self) -> None:
+        """Negative serial triggers validation failure."""
         ledger = empty_ledger()
         ledger["concepts"] = pd.DataFrame(
             {
-                "id": [0],
+                "serial": [-1],
+                "concept_uri": ["ns-c:0"],
+                "current_label": ["Vehicle"],
+                "previous_labels": [None],
+                "status": ["ACTIVE"],
+            }
+        )
+        with pytest.raises(LedgerValidationError, match="negative"):
+            validate_ledger(ledger)
+
+    def test_self_fk_previous_revision_raises(self) -> None:
+        """previous_revision_uri referencing a non-existent revision_uri triggers validation failure."""
+        ledger = empty_ledger()
+        ledger["concepts"] = pd.DataFrame(
+            {
+                "serial": [0],
                 "concept_uri": ["ns-c:0"],
                 "current_label": ["Vehicle"],
                 "previous_labels": [None],
@@ -157,7 +180,64 @@ class TestValidateLedger:
         )
         ledger["revisions"] = pd.DataFrame(
             {
-                "id": [0],
+                "serial": [0],
+                "concept_uri": ["ns-c:0"],
+                "revision_uri": ["ns-r:0"],
+                "previous_revision_uri": ["ns-r:99"],  # does not exist
+                "status": ["ACTIVE"],
+            }
+        )
+        with pytest.raises(LedgerValidationError, match="References missing"):
+            validate_ledger(ledger)
+
+    def test_variant_revision_concept_mismatch_raises(self) -> None:
+        """Variant whose revision_uri belongs to a different concept triggers validation failure."""
+        ledger = empty_ledger()
+        ledger["concepts"] = pd.DataFrame(
+            {
+                "serial": [0, 1],
+                "concept_uri": ["ns-c:0", "ns-c:1"],
+                "current_label": ["Vehicle", "Door"],
+                "previous_labels": [None, None],
+                "status": ["ACTIVE", "ACTIVE"],
+            }
+        )
+        ledger["revisions"] = pd.DataFrame(
+            {
+                "serial": [0],
+                "concept_uri": ["ns-c:0"],  # revision belongs to concept 0
+                "revision_uri": ["ns-r:0"],
+                "previous_revision_uri": [None],
+                "status": ["ACTIVE"],
+            }
+        )
+        ledger["variants"] = pd.DataFrame(
+            {
+                "serial": [0],
+                "concept_uri": ["ns-c:1"],  # variant claims concept 1
+                "variant_uri": ["ns-v:0"],
+                "revision_uri": ["ns-r:0"],  # but revision belongs to concept 0
+                "status": ["ACTIVE"],
+            }
+        )
+        with pytest.raises(LedgerValidationError, match="different concept"):
+            validate_ledger(ledger)
+
+    def test_valid_populated_ledger_passes(self) -> None:
+        """Fully cross-linked four-table ledger passes all constraints."""
+        ledger = empty_ledger()
+        ledger["concepts"] = pd.DataFrame(
+            {
+                "serial": [0],
+                "concept_uri": ["ns-c:0"],
+                "current_label": ["Vehicle"],
+                "previous_labels": [None],
+                "status": ["ACTIVE"],
+            }
+        )
+        ledger["revisions"] = pd.DataFrame(
+            {
+                "serial": [0],
                 "concept_uri": ["ns-c:0"],
                 "revision_uri": ["ns-r:0"],
                 "previous_revision_uri": [None],
@@ -166,7 +246,7 @@ class TestValidateLedger:
         )
         ledger["variants"] = pd.DataFrame(
             {
-                "id": [0],
+                "serial": [0],
                 "concept_uri": ["ns-c:0"],
                 "variant_uri": ["ns-v:0"],
                 "revision_uri": ["ns-r:0"],
@@ -175,7 +255,7 @@ class TestValidateLedger:
         )
         ledger["bindings"] = pd.DataFrame(
             {
-                "id": [0],
+                "serial": [0],
                 "variant_uri": ["ns-v:0"],
                 "binding_uri": ["ns-b:0"],
                 "instance_label": ["Left"],
@@ -185,21 +265,21 @@ class TestValidateLedger:
         validate_ledger(ledger)  # must not raise
 
 
-class TestNextId:
+class TestNextSerial:
     def test_empty_table_returns_zero(self) -> None:
-        """No rows → next id is 0."""
-        df = pd.DataFrame(columns=["id"])
-        assert next_id(df) == 0
+        """No rows → next serial is 0."""
+        df = pd.DataFrame(columns=["serial"])
+        assert next_serial(df) == 0
 
     def test_returns_max_plus_one(self) -> None:
-        """Next id is one above the current maximum, regardless of row order."""
-        df = pd.DataFrame({"id": [0, 5, 3]})
-        assert next_id(df) == 6
+        """Next serial is one above the current maximum, regardless of row order."""
+        df = pd.DataFrame({"serial": [0, 5, 3]})
+        assert next_serial(df) == 6
 
     def test_single_row(self) -> None:
         """Single-row table gives max+1 correctly."""
-        df = pd.DataFrame({"id": [42]})
-        assert next_id(df) == 43
+        df = pd.DataFrame({"serial": [42]})
+        assert next_serial(df) == 43
 
 
 class TestReadWriteLedger:
@@ -208,7 +288,7 @@ class TestReadWriteLedger:
         ledger = empty_ledger()
         ledger["concepts"] = pd.DataFrame(
             {
-                "id": [0],
+                "serial": [0],
                 "concept_uri": ["ns-c:0"],
                 "current_label": ["Vehicle"],
                 "previous_labels": [None],
@@ -266,3 +346,42 @@ class TestValidateLedgerDir:
         (tmp_path / "stray.txt").write_text("oops")
         with pytest.raises(LedgerValidationError, match="unexpected files"):
             read_ledger(tmp_path)
+
+
+class TestB36:
+    def test_zero(self) -> None:
+        """Zero encodes to '0'."""
+        assert b36encode(0) == "0"
+
+    def test_single_digits(self) -> None:
+        """Values 1–9 encode as single decimal digits."""
+        assert b36encode(1) == "1"
+        assert b36encode(9) == "9"
+
+    def test_letter_range(self) -> None:
+        """Values 10–35 encode as a single lowercase letter (a–z)."""
+        assert b36encode(10) == "a"
+        assert b36encode(35) == "z"
+
+    def test_two_digit_boundary(self) -> None:
+        """36 is the first two-character value ('10' in base 36)."""
+        assert b36encode(36) == "10"
+
+    def test_known_values(self) -> None:
+        """Spot-check values used in README examples."""
+        assert b36encode(24) == "o"
+        assert b36encode(25) == "p"
+        assert b36encode(40) == "14"
+        assert b36encode(56) == "1k"
+        assert b36encode(57) == "1l"
+        assert b36encode(103) == "2v"
+
+    def test_roundtrip(self) -> None:
+        """b36decode(b36encode(n)) == n for a range of values."""
+        for n in (0, 1, 35, 36, 100, 999, 123456):
+            assert b36decode(b36encode(n)) == n
+
+    def test_negative_raises(self) -> None:
+        """Negative input raises ValueError."""
+        with pytest.raises(ValueError, match="non-negative"):
+            b36encode(-1)
