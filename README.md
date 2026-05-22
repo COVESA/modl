@@ -92,7 +92,7 @@ For example, if `datatype` is declared essential for `Vehicle.Speed`:
 | variant_uri | Snapshot | Status |
 |---|---|---|
 | `http://namespace.example/variants/10` | `Vehicle.Speed { datatype: Int }` | SUPERSEDED |
-| `http://namespace.example/variants/40` | `Vehicle.Speed { datatype: Float }` | ACTIVE |
+| `http://namespace.example/variants/14` | `Vehicle.Speed { datatype: Float }` | ACTIVE |
 
 These are two variants of the same concept — the meaning of "speed" has not changed, but the data contract has.
 
@@ -104,10 +104,10 @@ Some modeling languages let you specify **instances** of an entity, which expand
 
 For `Vehicle.Door` with `instances: [Left, Right]`, the field `Door.IsOpen` expands into:
 
-| binding_uri | Runtime path |
-|---|---|
-| `http://namespace.example/bindings/24` | `Vehicle.Door.Left.IsOpen` |
-| `http://namespace.example/bindings/25` | `Vehicle.Door.Right.IsOpen` |
+| serial | binding_uri | Runtime path |
+|---|---|---|
+| 24 | `http://namespace.example/bindings/o` | `Vehicle.Door.Left.IsOpen` |
+| 25 | `http://namespace.example/bindings/p` | `Vehicle.Door.Right.IsOpen` |
 
 A system can then write a compact payload like `24: true` to mean *"the left door is open"*, without encoding the full path.
 
@@ -126,9 +126,23 @@ In the non-breaking case, existing binding IDs remain stable and consumers are u
 
 ## The Ledger Tables
 
+### Serial and URI minting
+
+Each record minted is assigned a `serial` number — a monotonically increasing non-negative integer, never reused. The serial is permanently baked into the record's Uniform Resource Identifier (URI):
+
+```
+uri = namespace + table_name + "/" + base36(serial)
+```
+
+Base36 uses alphabet `0-9a-z` (lowercase ASCII). Values 0–9 encode as single decimal digits, values 10–35 as single letters (`a`–`z`); larger values use multiple characters (e.g., serial 40 → `14`, serial 103 → `2v`).
+
+**Authorship rule:** the ledger contains only records minted by the project owner. Every row has a serial number and a URI under the project namespace. Foreign Key (FK) columns (`concept_uri`, `variant_uri`, etc.) may reference URIs from other namespaces — those are foreign references, not rows authored here.
+
+**Cross-namespace imports (Work in progress):** when a model references elements from an external project, the importing project ships its own ledger alongside a pruned copy of the external ledger containing only the referenced rows, annotated with provenance (source namespace, release URL, content hash).
+
 ### `concepts.csv`
 
-| id | concept_uri | current_label | previous_labels | status |
+| serial | concept_uri | current_label | previous_labels | status |
 |---|---|---|---|---|
 | 0 | `http://namespace.example/concepts/0` | Vehicle | — | ACTIVE |
 | 1 | `http://namespace.example/concepts/1` | Vehicle.Speed | Vehicle.Velocity | ACTIVE |
@@ -137,24 +151,24 @@ In the non-breaking case, existing binding IDs remain stable and consumers are u
 
 ### `revisions.csv`
 
-| id | concept_uri | revision_uri | previous_revision_uri | status |
+| serial | concept_uri | revision_uri | previous_revision_uri | status |
 |---|---|---|---|---|
-| 56 | `http://namespace.example/concepts/0` | `http://namespace.example/revisions/56` | — | ACTIVE |
-| 57 | `http://namespace.example/concepts/8` | `http://namespace.example/revisions/57` | — | SUPERSEDED |
-| 103 | `http://namespace.example/concepts/8` | `http://namespace.example/revisions/103` | `http://namespace.example/revisions/57` | ACTIVE |
+| 56 | `http://namespace.example/concepts/0` | `http://namespace.example/revisions/1k` | — | ACTIVE |
+| 57 | `http://namespace.example/concepts/8` | `http://namespace.example/revisions/1l` | — | SUPERSEDED |
+| 103 | `http://namespace.example/concepts/8` | `http://namespace.example/revisions/2v` | `http://namespace.example/revisions/1l` | ACTIVE |
 
 ### `variants.csv`
 
-| id | concept_uri | variant_uri | revision_uri | status |
+| serial | concept_uri | variant_uri | revision_uri | status |
 |---|---|---|---|---|
-| 40 | `http://namespace.example/concepts/8` | `http://namespace.example/variants/40` | `http://namespace.example/revisions/103` | ACTIVE |
+| 40 | `http://namespace.example/concepts/8` | `http://namespace.example/variants/14` | `http://namespace.example/revisions/2v` | ACTIVE |
 
 ### `bindings.csv`
 
-| id | variant_uri | binding_uri | instance_label | status |
+| serial | variant_uri | binding_uri | instance_label | status |
 |---|---|---|---|---|
-| 24 | `http://namespace.example/variants/40` | `http://namespace.example/bindings/24` | Left | ACTIVE |
-| 25 | `http://namespace.example/variants/40` | `http://namespace.example/bindings/25` | Right | ACTIVE |
+| 24 | `http://namespace.example/variants/14` | `http://namespace.example/bindings/o` | Left | ACTIVE |
+| 25 | `http://namespace.example/variants/14` | `http://namespace.example/bindings/p` | Right | ACTIVE |
 
 ### Table relationships
 
@@ -166,30 +180,30 @@ erDiagram
     variants ||--o{ bindings : "expanded into"
 
     concepts {
-        int id PK
-        string concept_uri
+        int serial PK
+        string concept_uri UK
         string current_label
         string previous_labels
         string status
     }
     revisions {
-        int id PK
+        int serial PK
         string concept_uri FK
-        string revision_uri
-        string previous_revision_uri
+        string revision_uri UK
+        string previous_revision_uri FK
         string status
     }
     variants {
-        int id PK
+        int serial PK
         string concept_uri FK
-        string variant_uri
+        string variant_uri UK
         string revision_uri FK
         string status
     }
     bindings {
-        int id PK
+        int serial PK
         string variant_uri FK
-        string binding_uri
+        string binding_uri UK
         string instance_label
         string status
     }
