@@ -120,6 +120,20 @@ def validate_ledger(tables: dict[str, pd.DataFrame]) -> None:
             if df[col].duplicated().any():
                 raise LedgerValidationError(f"[{name}] Column '{col}' contains duplicate values")
 
+        # URI suffix must equal b36encode(serial): decode suffix and compare to serial
+        uri_col = UNIQUE_COLUMNS[name][1]
+        suffixes = df[uri_col].str.rsplit("/", n=1).str[-1]
+        try:
+            decoded_serials = suffixes.apply(b36decode)
+        except ValueError as exc:
+            raise LedgerValidationError(
+                f"[{name}] Column '{uri_col}' contains a URI with an invalid base-36 suffix: {exc}"
+            ) from exc
+        mismatch_mask = decoded_serials.values != df["serial"].values
+        if mismatch_mask.any():
+            bad = df[mismatch_mask][["serial", uri_col]].values.tolist()
+            raise LedgerValidationError(f"[{name}] URI suffix does not match base-36 encoding of serial: {bad}")
+
         # Valid status values
         invalid = set(df["status"].dropna().unique()) - VALID_STATUSES
         if invalid:

@@ -127,7 +127,7 @@ class TestValidateLedger:
         ledger["concepts"] = pd.DataFrame(
             {
                 "serial": [0],
-                "concept_uri": ["ns-c:0"],
+                "concept_uri": ["http://ns.example/concepts/0"],
                 "current_label": ["Vehicle"],
                 "previous_labels": [None],
                 "status": ["PENDING"],
@@ -142,8 +142,8 @@ class TestValidateLedger:
         ledger["revisions"] = pd.DataFrame(
             {
                 "serial": [0],
-                "concept_uri": ["ns-c:99"],  # does not exist in concepts
-                "revision_uri": ["ns-r:0"],
+                "concept_uri": ["http://ns.example/concepts/2v"],  # does not exist in concepts
+                "revision_uri": ["http://ns.example/revisions/0"],
                 "previous_revision_uri": [None],
                 "status": ["ACTIVE"],
             }
@@ -166,13 +166,43 @@ class TestValidateLedger:
         with pytest.raises(LedgerValidationError, match="negative"):
             validate_ledger(ledger)
 
+    def test_uri_suffix_mismatch_raises(self) -> None:
+        """URI suffix that does not match base-36 encoding of serial triggers validation failure."""
+        ledger = empty_ledger()
+        ledger["concepts"] = pd.DataFrame(
+            {
+                "serial": [1],
+                "concept_uri": ["http://ns.example/concepts/z"],  # z = b36(35), not b36(1)
+                "current_label": ["Vehicle"],
+                "previous_labels": [None],
+                "status": ["ACTIVE"],
+            }
+        )
+        with pytest.raises(LedgerValidationError, match="URI suffix does not match"):
+            validate_ledger(ledger)
+
+    def test_uri_suffix_invalid_b36_raises(self) -> None:
+        """URI suffix that is not valid base-36 triggers validation failure."""
+        ledger = empty_ledger()
+        ledger["concepts"] = pd.DataFrame(
+            {
+                "serial": [0],
+                "concept_uri": ["http://ns.example/concepts/NOT_B36!"],
+                "current_label": ["Vehicle"],
+                "previous_labels": [None],
+                "status": ["ACTIVE"],
+            }
+        )
+        with pytest.raises(LedgerValidationError, match="invalid base-36 suffix"):
+            validate_ledger(ledger)
+
     def test_self_fk_previous_revision_raises(self) -> None:
         """previous_revision_uri referencing a non-existent revision_uri triggers validation failure."""
         ledger = empty_ledger()
         ledger["concepts"] = pd.DataFrame(
             {
                 "serial": [0],
-                "concept_uri": ["ns-c:0"],
+                "concept_uri": ["http://ns.example/concepts/0"],
                 "current_label": ["Vehicle"],
                 "previous_labels": [None],
                 "status": ["ACTIVE"],
@@ -181,9 +211,9 @@ class TestValidateLedger:
         ledger["revisions"] = pd.DataFrame(
             {
                 "serial": [0],
-                "concept_uri": ["ns-c:0"],
-                "revision_uri": ["ns-r:0"],
-                "previous_revision_uri": ["ns-r:99"],  # does not exist
+                "concept_uri": ["http://ns.example/concepts/0"],
+                "revision_uri": ["http://ns.example/revisions/0"],
+                "previous_revision_uri": ["http://ns.example/revisions/2v"],  # does not exist
                 "status": ["ACTIVE"],
             }
         )
@@ -196,7 +226,7 @@ class TestValidateLedger:
         ledger["concepts"] = pd.DataFrame(
             {
                 "serial": [0, 1],
-                "concept_uri": ["ns-c:0", "ns-c:1"],
+                "concept_uri": ["http://ns.example/concepts/0", "http://ns.example/concepts/1"],
                 "current_label": ["Vehicle", "Door"],
                 "previous_labels": [None, None],
                 "status": ["ACTIVE", "ACTIVE"],
@@ -205,8 +235,8 @@ class TestValidateLedger:
         ledger["revisions"] = pd.DataFrame(
             {
                 "serial": [0],
-                "concept_uri": ["ns-c:0"],  # revision belongs to concept 0
-                "revision_uri": ["ns-r:0"],
+                "concept_uri": ["http://ns.example/concepts/0"],  # revision belongs to concept 0
+                "revision_uri": ["http://ns.example/revisions/0"],
                 "previous_revision_uri": [None],
                 "status": ["ACTIVE"],
             }
@@ -214,9 +244,9 @@ class TestValidateLedger:
         ledger["variants"] = pd.DataFrame(
             {
                 "serial": [0],
-                "concept_uri": ["ns-c:1"],  # variant claims concept 1
-                "variant_uri": ["ns-v:0"],
-                "revision_uri": ["ns-r:0"],  # but revision belongs to concept 0
+                "concept_uri": ["http://ns.example/concepts/1"],  # variant claims concept 1
+                "variant_uri": ["http://ns.example/variants/0"],
+                "revision_uri": ["http://ns.example/revisions/0"],  # but revision belongs to concept 0
                 "status": ["ACTIVE"],
             }
         )
@@ -229,7 +259,7 @@ class TestValidateLedger:
         ledger["concepts"] = pd.DataFrame(
             {
                 "serial": [0],
-                "concept_uri": ["ns-c:0"],
+                "concept_uri": ["http://ns.example/concepts/0"],
                 "current_label": ["Vehicle"],
                 "previous_labels": [None],
                 "status": ["ACTIVE"],
@@ -238,8 +268,8 @@ class TestValidateLedger:
         ledger["revisions"] = pd.DataFrame(
             {
                 "serial": [0],
-                "concept_uri": ["ns-c:0"],
-                "revision_uri": ["ns-r:0"],
+                "concept_uri": ["http://ns.example/concepts/0"],
+                "revision_uri": ["http://ns.example/revisions/0"],
                 "previous_revision_uri": [None],
                 "status": ["ACTIVE"],
             }
@@ -247,17 +277,17 @@ class TestValidateLedger:
         ledger["variants"] = pd.DataFrame(
             {
                 "serial": [0],
-                "concept_uri": ["ns-c:0"],
-                "variant_uri": ["ns-v:0"],
-                "revision_uri": ["ns-r:0"],
+                "concept_uri": ["http://ns.example/concepts/0"],
+                "variant_uri": ["http://ns.example/variants/0"],
+                "revision_uri": ["http://ns.example/revisions/0"],
                 "status": ["ACTIVE"],
             }
         )
         ledger["bindings"] = pd.DataFrame(
             {
                 "serial": [0],
-                "variant_uri": ["ns-v:0"],
-                "binding_uri": ["ns-b:0"],
+                "variant_uri": ["http://ns.example/variants/0"],
+                "binding_uri": ["http://ns.example/bindings/0"],
                 "instance_label": ["Left"],
                 "status": ["ACTIVE"],
             }
@@ -289,7 +319,7 @@ class TestReadWriteLedger:
         ledger["concepts"] = pd.DataFrame(
             {
                 "serial": [0],
-                "concept_uri": ["ns-c:0"],
+                "concept_uri": ["http://ns.example/concepts/0"],
                 "current_label": ["Vehicle"],
                 "previous_labels": [None],
                 "status": ["ACTIVE"],
