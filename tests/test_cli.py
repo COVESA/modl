@@ -55,6 +55,42 @@ class TestCli:
         assert result.exit_code == 0
         assert "diff.json" in caplog.text
 
+    def test_sync_invalid_diff_report_errors(self, tmp_path: Path) -> None:
+        """Malformed diff report JSON causes non-zero exit."""
+        config = tmp_path / "modl.yaml"
+        config.write_text("namespace:\n  namespace: http://example.org/myns/\n")
+        diff = tmp_path / "diff.json"
+        diff.write_text('{"changes": [{"label": "X", "kind": "INVALID_KIND", "change_type": "ADDED"}]}')
+        result = CliRunner().invoke(
+            cli,
+            ["sync", "--diff-report", str(diff), "--ledger-dir", str(tmp_path / "ledger"), "--config", str(config)],
+        )
+        assert result.exit_code != 0
+
+    def test_sync_strict_flag_fails_on_unknown_aspects(self, tmp_path: Path) -> None:
+        """--strict causes non-zero exit when diff report has unconfigured aspect keys."""
+        config = tmp_path / "modl.yaml"
+        config.write_text("namespace:\n  namespace: http://example.org/myns/\n")
+        diff = tmp_path / "diff.json"
+        diff.write_text(
+            '{"changes": [{"label": "X.speed", "parent_label": "X", "kind": "PROPERTY",'
+            ' "change_type": "MODIFIED", "aspects": {"unit": "mph"}}]}'
+        )
+        result = CliRunner().invoke(
+            cli,
+            [
+                "sync",
+                "--diff-report",
+                str(diff),
+                "--ledger-dir",
+                str(tmp_path / "ledger"),
+                "--config",
+                str(config),
+                "--strict",
+            ],
+        )
+        assert result.exit_code != 0
+
     def test_sync_missing_config_errors(self, tmp_path: Path) -> None:
         """Non-existent config file causes non-zero exit."""
         result = CliRunner().invoke(

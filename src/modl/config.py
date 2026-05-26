@@ -45,27 +45,49 @@ class NamespaceConfig(BaseModel):
         return f"{self.namespace}{table}"
 
 
-class ElementBreakingConfig(BaseModel):
-    """Attributes whose change triggers a new variant (i.e., a breaking change) for an element kind."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    essential_attributes: list[str] = Field(default_factory=list)
-
-
 class BreakingChangeConfig(BaseModel):
-    """Root configuration for a modl project, combining namespace settings and per-kind breaking change rules."""
+    """Root configuration for a modl project, combining namespace settings and per-kind breaking change rules.
+
+    ``entity`` and ``property`` are flat mappings from aspect key name to a boolean:
+
+    - ``true``  — the aspect is **breaking**; a change triggers a new variant.
+    - ``false`` — the aspect is **known but non-breaking**; changes are silently accepted.
+    - *absent*  — the aspect is **unknown**; changes produce a warning (or error with ``--strict``).
+
+    The reserved key ``name`` governs rename events (``renamed_from`` set on a change event).
+    It never appears in ``aspects`` on a diff event — it is checked via *renamed_from* only.
+
+    Example::
+
+        entity:
+          instances: true   # breaking
+          type: true        # breaking
+          name: false       # renames are non-breaking, suppress warnings
+
+        property:
+          output_type: true  # breaking
+          unit: true         # breaking
+          description: false # known, non-breaking — suppress warnings
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     namespace: NamespaceConfig
-    entity: ElementBreakingConfig = Field(default_factory=ElementBreakingConfig)
-    property: ElementBreakingConfig = Field(default_factory=ElementBreakingConfig)
+    entity: dict[str, bool] = Field(default_factory=dict)
+    property: dict[str, bool] = Field(default_factory=dict)
 
-    def is_breaking(self, kind: ElementKind, changed_attributes: dict[str, Any]) -> bool:
-        """Indicate whether any changed attribute is essential for the given element kind."""
+    def is_breaking(self, kind: ElementKind, aspects: dict[str, Any], renamed_from: str | None = None) -> bool:
+        """Indicate whether a MODIFIED event constitutes a breaking change for the given element kind.
+
+        Returns ``True`` when any of the following holds:
+
+        - *renamed_from* is set and ``name`` maps to ``true`` in the config for that kind.
+        - Any key in *aspects* maps to ``true`` in the config for that kind.
+        """
         cfg = self.entity if kind == ElementKind.ENTITY else self.property
-        return any(attr in cfg.essential_attributes for attr in changed_attributes)
+        if renamed_from is not None and cfg.get("name") is True:
+            return True
+        return any(cfg.get(aspect) is True for aspect in aspects)
 
     @classmethod
     def from_yaml(cls, path: Path) -> BreakingChangeConfig:

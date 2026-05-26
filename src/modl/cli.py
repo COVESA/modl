@@ -7,6 +7,7 @@ from rich.traceback import install
 
 from . import __version__, log
 from .config import BreakingChangeConfig
+from .ir import DiffReport, validate_report_aspects
 from .ledger import LedgerValidationError, empty_ledger, read_ledger, validate_ledger_dir, write_ledger
 
 
@@ -57,7 +58,14 @@ def cli(ctx: click.Context, log_level: str, log_file: Path | None) -> None:
     help="Path to the breaking change config YAML file",
 )
 @click.option("-n", "--dry-run", is_flag=True, default=False, help="Preview changes without writing to disk")
-def sync(diff_report: Path | None, ledger_dir: Path, config: Path, dry_run: bool) -> None:
+@click.option(
+    "-s",
+    "--strict",
+    is_flag=True,
+    default=False,
+    help="Treat unconfigured aspect keys in the diff report as errors instead of warnings",
+)
+def sync(diff_report: Path | None, ledger_dir: Path, config: Path, dry_run: bool, strict: bool) -> None:
     """Synchronise the ledger with a diff report, or initialise it if none exists."""
     try:
         cfg = BreakingChangeConfig.from_yaml(config)
@@ -92,6 +100,23 @@ def sync(diff_report: Path | None, ledger_dir: Path, config: Path, dry_run: bool
             log.info("No diff report provided — existing ledger unchanged")
     else:
         log.info("Diff report: %s", diff_report)
+        try:
+            report = DiffReport.from_json(diff_report.read_text())
+        except PydanticValidationError as exc:
+            for error in exc.errors():
+                log.error("Invalid diff report — %s: %s", " → ".join(str(loc) for loc in error["loc"]), error["msg"])
+            raise SystemExit(1) from exc
+
+        structural_warnings = report.validate_structure(strict=strict)
+        for w in structural_warnings:
+            log.warning("Diff report: %s", w)
+
+        aspect_warnings = validate_report_aspects(report, cfg, strict=strict)
+        for w in aspect_warnings:
+            log.warning("Diff report: %s", w)
+
+        if strict and (structural_warnings or aspect_warnings):
+            raise SystemExit(1)
 
     if dry_run:
         log.info("Dry run — no changes will be written")

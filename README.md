@@ -124,6 +124,26 @@ When a new instance is added (e.g., `Center`), the behavior depends on the break
 
 In the non-breaking case, existing binding IDs remain stable and consumers are unaffected. Binding sets under a variant are **append-only**.
 
+### What each event writes to the ledger
+
+The table below shows which rows `modl sync` creates or updates for each type of change event, given the breaking-change classification configured by the user.
+
+| Event | concepts | revisions | variants | bindings |
+|---|---|---|---|---|
+| Entity `ADDED` | new row | new row | new row (initial variant) | — |
+| Entity `MODIFIED`, non-breaking | update `current_label` if renamed | new row | — (unchanged) | — |
+| Entity `MODIFIED`, breaking | update `current_label` if renamed | new row | new row | new rows for all child properties |
+| Entity `REMOVED` | status → SUPERSEDED | new row | status → SUPERSEDED | status → SUPERSEDED |
+| Property `ADDED` | new row | new row | new row (initial variant) | new rows if parent has instances |
+| Property `MODIFIED`, non-breaking | update `current_label` if renamed | new row | — (unchanged) | — |
+| Property `MODIFIED`, breaking | update `current_label` if renamed | new row | new row | new rows (anchored to new variant) |
+| Property `REMOVED` | status → SUPERSEDED | new row | status → SUPERSEDED | status → SUPERSEDED |
+
+Key observations:
+- Every event produces a revision — the revision log is unconditional and unfiltered.
+- A variant is only created or superseded when a change is classified as breaking by the config. Non-breaking changes leave the active variant untouched, so any system holding a variant URI or binding URI is unaffected.
+- A rename never changes the concept URI. It updates `current_label` and appends the old label to `previous_labels` in the concept row.
+
 ## The Ledger Tables
 
 ### Serial and URI minting
@@ -212,22 +232,23 @@ erDiagram
 
 ## Usage
 
-The following commands assume an active enrironment, see [CONTRIBUTING](./CONTRIBUTING.md) for instructions on how to set it up.
+The following commands assume an active environment, see [CONTRIBUTING](./CONTRIBUTING.md) for instructions on how to set it up.
 
 ### `modl sync`
 
 Synchronises the ledger with a diff report. If no ledger exists yet, it is created. If no diff report is provided, an empty ledger is initialised.
 
 ```shell
-modl sync [DIFF_REPORT] --ledger-dir PATH --config PATH [--dry-run]
+modl sync --ledger-dir PATH --config PATH [--diff-report PATH] [--dry-run] [--strict]
 ```
 
-| Argument / Option | Description |
+| Option | Description |
 |---|---|
-| `DIFF_REPORT` | Path to the diff report JSON file (optional). Omit to initialise an empty ledger. |
-| `--ledger-dir` | Directory where the four ledger CSV files are read from and written to. |
-| `--config` | Path to the breaking change config YAML file. |
-| `--dry-run` | Preview what would change without writing anything to disk. Exits with code `1` if changes would be made. |
+| `-d`, `--diff-report` | Path to the diff report JSON file (optional). Omit to initialise an empty ledger. |
+| `-o`, `--ledger-dir` | Directory where the four ledger CSV files are read from and written to. |
+| `-c`, `--config` | Path to the breaking change config YAML file. |
+| `-n`, `--dry-run` | Preview what would change without writing anything to disk. Exits with code `1` if changes would be made. |
+| `-s`, `--strict` | Treat aspect keys in the diff report that are not declared in the config as errors instead of warnings. |
 
 #### Config file format
 
@@ -237,51 +258,132 @@ namespace:
   prefix: "ns"                            # optional display alias; used by inspection commands to shorten output
 
 entity:
-  essential_attributes:
-    - instances   # a change to the instance list is a breaking change
-    - type
+  instances: true   # breaking — triggers a new variant
+  type: true        # breaking — triggers a new variant
+  name: false       # renames are non-breaking; suppresses --strict warnings
 
 property:
-  essential_attributes:
-    - datatype    # standard attribute
-    - unit        # standard attribute
-    - accuracy    # user-defined domain-specific attribute
+  output_type: true  # breaking — triggers a new variant
+  unit: true         # breaking — triggers a new variant
+  accuracy: true     # user-defined domain-specific attribute
+  description: false # known, non-breaking; suppresses --strict warnings
 ```
 
 Only `namespace.namespace` is required. The `entity` and `property` sections default to empty — all changes are treated as non-breaking if omitted.
 
+Each key maps to a boolean with three distinct states:
+
+| Value | Meaning |
+|---|---|
+| `true` | Aspect is **breaking** — a change triggers a new variant. |
+| `false` | Aspect is **known but non-breaking** — changes are silently accepted; no warning even with `--strict`. |
+| *(absent)* | Aspect is **unknown** — treated as non-breaking but produces a warning (error with `--strict`). |
+
+The reserved key `name` governs rename events (`renamed_from` set on a diff event). It never appears in `aspects` — it is checked separately via `renamed_from`.
+
 #### Diff report format
 
-The diff report is a JSON file that describes what changed between two model snapshots. It uses the intermediate representation that `modl` understands:
+The diff report is a JSON file produced by a language-specific adapter (e.g. for vspec, GraphQL SDL). It describes what changed between two model snapshots using `modl`'s intermediate representation.
 
-```json
-{
-  "changes": [
-    {
-      "label": "Vehicle.Door",
-      "kind": "ENTITY",
-      "change_type": "MODIFIED",
-      "changed_attributes": { "instances": ["Left", "Right", "Center"] }
-    },
-    {
-      "label": "Vehicle.Speed",
-      "parent_label": "Vehicle",
-      "kind": "PROPERTY",
-      "change_type": "MODIFIED",
-      "changed_attributes": { "datatype": "Float" }
-    }
-  ]
-}
-```
+Each change event covers either an **entity** (container, object type, branch) or a **property** (field, attribute, signal). Key fields:
 
 | Field | Values |
 |---|---|
-| `kind` | `ENTITY` (branch/object type/class) or `PROPERTY` (field/attribute/signal) |
+| `kind` | `ENTITY` or `PROPERTY` |
 | `change_type` | `ADDED`, `REMOVED`, or `MODIFIED` |
-| `changed_attributes` | Key-value map of what changed. Required for `MODIFIED`; empty `{}` for `ADDED`/`REMOVED`. |
+| `aspects` | On `ADDED`: full initial-state snapshot. On `MODIFIED`: delta of changed keys only. Absent on `REMOVED`. |
+| `renamed_from` | Previous label when the element was renamed (`MODIFIED` only). |
 | `parent_label` | Required for `PROPERTY` — the label of the owning entity. |
+| `content` | `ENTITY` `MODIFIED` only — list of `{label, change_type}` for children that changed. |
 
-A language-specific adapter (e.g. for vspec, GraphQL SDL) is responsible for producing this JSON from a model diff.
+See [diff_report_template.md](diff_report_template.md) for the full field reference, rename semantics, examples, and an adapter implementation checklist.
+
+## Adoption Guide
+
+### 1. Define your model and take a snapshot
+
+Represent your domain model in your chosen modeling language (vspec, GraphQL SDL, JSON Schema, etc.). A **snapshot** is the complete state of the model at a point in time — a version-controlled file, a release artifact, or a git tag. The diff is always computed between two such snapshots: the previous release and the current one.
+
+### 2. Produce a diff between two snapshots
+
+Compare two snapshots of your model to enumerate what was added, removed, or modified. The mechanism depends on your modeling language:
+
+- **Text-based formats** (YAML, JSON): diff the files and post-process the output.
+- **Structured formats with tooling** (vspec, Protobuf): use the language's own comparison tool if one exists, or write a script that loads both snapshots and walks the element tree.
+- **Schema registries**: use the registry's diff API if available.
+
+For the first release there is no previous snapshot — treat every element as `ADDED`.
+
+### 3. Write an adapter that translates the diff into the ModL IR format
+
+The adapter is a script or tool — typically a short Python or shell program — that takes your language-specific diff output and writes a `diff.json` file in the [ModL intermediate representation](diff_report_template.md). At its simplest:
+
+```
+# pseudocode
+previous = load("model-v1.yaml")
+current  = load("model-v2.yaml")
+changes  = compare(previous, current)   # language-specific logic
+write_json("diff.json", to_modl_ir(changes))
+```
+
+The adapter is a one-time investment per modeling language. See [diff_report_template.md](diff_report_template.md) for the full field reference, rename semantics, and an adapter implementation checklist.
+
+### 4. Author a breaking-change config
+
+Create a YAML config that declares your project's namespace and which aspect keys constitute a breaking change. Start minimal — only `namespace` is required:
+
+```yaml
+namespace:
+  namespace: "https://myproject.org/model/"
+  prefix: "mp"
+```
+
+Add `entity` and `property` keys as you identify which attributes define your data contract. Use `true` for breaking aspects, `false` to explicitly mark a key as known-but-non-breaking (silences `--strict` warnings).
+
+### 5. Validate with a dry run
+
+Before touching the ledger, pass the diff report through `modl sync` with `--dry-run` and `--strict`:
+
+```shell
+modl sync --ledger-dir ledger/ --config modl.yaml --diff-report diff.json --dry-run --strict
+```
+
+Review any warnings about undeclared aspect keys. For each unknown key, decide: is it breaking (`true`) or intentionally non-breaking (`false`)? Update the config and re-run until the dry run is clean.
+
+### 6. Initialise the ledger
+
+On the first run, the ledger does not exist yet. `modl sync` creates it. For a first release where you want to capture the initial model state, pass the diff report that treats every element as `ADDED`. To start with an empty ledger and add history in subsequent syncs, omit `--diff-report`.
+
+```shell
+modl sync --ledger-dir ledger/ --config modl.yaml --diff-report initial_diff.json
+```
+
+Persist (e.g., release) the four generated CSV files (`concepts.csv`, `revisions.csv`, `variants.csv`, `bindings.csv`) alongside your model.
+
+### 7. Sync on every subsequent release
+
+For each new model release, produce a diff between the previous and current snapshots, run the adapter, and sync:
+
+```shell
+modl sync --ledger-dir ledger/ --config modl.yaml --diff-report diff.json
+```
+
+Persist (e.g., release) the updated ledger files with the latest composed model. The ledger is append-only — existing records are never modified, only new rows are added or existing ones marked `SUPERSEDED`.
+
+`modl sync` is designed to be a CI/CD step that runs automatically on every release. A typical pipeline stage looks like:
+
+```
+1. validate model
+2. run adapter → diff.json
+3. modl sync --ledger-dir ledger/ --config modl.yaml --diff-report diff.json --strict
+4. commit and tag updated ledger CSV files
+```
+
+### 8. Iterate on the config as the model evolves
+
+When the adapter emits a new aspect key that is not yet in the config, `modl` warns. Decide whether it is breaking or non-breaking and add it to the config. Run the dry run again to confirm the warning is resolved before syncing.
+
+
 
 ## Contributing
 
