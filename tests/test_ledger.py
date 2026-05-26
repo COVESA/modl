@@ -106,6 +106,47 @@ class TestValidateLedger:
         with pytest.raises(LedgerValidationError, match="duplicate"):
             validate_ledger(ledger)
 
+    def test_null_instance_label_in_bindings_is_valid(self) -> None:
+        """Null instance_label in bindings is permitted (singleton binding)."""
+        ledger = empty_ledger()
+        ledger["concepts"] = pd.DataFrame(
+            {
+                "serial": [0],
+                "concept_uri": ["http://ns.example/concepts/0"],
+                "current_label": ["Battery.StateOfCharge"],
+                "previous_labels": [None],
+                "status": ["ACTIVE"],
+            }
+        )
+        ledger["revisions"] = pd.DataFrame(
+            {
+                "serial": [0],
+                "concept_uri": ["http://ns.example/concepts/0"],
+                "revision_uri": ["http://ns.example/revisions/0"],
+                "previous_revision_uri": [None],
+                "status": ["ACTIVE"],
+            }
+        )
+        ledger["variants"] = pd.DataFrame(
+            {
+                "serial": [0],
+                "concept_uri": ["http://ns.example/concepts/0"],
+                "variant_uri": ["http://ns.example/variants/0"],
+                "revision_uri": ["http://ns.example/revisions/0"],
+                "status": ["ACTIVE"],
+            }
+        )
+        ledger["bindings"] = pd.DataFrame(
+            {
+                "serial": [0],
+                "variant_uri": ["http://ns.example/variants/0"],
+                "binding_uri": ["http://ns.example/bindings/0"],
+                "instance_label": [None],  # singleton — no instance label
+                "status": ["ACTIVE"],
+            }
+        )
+        validate_ledger(ledger)  # must not raise
+
     def test_null_required_field_raises(self) -> None:
         """Null in a required column triggers validation failure."""
         ledger = empty_ledger()

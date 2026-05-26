@@ -37,12 +37,12 @@ FK_CONSTRAINTS: list[tuple[str, str, str, str]] = [
 
 VALID_STATUSES = {s.value for s in ElementStatus}
 
-# Required (non-nullable) columns per table — previous_revision_uri is nullable
+# Required (non-nullable) columns per table — previous_revision_uri and instance_label are nullable
 REQUIRED_COLUMNS: dict[str, list[str]] = {
     "concepts": ["serial", "concept_uri", "current_label", "status"],
     "revisions": ["serial", "concept_uri", "revision_uri", "status"],
     "variants": ["serial", "concept_uri", "variant_uri", "revision_uri", "status"],
-    "bindings": ["serial", "variant_uri", "binding_uri", "instance_label", "status"],
+    "bindings": ["serial", "variant_uri", "binding_uri", "status"],
 }
 
 # ── Exception ─────────────────────────────────────────────────────────────────

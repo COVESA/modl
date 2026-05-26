@@ -96,3 +96,13 @@ class TestBindingRow:
             status=ElementStatus.ACTIVE,
         )
         assert row.instance_label == "Left"
+
+    def test_singleton_binding_no_instance_label(self) -> None:
+        """Binding with no instance label is valid (singleton — parent has no instances)."""
+        row = BindingRow(
+            serial=42,
+            variant_uri="ns-v:40",
+            binding_uri="ns-b:42",
+            status=ElementStatus.ACTIVE,
+        )
+        assert row.instance_label is None

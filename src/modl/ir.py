@@ -22,6 +22,15 @@ Aspect
     - ``is_list`` — ``True`` when the property resolves to a list of that type.
     - ``is_required`` — ``True`` when the value is guaranteed non-null / mandatory.
 
+    Two *canonical entity aspect keys* are also defined:
+
+    - ``binding`` — when ``False``, suppresses binding minting for all child properties of the
+      entity.  Use ``False`` for vocabulary entities (enums, units) that are not
+      runtime-addressable.  Set it once on the entity's ``ADDED`` event; the engine reads the
+      stored snapshot for every subsequent child property event.
+    - ``instances`` — carries the list of instance labels that expand the entity's properties
+      into runtime-addressable paths.
+
     All other keys are *adapter-defined*: the language adapter decides their names (e.g.
     ``"unit"``, ``"min"``, ``"accuracy"``).  The breaking-change config references them by
     their exact key name.
@@ -161,8 +170,11 @@ class DiffReport(BaseModel):
 
 # ── Config-aware validation ───────────────────────────────────────────────────
 
-#: Aspect keys that are always recognised regardless of user configuration.
+#: Aspect keys that are always recognised for **property** events regardless of user configuration.
 CANONICAL_ASPECT_KEYS: frozenset[str] = frozenset({"output_type", "is_list", "is_required"})
+
+#: Aspect keys that are always recognised for **entity** events regardless of user configuration.
+CANONICAL_ENTITY_ASPECT_KEYS: frozenset[str] = frozenset({"instances", "binding"})
 
 
 def validate_report_aspects(
@@ -185,7 +197,8 @@ def validate_report_aspects(
             continue
         cfg = config.entity if change.kind == ElementKind.ENTITY else config.property
         configured: set[str] = set(cfg.keys())
-        unknown = set(change.aspects.keys()) - configured - CANONICAL_ASPECT_KEYS
+        canonical = CANONICAL_ENTITY_ASPECT_KEYS if change.kind == ElementKind.ENTITY else CANONICAL_ASPECT_KEYS
+        unknown = set(change.aspects.keys()) - configured - canonical
         for key in sorted(unknown):
             warnings.append(
                 f"[{change.label}] Aspect key '{key}' is not declared in the breaking-change config "

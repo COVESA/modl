@@ -6,6 +6,7 @@ from pydantic import ValidationError
 from modl.config import BreakingChangeConfig
 from modl.ir import (
     CANONICAL_ASPECT_KEYS,
+    CANONICAL_ENTITY_ASPECT_KEYS,
     ChangeType,
     ContentItem,
     DiffReport,
@@ -572,3 +573,51 @@ class TestCanonicalAspectKeys:
     def test_canonical_set_contents(self) -> None:
         """Canonical aspect key set contains exactly the expected keys."""
         assert frozenset({"output_type", "is_list", "is_required"}) == CANONICAL_ASPECT_KEYS
+
+
+# ── CANONICAL_ENTITY_ASPECT_KEYS ───────────────────────────────────────────────────────────────────
+
+
+class TestCanonicalEntityAspectKeys:
+    def test_canonical_entity_set_contents(self) -> None:
+        """Entity canonical aspect key set contains exactly instances and binding."""
+        assert frozenset({"instances", "binding"}) == CANONICAL_ENTITY_ASPECT_KEYS
+
+    def test_binding_key_on_entity_modified_no_warning(self) -> None:
+        """The canonical 'binding' key on an entity MODIFIED event never produces a warning."""
+        report = DiffReport.from_json(
+            __import__("json").dumps(
+                {
+                    "changes": [
+                        {
+                            "label": "SpeedUnit",
+                            "kind": "ENTITY",
+                            "change_type": "MODIFIED",
+                            "aspects": {"binding": False},
+                        }
+                    ]
+                }
+            )
+        )
+        cfg = _config()  # no entity aspects configured
+        assert validate_report_aspects(report, cfg) == []
+
+    def test_instances_key_on_entity_modified_no_warning(self) -> None:
+        """The canonical 'instances' key on an entity MODIFIED event never produces a warning."""
+        report = DiffReport.from_json(
+            __import__("json").dumps(
+                {
+                    "changes": [
+                        {
+                            "label": "Vehicle.Door",
+                            "kind": "ENTITY",
+                            "change_type": "MODIFIED",
+                            "aspects": {"instances": ["Left", "Right"]},
+                            "content": [],
+                        }
+                    ]
+                }
+            )
+        )
+        cfg = _config()  # no entity aspects configured
+        assert validate_report_aspects(report, cfg) == []

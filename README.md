@@ -100,7 +100,7 @@ Variants apply to **both entities and fields**. An entity's essential metadata (
 
 ### Bindings
 
-Some modeling languages let you specify **instances** of an entity, which expands its fields into multiple addressable runtime paths. Bindings assign a stable identity to each of those paths.
+Bindings assign a stable identity to every runtime-addressable path a property can appear on.
 
 For `Vehicle.Door` with `instances: [Left, Right]`, the field `Door.IsOpen` expands into:
 
@@ -111,7 +111,13 @@ For `Vehicle.Door` with `instances: [Left, Right]`, the field `Door.IsOpen` expa
 
 A system can then write a compact payload like `24: true` to mean *"the left door is open"*, without encoding the full path.
 
-> **Note:** Bindings are assigned to **fields only**. Entities have concepts, revisions, and variants, but they are not directly addressable at runtime and therefore have no bindings.
+For a property whose parent entity has no instances (e.g., `Battery.StateOfCharge`), one binding is still minted with no instance label:
+
+| serial | binding_uri | Runtime path |
+|---|---|---|
+| 42 | `http://namespace.example/bindings/16` | `Battery.StateOfCharge` |
+
+> **Note:** Bindings are assigned to **fields only**. Entities have concepts, revisions, and variants, but they are not directly addressable at runtime and therefore have no bindings. Vocabulary entities (enums, units) additionally carry `binding: false` in their entity aspects, which suppresses binding minting for all their child properties.
 
 #### Instance expansion behavior
 
@@ -134,7 +140,7 @@ The table below shows which rows `modl sync` creates or updates for each type of
 | Entity `MODIFIED`, non-breaking | update `current_label` if renamed | new row | — (unchanged) | — |
 | Entity `MODIFIED`, breaking | update `current_label` if renamed | new row | new row | new rows for all child properties |
 | Entity `REMOVED` | status → SUPERSEDED | new row | status → SUPERSEDED | status → SUPERSEDED |
-| Property `ADDED` | new row | new row | new row (initial variant) | new rows if parent has instances |
+| Property `ADDED` | new row | new row | new row (initial variant) | new binding per instance; one singleton if no instances |
 | Property `MODIFIED`, non-breaking | update `current_label` if renamed | new row | — (unchanged) | — |
 | Property `MODIFIED`, breaking | update `current_label` if renamed | new row | new row | new rows (anchored to new variant) |
 | Property `REMOVED` | status → SUPERSEDED | new row | status → SUPERSEDED | status → SUPERSEDED |
@@ -189,6 +195,9 @@ Base36 uses alphabet `0-9a-z` (lowercase ASCII). Values 0–9 encode as single d
 |---|---|---|---|---|
 | 24 | `http://namespace.example/variants/14` | `http://namespace.example/bindings/o` | Left | ACTIVE |
 | 25 | `http://namespace.example/variants/14` | `http://namespace.example/bindings/p` | Right | ACTIVE |
+| 42 | `http://namespace.example/variants/1e` | `http://namespace.example/bindings/16` | *(null)* | ACTIVE |
+
+The third row is a **singleton binding** — `Battery.StateOfCharge` whose parent has no instances. `instance_label` is null; the binding still provides a stable, versioned identity for the runtime path.
 
 ### Table relationships
 

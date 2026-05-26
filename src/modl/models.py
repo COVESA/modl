@@ -56,5 +56,5 @@ class BindingRow(BaseModel):
     serial: int = Field(ge=0)
     variant_uri: str
     binding_uri: str
-    instance_label: str
+    instance_label: str | None = None
     status: ElementStatus
