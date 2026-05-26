@@ -117,7 +117,7 @@ For a property whose parent entity has no instances (e.g., `Battery.StateOfCharg
 |---|---|---|
 | 42 | `http://namespace.example/bindings/16` | `Battery.StateOfCharge` |
 
-> **Note:** Bindings are assigned to **fields only**. Entities have concepts, revisions, and variants, but they are not directly addressable at runtime and therefore have no bindings. Vocabulary entities (enums, units) additionally carry `binding: false` in their entity aspects, which suppresses binding minting for all their child properties.
+> **Note:** Bindings are assigned to **`PROPERTY` concepts only**. `ENTITY` concepts are not directly addressable at runtime and therefore never receive bindings. Vocabulary kinds (`ENUMERATION_SET`, `ENUM_VALUE`) never receive bindings either. The engine reads the `kind` column of the concept row to enforce all three rules.
 
 #### Instance expansion behavior
 
@@ -139,7 +139,7 @@ The table below shows which rows `modl sync` creates or updates for each type of
 | Entity `ADDED` | new row | new row | new row (initial variant) | — |
 | Entity `MODIFIED`, non-breaking | update `current_label` if renamed | new row | — (unchanged) | — |
 | Entity `MODIFIED`, breaking | update `current_label` if renamed | new row | new row | new rows for all child properties |
-| Entity `REMOVED` | status → SUPERSEDED | new row | status → SUPERSEDED | status → SUPERSEDED |
+| Entity `REMOVED` | status → SUPERSEDED | new row | status → SUPERSEDED | status → SUPERSEDED for child property bindings |
 | Property `ADDED` | new row | new row | new row (initial variant) | new binding per instance; one singleton if no instances |
 | Property `MODIFIED`, non-breaking | update `current_label` if renamed | new row | — (unchanged) | — |
 | Property `MODIFIED`, breaking | update `current_label` if renamed | new row | new row | new rows (anchored to new variant) |
@@ -168,12 +168,16 @@ Base36 uses alphabet `0-9a-z` (lowercase ASCII). Values 0–9 encode as single d
 
 ### `concepts.csv`
 
-| serial | concept_uri | current_label | previous_labels | status |
-|---|---|---|---|---|
-| 0 | `http://namespace.example/concepts/0` | Vehicle | — | ACTIVE |
-| 1 | `http://namespace.example/concepts/1` | Vehicle.Speed | Vehicle.Velocity | ACTIVE |
-| 2 | `http://namespace.example/concepts/2` | Vehicle.Door | — | ACTIVE |
-| 8 | `http://namespace.example/concepts/8` | Vehicle.Door.IsOpen | — | ACTIVE |
+| serial | concept_uri | current_label | previous_labels | kind | status |
+|---|---|---|---|---|---|
+| 0 | `http://namespace.example/concepts/0` | Vehicle | — | ENTITY | ACTIVE |
+| 1 | `http://namespace.example/concepts/1` | Vehicle.Speed | Vehicle.Velocity | PROPERTY | ACTIVE |
+| 2 | `http://namespace.example/concepts/2` | Vehicle.Door | — | ENTITY | ACTIVE |
+| 8 | `http://namespace.example/concepts/8` | Vehicle.Door.IsOpen | — | PROPERTY | ACTIVE |
+| 5 | `http://namespace.example/concepts/5` | SpeedUnit | — | ENUMERATION_SET | ACTIVE |
+| 6 | `http://namespace.example/concepts/6` | SpeedUnit.KMH | — | ENUM_VALUE | ACTIVE |
+
+The `kind` column records the structural kind of the concept permanently. Only `PROPERTY` concepts receive bindings. `ENTITY`, `ENUMERATION_SET`, and `ENUM_VALUE` concepts never do.
 
 ### `revisions.csv`
 
@@ -213,6 +217,7 @@ erDiagram
         string concept_uri UK
         string current_label
         string previous_labels
+        string kind
         string status
     }
     revisions {

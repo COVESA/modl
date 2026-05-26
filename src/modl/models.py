@@ -14,10 +14,21 @@ class ElementStatus(StrEnum):
 
 
 class ElementKind(StrEnum):
-    """Distinguishes top-level objects (ENTITY) from their fields (PROPERTY)."""
+    """Structural kind of a model element, stored permanently in concepts.csv.
+
+    The kind is set once when the concept is created and never changes.
+
+    - ``ENTITY``: top-level model container — receives concepts, revisions, variants; **no bindings**.
+    - ``PROPERTY``: field of an entity — receives concepts, revisions, variants, and **bindings**
+      (one per instance when the parent entity declares instances; one singleton otherwise).
+    - ``ENUMERATION_SET`` / ``ENUM_VALUE``: vocabulary elements (enums, units, code lists)
+      that receive concept URIs, revisions and variants but **no bindings**.
+    """
 
     ENTITY = "ENTITY"
     PROPERTY = "PROPERTY"
+    ENUMERATION_SET = "ENUMERATION_SET"
+    ENUM_VALUE = "ENUM_VALUE"
 
 
 class ConceptRow(BaseModel):
@@ -27,6 +38,7 @@ class ConceptRow(BaseModel):
     concept_uri: str
     current_label: str
     previous_labels: list[str] = Field(default_factory=list)
+    kind: ElementKind
     status: ElementStatus
 
 

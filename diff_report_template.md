@@ -124,7 +124,6 @@ The `changes` array is an ordered list of change events. Order does not affect c
 
 | Key | Type | Meaning |
 |---|---|---|
-| `binding` | `boolean` | When `false`, suppresses binding minting for all child properties of this entity. Set once on a vocabulary entity’s `ADDED` event; the engine reads it from the active variant snapshot for every subsequent child property event. Omit or set to `true` to enable binding minting (the default). |
 | `instances` | `string[]` | List of instance labels. Each label expands every child property into a separate runtime-addressable binding. |
 
 All other keys are **adapter-defined**. The adapter chooses their names. Examples: `unit`, `min`, `max`, `accuracy`, `description`. The breaking-change config references them by their exact key name.
@@ -173,22 +172,22 @@ The sync engine evaluates the rename and the aspect delta independently against 
 
 ## Vocabulary and governed elements
 
-Models often include shared vocabulary that properties reference — units of measurement, quantity kinds, code lists, enum types. These are first-class model elements with their own identity and change history. ModL treats them exactly like any other ENTITY or PROPERTY: they receive concept URIs, revisions, and variants, but **no bindings** (they are not runtime-addressable instance paths).
+Models often include shared vocabulary that properties reference — units of measurement, quantity kinds, code lists, enum types. These are first-class model elements with their own identity and change history. ModL treats them exactly like any other ENTITY or PROPERTY: they receive concept URIs, revisions, and variants, but **no bindings** (vocabulary elements are not runtime-addressable paths — and neither are ENTITY concepts; only PROPERTY concepts receive bindings).
 
 ### Mapping vocabulary to the IR
 
-The adapter decides how to represent vocabulary elements. Two common patterns:
+The adapter decides how to represent vocabulary elements. Declare the structural kind by setting the event’s `kind` field to `ENUMERATION_SET` (for the container) or `ENUM_VALUE` (for each member). `modl` reads this from the `kind` column of the concept row and suppresses binding minting automatically — no extra field or aspect is needed.
+
+Two common patterns:
 
 **GraphQL SDL** — a unit enum is a type with values:
 ```json
-{ "label": "SpeedUnit", "kind": "ENTITY", "change_type": "ADDED", "aspects": { "type": "enum", "binding": false } }
-{ "label": "SpeedUnit.KMH", "parent_label": "SpeedUnit", "kind": "PROPERTY", "change_type": "ADDED", "aspects": { "symbol": "km/h" } }
-{ "label": "SpeedUnit.MPH", "parent_label": "SpeedUnit", "kind": "PROPERTY", "change_type": "ADDED", "aspects": { "symbol": "mph" } }
+{ "label": "SpeedUnit", "kind": "ENUMERATION_SET", "change_type": "ADDED", "aspects": { "type": "enum" } }
+{ "label": "SpeedUnit.KMH", "parent_label": "SpeedUnit", "kind": "ENUM_VALUE", "change_type": "ADDED", "aspects": { "symbol": "km/h" } }
+{ "label": "SpeedUnit.MPH", "parent_label": "SpeedUnit", "kind": "ENUM_VALUE", "change_type": "ADDED", "aspects": { "symbol": "mph" } }
 ```
 
-Set `binding: false` on the vocabulary entity’s `ADDED` event — once. The engine reads it from the entity’s active variant snapshot when processing each child property event and suppresses binding minting automatically. You do not need to set it on child property events.
-
-**vspec** — units are declared in a flat YAML vocabulary file. The adapter can model them as a synthetic `Units` parent entity with each unit as a child property, or as standalone entities — whichever maps most naturally to the source format.
+**vspec** — units are declared in a flat YAML vocabulary file. The adapter can model them as a synthetic `Units` parent entity (`kind: ENUMERATION_SET`) with each unit as a child property (`kind: ENUM_VALUE`), or as standalone entities — whichever maps most naturally to the source format.
 
 The property canonical keys (`output_type`, `is_list`, `is_required`) carry no meaning for vocabulary elements and should be omitted. Use adapter-defined aspect keys instead (e.g., `symbol`, `definition`, `quantity_kind`).
 
@@ -217,11 +216,13 @@ The `unit` aspect value is treated as an opaque string by `modl`. Use a plain la
 
 | Element kind | concepts | revisions | variants | bindings |
 |---|---|---|---|---|
-| Vocabulary entity (e.g. `SpeedUnit`) | ✅ | ✅ | ✅ | ❌ |
-| Vocabulary property (e.g. `SpeedUnit.KMH`) | ✅ | ✅ | ✅ | ❌ |
-| Model property referencing a unit | ✅ | ✅ | ✅ | ✅ (one per instance; singleton if no instances) |
+| Model entity (`ENTITY`, e.g. `Vehicle.Door`) | ✅ | ✅ | ✅ | ❌ |
+| Model property (`PROPERTY`, parent has instances) | ✅ | ✅ | ✅ | ✅ one per instance |
+| Model property (`PROPERTY`, no instances) | ✅ | ✅ | ✅ | ✅ one singleton |
+| Vocabulary entity (`ENUMERATION_SET`, e.g. `SpeedUnit`) | ✅ | ✅ | ✅ | ❌ |
+| Vocabulary property (`ENUM_VALUE`, e.g. `SpeedUnit.KMH`) | ✅ | ✅ | ✅ | ❌ |
 
-Vocabulary entities suppress binding minting by setting `binding: false` in their `aspects` on the `ADDED` event (see [Entity canonical keys](#aspect-keys) above). The engine reads this value from the entity’s active variant snapshot; child property events carry nothing about it.
+The `kind` column in `concepts.csv` records the structural kind permanently. Only `PROPERTY` concepts receive bindings. `ENTITY`, `ENUMERATION_SET`, and `ENUM_VALUE` concepts never do — the ledger validator enforces this as a hard constraint.
 
 ---
 
@@ -339,7 +340,8 @@ Use this checklist when building an adapter for a new modeling language:
   - [ ] If the element was also modified in the same release, include both `renamed_from` and the changed keys in `aspects` within the same event
   - [ ] Detect changes to entity-level attributes → emit `MODIFIED` with changed keys in `aspects`
   - [ ] Detect added/removed/modified child properties → emit `MODIFIED` entity event with `content` summary **and** individual property events
-- [ ] For each vocabulary entity (enum type, unit group, code list): set `binding: false` in `aspects` on its `ADDED` event — this suppresses binding minting for all child properties; do **not** set it on child property events
+- [ ] For each vocabulary entity (enum type, unit group, code list): set `kind` to `ENUMERATION_SET` in the entity `ADDED` event
+- [ ] For each vocabulary property (enum value, unit entry): set `kind` to `ENUM_VALUE` in the property `ADDED` event
 - [ ] For each property that exists in current but not previous: emit `ADDED` property event with full `aspects`; include `output_type` for typed properties (signals, fields) — omit for vocabulary elements (enum values, unit definitions) where no type resolution is involved
 - [ ] For each property that exists in previous but not current: emit `REMOVED` property event
 - [ ] For each property that exists in both and has changed:
@@ -384,4 +386,4 @@ Each key maps to a boolean with three distinct states:
 | `false` | Aspect is **known but non-breaking** — changes are accepted silently; no warning even with `--strict`. |
 | *(absent)* | Aspect is **unknown** — treated as non-breaking but produces a warning (error with `--strict`). |
 
-The reserved key `name` governs rename events (`renamed_from` non-null on a `MODIFIED` event). It never appears in `aspects` — it controls only rename classification. Canonical keys (`output_type`, `is_list`, `is_required`) are always treated as known regardless of the config.
+The reserved key `name` governs rename events (`renamed_from` non-null on a `MODIFIED` event). It never appears in `aspects` — it controls only rename classification. Canonical property keys (`output_type`, `is_list`, `is_required`) and the entity canonical key (`instances`) are always treated as known regardless of the config.

@@ -580,32 +580,13 @@ class TestCanonicalAspectKeys:
 
 class TestCanonicalEntityAspectKeys:
     def test_canonical_entity_set_contents(self) -> None:
-        """Entity canonical aspect key set contains exactly instances and binding."""
-        assert frozenset({"instances", "binding"}) == CANONICAL_ENTITY_ASPECT_KEYS
-
-    def test_binding_key_on_entity_modified_no_warning(self) -> None:
-        """The canonical 'binding' key on an entity MODIFIED event never produces a warning."""
-        report = DiffReport.from_json(
-            __import__("json").dumps(
-                {
-                    "changes": [
-                        {
-                            "label": "SpeedUnit",
-                            "kind": "ENTITY",
-                            "change_type": "MODIFIED",
-                            "aspects": {"binding": False},
-                        }
-                    ]
-                }
-            )
-        )
-        cfg = _config()  # no entity aspects configured
-        assert validate_report_aspects(report, cfg) == []
+        """Entity canonical aspect key set contains only instances."""
+        assert frozenset({"instances"}) == CANONICAL_ENTITY_ASPECT_KEYS
 
     def test_instances_key_on_entity_modified_no_warning(self) -> None:
         """The canonical 'instances' key on an entity MODIFIED event never produces a warning."""
         report = DiffReport.from_json(
-            __import__("json").dumps(
+            json.dumps(
                 {
                     "changes": [
                         {
@@ -620,4 +601,88 @@ class TestCanonicalEntityAspectKeys:
             )
         )
         cfg = _config()  # no entity aspects configured
+        assert validate_report_aspects(report, cfg) == []
+
+
+# ── Vocabulary kinds (ENUMERATION_SET / ENUM_VALUE) ──────────────────────────────────────────────
+
+
+class TestVocabularyKinds:
+    def test_enumeration_set_entity_event(self) -> None:
+        """EntityChanged accepts ENUMERATION_SET kind."""
+        event = EntityChanged(
+            label="SpeedUnit",
+            kind=ElementKind.ENUMERATION_SET,
+            change_type=ChangeType.ADDED,
+            aspects={"type": "enum"},
+        )
+        assert event.kind == ElementKind.ENUMERATION_SET
+
+    def test_enum_value_property_event(self) -> None:
+        """PropertyChanged accepts ENUM_VALUE kind."""
+        event = PropertyChanged(
+            label="SpeedUnit.KMH",
+            parent_label="SpeedUnit",
+            kind=ElementKind.ENUM_VALUE,
+            change_type=ChangeType.ADDED,
+            aspects={"symbol": "km/h"},
+        )
+        assert event.kind == ElementKind.ENUM_VALUE
+
+    def test_enumeration_set_wrong_event_type_rejected(self) -> None:
+        """ENUMERATION_SET kind is rejected on PropertyChanged."""
+        with pytest.raises(ValidationError, match="PROPERTY or ENUM_VALUE"):
+            PropertyChanged(
+                label="SpeedUnit",
+                parent_label="Root",
+                kind=ElementKind.ENUMERATION_SET,
+                change_type=ChangeType.ADDED,
+            )
+
+    def test_enum_value_wrong_event_type_rejected(self) -> None:
+        """ENUM_VALUE kind is rejected on EntityChanged."""
+        with pytest.raises(ValidationError, match="ENTITY or ENUMERATION_SET"):
+            EntityChanged(
+                label="SpeedUnit.KMH",
+                kind=ElementKind.ENUM_VALUE,
+                change_type=ChangeType.ADDED,
+            )
+
+    def test_enumeration_set_event_uses_entity_config(self) -> None:
+        """ENUMERATION_SET MODIFIED events are checked against the entity config."""
+        report = DiffReport.from_json(
+            json.dumps(
+                {
+                    "changes": [
+                        {
+                            "label": "SpeedUnit",
+                            "kind": "ENUMERATION_SET",
+                            "change_type": "MODIFIED",
+                            "aspects": {"definition": "updated"},
+                        }
+                    ]
+                }
+            )
+        )
+        cfg = _config(entity={"definition": False})  # declared in entity config
+        assert validate_report_aspects(report, cfg) == []
+
+    def test_enum_value_event_uses_property_config(self) -> None:
+        """ENUM_VALUE MODIFIED events are checked against the property config."""
+        report = DiffReport.from_json(
+            json.dumps(
+                {
+                    "changes": [
+                        {
+                            "label": "SpeedUnit.KMH",
+                            "parent_label": "SpeedUnit",
+                            "kind": "ENUM_VALUE",
+                            "change_type": "MODIFIED",
+                            "aspects": {"symbol": "km/h"},
+                        }
+                    ]
+                }
+            )
+        )
+        cfg = _config(property_={"symbol": False})  # declared in property config
         assert validate_report_aspects(report, cfg) == []

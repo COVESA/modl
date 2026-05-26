@@ -22,18 +22,28 @@ Aspect
     - ``is_list`` — ``True`` when the property resolves to a list of that type.
     - ``is_required`` — ``True`` when the value is guaranteed non-null / mandatory.
 
-    Two *canonical entity aspect keys* are also defined:
+    One *canonical entity aspect key* is also defined:
 
-    - ``binding`` — when ``False``, suppresses binding minting for all child properties of the
-      entity.  Use ``False`` for vocabulary entities (enums, units) that are not
-      runtime-addressable.  Set it once on the entity's ``ADDED`` event; the engine reads the
-      stored snapshot for every subsequent child property event.
     - ``instances`` — carries the list of instance labels that expand the entity's properties
       into runtime-addressable paths.
 
     All other keys are *adapter-defined*: the language adapter decides their names (e.g.
     ``"unit"``, ``"min"``, ``"accuracy"``).  The breaking-change config references them by
     their exact key name.
+
+Vocabulary elements
+-------------------
+Shared vocabulary (enums, units, code lists) is represented using two dedicated
+:class:`~modl.models.ElementKind` values that the adapter sets on the event's ``kind`` field:
+
+- ``ENUMERATION_SET`` — a vocabulary entity (e.g. ``SpeedUnit``).  Use in
+  :class:`EntityChanged` events.
+- ``ENUM_VALUE`` — a child of a vocabulary entity (e.g. ``SpeedUnit.KMH``).  Use in
+  :class:`PropertyChanged` events.
+
+Vocabulary concepts receive concept URIs, revisions and variants in the ledger, but **no
+bindings**.  The sync engine reads the ``kind`` column of the concept row to decide whether
+binding minting applies — the adapter does not need to set anything extra.
 """
 
 from __future__ import annotations
@@ -71,6 +81,10 @@ class DiffReportValidationError(Exception):
 class EntityChanged(BaseModel):
     """A detected change on an entity (a.k.a. container, object type, branch, class).
 
+    For vocabulary entities (enum types, unit groups, code lists) set ``kind`` to
+    ``ENUMERATION_SET``.  The ledger will record concept URIs, revisions and variants
+    but suppress binding minting for all child properties.
+
     Payload rules by change_type:
 
     - ``ADDED``: ``aspects`` holds the full initial-state snapshot of the entity's attributes.
@@ -89,6 +103,8 @@ class EntityChanged(BaseModel):
 
     @model_validator(mode="after")
     def _validate_constraints(self) -> EntityChanged:
+        if self.kind not in {ElementKind.ENTITY, ElementKind.ENUMERATION_SET}:
+            raise ValueError(f"EntityChanged.kind must be ENTITY or ENUMERATION_SET, got {self.kind!r}")
         if self.change_type == ChangeType.REMOVED and (self.aspects or self.content):
             raise ValueError("REMOVED events must not carry aspects or content")
         if self.change_type == ChangeType.ADDED and self.content:
@@ -100,6 +116,9 @@ class EntityChanged(BaseModel):
 
 class PropertyChanged(BaseModel):
     """A detected change on a property of a parent entity (a.k.a. field, attribute, signal).
+
+    For vocabulary properties (enum values, unit entries) set ``kind`` to ``ENUM_VALUE``.
+    The ledger will record concept URIs, revisions and variants but suppress binding minting.
 
     Payload rules by change_type:
 
@@ -123,6 +142,8 @@ class PropertyChanged(BaseModel):
 
     @model_validator(mode="after")
     def _validate_constraints(self) -> PropertyChanged:
+        if self.kind not in {ElementKind.PROPERTY, ElementKind.ENUM_VALUE}:
+            raise ValueError(f"PropertyChanged.kind must be PROPERTY or ENUM_VALUE, got {self.kind!r}")
         if self.change_type == ChangeType.REMOVED and self.aspects:
             raise ValueError("REMOVED events must not carry aspects")
         if self.renamed_from is not None and self.change_type != ChangeType.MODIFIED:
@@ -174,7 +195,7 @@ class DiffReport(BaseModel):
 CANONICAL_ASPECT_KEYS: frozenset[str] = frozenset({"output_type", "is_list", "is_required"})
 
 #: Aspect keys that are always recognised for **entity** events regardless of user configuration.
-CANONICAL_ENTITY_ASPECT_KEYS: frozenset[str] = frozenset({"instances", "binding"})
+CANONICAL_ENTITY_ASPECT_KEYS: frozenset[str] = frozenset({"instances"})
 
 
 def validate_report_aspects(
@@ -195,9 +216,13 @@ def validate_report_aspects(
     for change in report.changes:
         if change.change_type != ChangeType.MODIFIED or not change.aspects:
             continue
-        cfg = config.entity if change.kind == ElementKind.ENTITY else config.property
+        cfg = config.entity if change.kind in {ElementKind.ENTITY, ElementKind.ENUMERATION_SET} else config.property
         configured: set[str] = set(cfg.keys())
-        canonical = CANONICAL_ENTITY_ASPECT_KEYS if change.kind == ElementKind.ENTITY else CANONICAL_ASPECT_KEYS
+        canonical = (
+            CANONICAL_ENTITY_ASPECT_KEYS
+            if change.kind in {ElementKind.ENTITY, ElementKind.ENUMERATION_SET}
+            else CANONICAL_ASPECT_KEYS
+        )
         unknown = set(change.aspects.keys()) - configured - canonical
         for key in sorted(unknown):
             warnings.append(

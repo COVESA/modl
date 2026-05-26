@@ -14,23 +14,57 @@ class TestElementStatus:
     def test_invalid_status_rejected(self) -> None:
         """Unknown status string fails pydantic validation."""
         with pytest.raises(ValidationError):
-            ConceptRow(serial=0, concept_uri="ns-c:0", current_label="Vehicle", status="UNKNOWN")  # ty: ignore[invalid-argument-type]
+            ConceptRow(
+                serial=0,
+                concept_uri="ns-c:0",
+                current_label="Vehicle",
+                kind=ElementKind.ENTITY,
+                status="UNKNOWN",  # ty: ignore[invalid-argument-type]
+            )
 
 
 class TestElementKind:
     def test_values(self) -> None:
-        """Both kind values are string-compatible."""
+        """All four kind values are string-compatible."""
         assert ElementKind.ENTITY == "ENTITY"
         assert ElementKind.PROPERTY == "PROPERTY"
+        assert ElementKind.ENUMERATION_SET == "ENUMERATION_SET"
+        assert ElementKind.ENUM_VALUE == "ENUM_VALUE"
 
 
 class TestConceptRow:
     def test_valid(self) -> None:
         """Minimal concept row; previous_labels defaults to empty list."""
-        row = ConceptRow(serial=0, concept_uri="ns-c:0", current_label="Vehicle", status=ElementStatus.ACTIVE)
+        row = ConceptRow(
+            serial=0,
+            concept_uri="ns-c:0",
+            current_label="Vehicle",
+            kind=ElementKind.ENTITY,
+            status=ElementStatus.ACTIVE,
+        )
         assert row.serial == 0
         assert row.previous_labels == []
+        assert row.kind == ElementKind.ENTITY
         assert row.status == ElementStatus.ACTIVE
+
+    def test_vocabulary_kinds(self) -> None:
+        """ENUMERATION_SET and ENUM_VALUE are accepted on ConceptRow."""
+        enum_set = ConceptRow(
+            serial=5,
+            concept_uri="ns-c:5",
+            current_label="SpeedUnit",
+            kind=ElementKind.ENUMERATION_SET,
+            status=ElementStatus.ACTIVE,
+        )
+        enum_val = ConceptRow(
+            serial=6,
+            concept_uri="ns-c:6",
+            current_label="SpeedUnit.KMH",
+            kind=ElementKind.ENUM_VALUE,
+            status=ElementStatus.ACTIVE,
+        )
+        assert enum_set.kind == ElementKind.ENUMERATION_SET
+        assert enum_val.kind == ElementKind.ENUM_VALUE
 
     def test_previous_labels(self) -> None:
         """previous_labels list is preserved as-is."""
@@ -39,6 +73,7 @@ class TestConceptRow:
             concept_uri="ns-c:1",
             current_label="Vehicle.Speed",
             previous_labels=["Vehicle.Velocity"],
+            kind=ElementKind.PROPERTY,
             status=ElementStatus.ACTIVE,
         )
         assert row.previous_labels == ["Vehicle.Velocity"]
@@ -46,12 +81,18 @@ class TestConceptRow:
     def test_negative_id_rejected(self) -> None:
         """ID must be non-negative."""
         with pytest.raises(ValidationError):
-            ConceptRow(serial=-1, concept_uri="ns-c:0", current_label="Vehicle", status=ElementStatus.ACTIVE)
+            ConceptRow(
+                serial=-1,
+                concept_uri="ns-c:0",
+                current_label="Vehicle",
+                kind=ElementKind.ENTITY,
+                status=ElementStatus.ACTIVE,
+            )
 
     def test_missing_required_field_rejected(self) -> None:
         """Omitting current_label fails validation."""
         with pytest.raises(ValidationError):
-            ConceptRow(serial=0, concept_uri="ns-c:0", status=ElementStatus.ACTIVE)  # ty: ignore[missing-argument]
+            ConceptRow(serial=0, concept_uri="ns-c:0", kind=ElementKind.ENTITY, status=ElementStatus.ACTIVE)  # ty: ignore[missing-argument]
 
 
 class TestRevisionRow:

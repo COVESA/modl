@@ -35,6 +35,7 @@ class TestEmptyLedger:
             "concept_uri",
             "current_label",
             "previous_labels",
+            "kind",
             "status",
         ]
         assert list(ledger["revisions"].columns) == [
@@ -71,7 +72,7 @@ class TestValidateLedger:
         """Unexpected extra column triggers validation failure."""
         ledger = empty_ledger()
         ledger["concepts"] = pd.DataFrame(
-            columns=["serial", "concept_uri", "current_label", "previous_labels", "status", "extra"]
+            columns=["serial", "concept_uri", "current_label", "previous_labels", "kind", "status", "extra"]
         )
         with pytest.raises(LedgerValidationError, match="Unexpected columns"):
             validate_ledger(ledger)
@@ -85,6 +86,7 @@ class TestValidateLedger:
                 "concept_uri": ["ns-c:0", "ns-c:1"],
                 "current_label": ["Vehicle", "Door"],
                 "previous_labels": [None, None],
+                "kind": ["ENTITY", "ENTITY"],
                 "status": ["ACTIVE", "ACTIVE"],
             }
         )
@@ -100,6 +102,7 @@ class TestValidateLedger:
                 "concept_uri": ["ns-c:0", "ns-c:0"],
                 "current_label": ["Vehicle", "Door"],
                 "previous_labels": [None, None],
+                "kind": ["ENTITY", "ENTITY"],
                 "status": ["ACTIVE", "ACTIVE"],
             }
         )
@@ -115,6 +118,7 @@ class TestValidateLedger:
                 "concept_uri": ["http://ns.example/concepts/0"],
                 "current_label": ["Battery.StateOfCharge"],
                 "previous_labels": [None],
+                "kind": ["PROPERTY"],
                 "status": ["ACTIVE"],
             }
         )
@@ -156,6 +160,7 @@ class TestValidateLedger:
                 "concept_uri": [None],
                 "current_label": ["Vehicle"],
                 "previous_labels": [None],
+                "kind": ["ENTITY"],
                 "status": ["ACTIVE"],
             }
         )
@@ -171,10 +176,27 @@ class TestValidateLedger:
                 "concept_uri": ["http://ns.example/concepts/0"],
                 "current_label": ["Vehicle"],
                 "previous_labels": [None],
+                "kind": ["ENTITY"],
                 "status": ["PENDING"],
             }
         )
         with pytest.raises(LedgerValidationError, match="Invalid status"):
+            validate_ledger(ledger)
+
+    def test_invalid_kind_raises(self) -> None:
+        """Unrecognised kind string in concepts triggers validation failure."""
+        ledger = empty_ledger()
+        ledger["concepts"] = pd.DataFrame(
+            {
+                "serial": [0],
+                "concept_uri": ["http://ns.example/concepts/0"],
+                "current_label": ["Vehicle"],
+                "previous_labels": [None],
+                "kind": ["BRANCH"],  # not a valid ElementKind
+                "status": ["ACTIVE"],
+            }
+        )
+        with pytest.raises(LedgerValidationError, match="Invalid kind"):
             validate_ledger(ledger)
 
     def test_fk_violation_raises(self) -> None:
@@ -201,6 +223,7 @@ class TestValidateLedger:
                 "concept_uri": ["ns-c:0"],
                 "current_label": ["Vehicle"],
                 "previous_labels": [None],
+                "kind": ["ENTITY"],
                 "status": ["ACTIVE"],
             }
         )
@@ -216,6 +239,7 @@ class TestValidateLedger:
                 "concept_uri": ["http://ns.example/concepts/z"],  # z = b36(35), not b36(1)
                 "current_label": ["Vehicle"],
                 "previous_labels": [None],
+                "kind": ["ENTITY"],
                 "status": ["ACTIVE"],
             }
         )
@@ -231,6 +255,7 @@ class TestValidateLedger:
                 "concept_uri": ["http://ns.example/concepts/NOT_B36!"],
                 "current_label": ["Vehicle"],
                 "previous_labels": [None],
+                "kind": ["ENTITY"],
                 "status": ["ACTIVE"],
             }
         )
@@ -246,6 +271,7 @@ class TestValidateLedger:
                 "concept_uri": ["http://ns.example/concepts/0"],
                 "current_label": ["Vehicle"],
                 "previous_labels": [None],
+                "kind": ["ENTITY"],
                 "status": ["ACTIVE"],
             }
         )
@@ -270,6 +296,7 @@ class TestValidateLedger:
                 "concept_uri": ["http://ns.example/concepts/0", "http://ns.example/concepts/1"],
                 "current_label": ["Vehicle", "Door"],
                 "previous_labels": [None, None],
+                "kind": ["ENTITY", "ENTITY"],
                 "status": ["ACTIVE", "ACTIVE"],
             }
         )
@@ -303,6 +330,7 @@ class TestValidateLedger:
                 "concept_uri": ["http://ns.example/concepts/0"],
                 "current_label": ["Vehicle"],
                 "previous_labels": [None],
+                "kind": ["PROPERTY"],
                 "status": ["ACTIVE"],
             }
         )
@@ -335,6 +363,92 @@ class TestValidateLedger:
         )
         validate_ledger(ledger)  # must not raise
 
+    def test_vocab_concept_binding_raises(self) -> None:
+        """ENUMERATION_SET or ENUM_VALUE concept with a binding triggers validation failure."""
+        ledger = empty_ledger()
+        ledger["concepts"] = pd.DataFrame(
+            {
+                "serial": [0],
+                "concept_uri": ["http://ns.example/concepts/0"],
+                "current_label": ["SpeedUnit.KMH"],
+                "previous_labels": [None],
+                "kind": ["ENUM_VALUE"],
+                "status": ["ACTIVE"],
+            }
+        )
+        ledger["revisions"] = pd.DataFrame(
+            {
+                "serial": [0],
+                "concept_uri": ["http://ns.example/concepts/0"],
+                "revision_uri": ["http://ns.example/revisions/0"],
+                "previous_revision_uri": [None],
+                "status": ["ACTIVE"],
+            }
+        )
+        ledger["variants"] = pd.DataFrame(
+            {
+                "serial": [0],
+                "concept_uri": ["http://ns.example/concepts/0"],
+                "variant_uri": ["http://ns.example/variants/0"],
+                "revision_uri": ["http://ns.example/revisions/0"],
+                "status": ["ACTIVE"],
+            }
+        )
+        ledger["bindings"] = pd.DataFrame(
+            {
+                "serial": [0],
+                "variant_uri": ["http://ns.example/variants/0"],
+                "binding_uri": ["http://ns.example/bindings/0"],
+                "instance_label": [None],
+                "status": ["ACTIVE"],
+            }
+        )
+        with pytest.raises(LedgerValidationError, match="Only PROPERTY concepts"):
+            validate_ledger(ledger)
+
+    def test_entity_concept_binding_raises(self) -> None:
+        """ENTITY concept with a binding triggers validation failure."""
+        ledger = empty_ledger()
+        ledger["concepts"] = pd.DataFrame(
+            {
+                "serial": [0],
+                "concept_uri": ["http://ns.example/concepts/0"],
+                "current_label": ["Vehicle.Door"],
+                "previous_labels": [None],
+                "kind": ["ENTITY"],
+                "status": ["ACTIVE"],
+            }
+        )
+        ledger["revisions"] = pd.DataFrame(
+            {
+                "serial": [0],
+                "concept_uri": ["http://ns.example/concepts/0"],
+                "revision_uri": ["http://ns.example/revisions/0"],
+                "previous_revision_uri": [None],
+                "status": ["ACTIVE"],
+            }
+        )
+        ledger["variants"] = pd.DataFrame(
+            {
+                "serial": [0],
+                "concept_uri": ["http://ns.example/concepts/0"],
+                "variant_uri": ["http://ns.example/variants/0"],
+                "revision_uri": ["http://ns.example/revisions/0"],
+                "status": ["ACTIVE"],
+            }
+        )
+        ledger["bindings"] = pd.DataFrame(
+            {
+                "serial": [0],
+                "variant_uri": ["http://ns.example/variants/0"],
+                "binding_uri": ["http://ns.example/bindings/0"],
+                "instance_label": [None],
+                "status": ["ACTIVE"],
+            }
+        )
+        with pytest.raises(LedgerValidationError, match="Only PROPERTY concepts"):
+            validate_ledger(ledger)
+
 
 class TestNextSerial:
     def test_empty_table_returns_zero(self) -> None:
@@ -363,6 +477,7 @@ class TestReadWriteLedger:
                 "concept_uri": ["http://ns.example/concepts/0"],
                 "current_label": ["Vehicle"],
                 "previous_labels": [None],
+                "kind": ["ENTITY"],
                 "status": ["ACTIVE"],
             }
         )

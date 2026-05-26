@@ -6,14 +6,14 @@ from pathlib import Path
 
 import pandas as pd
 
-from modl.models import ElementStatus
+from modl.models import ElementKind, ElementStatus
 
 # ── Schema constants ──────────────────────────────────────────────────────────
 
 TABLES = ("concepts", "revisions", "variants", "bindings")
 
 EXPECTED_COLUMNS: dict[str, list[str]] = {
-    "concepts": ["serial", "concept_uri", "current_label", "previous_labels", "status"],
+    "concepts": ["serial", "concept_uri", "current_label", "previous_labels", "kind", "status"],
     "revisions": ["serial", "concept_uri", "revision_uri", "previous_revision_uri", "status"],
     "variants": ["serial", "concept_uri", "variant_uri", "revision_uri", "status"],
     "bindings": ["serial", "variant_uri", "binding_uri", "instance_label", "status"],
@@ -36,10 +36,11 @@ FK_CONSTRAINTS: list[tuple[str, str, str, str]] = [
 ]
 
 VALID_STATUSES = {s.value for s in ElementStatus}
+VALID_KINDS = {k.value for k in ElementKind}
 
 # Required (non-nullable) columns per table — previous_revision_uri and instance_label are nullable
 REQUIRED_COLUMNS: dict[str, list[str]] = {
-    "concepts": ["serial", "concept_uri", "current_label", "status"],
+    "concepts": ["serial", "concept_uri", "current_label", "kind", "status"],
     "revisions": ["serial", "concept_uri", "revision_uri", "status"],
     "variants": ["serial", "concept_uri", "variant_uri", "revision_uri", "status"],
     "bindings": ["serial", "variant_uri", "binding_uri", "status"],
@@ -139,6 +140,12 @@ def validate_ledger(tables: dict[str, pd.DataFrame]) -> None:
         if invalid:
             raise LedgerValidationError(f"[{name}] Invalid status values: {sorted(invalid)}")
 
+        # Valid kind values (concepts table only)
+        if name == "concepts":
+            invalid_kinds = set(df["kind"].dropna().unique()) - VALID_KINDS
+            if invalid_kinds:
+                raise LedgerValidationError(f"[{name}] Invalid kind values: {sorted(invalid_kinds)}")
+
     # Referential integrity
     for child_table, child_col, parent_table, parent_col in FK_CONSTRAINTS:
         child_df = tables[child_table]
@@ -166,6 +173,25 @@ def validate_ledger(tables: dict[str, pd.DataFrame]) -> None:
             raise LedgerValidationError(
                 f"[variants.revision_uri] References a revision belonging to a different concept: {bad}"
             )
+
+    # Only PROPERTY concepts may have bindings; ENTITY, ENUMERATION_SET, and ENUM_VALUE must not
+    non_binding_kinds = {ElementKind.ENTITY.value, ElementKind.ENUMERATION_SET.value, ElementKind.ENUM_VALUE.value}
+    concepts_df = tables["concepts"]
+    bindings_df = tables["bindings"]
+    if not bindings_df.empty and not concepts_df.empty:
+        non_binding_uris = set(concepts_df[concepts_df["kind"].isin(non_binding_kinds)]["concept_uri"])
+        if non_binding_uris:
+            non_binding_variant_uris = set(
+                tables["variants"][tables["variants"]["concept_uri"].isin(non_binding_uris)]["variant_uri"]
+            )
+            if non_binding_variant_uris:
+                bad_bindings = bindings_df[bindings_df["variant_uri"].isin(non_binding_variant_uris)]
+                if not bad_bindings.empty:
+                    bad = sorted(bad_bindings["binding_uri"].tolist())
+                    raise LedgerValidationError(
+                        f"[bindings] Only PROPERTY concepts may have bindings; "
+                        f"ENTITY, ENUMERATION_SET, and ENUM_VALUE must not: {bad}"
+                    )
 
 
 def next_serial(table: pd.DataFrame) -> int:
