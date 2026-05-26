@@ -8,10 +8,19 @@ This document explains the diff report format that `modl` consumes and describes
 
 `modl` is language-agnostic. It does not parse model files directly. A **language-specific adapter** is a tool (script, library, CI step) that:
 
-1. Takes two snapshots of a model (previous release and current release)
-2. Computes what changed between them
+1. Takes a current model snapshot, and optionally a previous one
+2. Computes what changed between them (or treats everything as new when no previous snapshot exists)
 3. Produces a **diff report** — a JSON file in the format described below
 4. Passes that file to `modl sync --diff-report <file> ...`
+
+The previous snapshot is **optional**. When absent, the adapter is in first-run mode: every element in the current snapshot is treated as `ADDED` and emitted with its complete `aspects` snapshot. From `modl`'s perspective the format is identical — it always receives a diff report and does not know whether it was a first run.
+
+A typical adapter invocation:
+
+```
+adapter --curr model-v2.yaml               # first run: no prev, all ADDED
+adapter --prev model-v1.yaml --curr model-v2.yaml  # subsequent runs: real diff
+```
 
 One adapter exists per modeling language (e.g., vspec, GraphQL SDL, JSON Schema). The adapter is a thin, replaceable component; `modl`'s ledger logic does not change when a new language is supported.
 
@@ -259,7 +268,7 @@ The following diff report covers a range of typical changes:
 
 Use this checklist when building an adapter for a new modeling language:
 
-- [ ] Parse both the previous and current model snapshots. **For a first release with no previous snapshot, treat every element as `ADDED`** and emit full `aspects` snapshots for all entities and properties.
+- [ ] Parse both the previous and current model snapshots. **When no previous snapshot is provided (first run), treat every element as `ADDED` and emit the complete `aspects` snapshot for each entity and property — not a delta.** This is identical to the standard `ADDED` event contract and requires no special handling from `modl`.
 - [ ] For each entity that exists in current but not previous: emit `ADDED` entity event with full `aspects` snapshot
 - [ ] For each entity that exists in previous but not current: emit `REMOVED` entity event
 - [ ] For each entity that exists in both:
