@@ -30,8 +30,8 @@ def _report(*changes) -> DiffReport:
     return DiffReport(changes=list(changes))
 
 
-def _entity_added(label: str, **aspects) -> EntityChanged:
-    return EntityChanged(label=label, change_type=ChangeType.ADDED, aspects=dict(aspects))
+def _entity_added(label: str, kind: ElementKind = ElementKind.ENTITY, **aspects) -> EntityChanged:
+    return EntityChanged(label=label, kind=kind, change_type=ChangeType.ADDED, aspects=dict(aspects))
 
 
 def _entity_modified(label: str, renamed_from: str | None = None, **aspects) -> EntityChanged:
@@ -679,3 +679,283 @@ class TestRoundTrip:
         assert len(prop_variants) == 2
         assert (prop_variants["status"] == ElementStatus.SUPERSEDED).sum() == 1
         assert (prop_variants["status"] == ElementStatus.ACTIVE).sum() == 1
+
+
+# ── Second rename ─────────────────────────────────────────────────────────────
+
+
+class TestEntitySecondRename:
+    def test_accumulates_both_previous_labels(self) -> None:
+        """Two successive renames keep both old labels in previous_labels, most-recent first."""
+        report = _report(
+            _entity_added("Vehicl"),
+            _entity_modified("Vehicle", renamed_from="Vehicl"),
+            _entity_modified("VehicleNode", renamed_from="Vehicle"),
+        )
+        tables = sync(empty_ledger(), report, _cfg())
+        row = tables["concepts"].iloc[0]
+        assert row["current_label"] == "VehicleNode"
+        prev = json.loads(row["previous_labels"])
+        assert prev == ["Vehicle", "Vehicl"]
+
+    def test_three_renames_full_history(self) -> None:
+        """Three successive renames accumulate all three old labels in order."""
+        report = _report(
+            _entity_added("A"),
+            _entity_modified("B", renamed_from="A"),
+            _entity_modified("C", renamed_from="B"),
+            _entity_modified("D", renamed_from="C"),
+        )
+        tables = sync(empty_ledger(), report, _cfg())
+        row = tables["concepts"].iloc[0]
+        assert row["current_label"] == "D"
+        assert json.loads(row["previous_labels"]) == ["C", "B", "A"]
+
+
+# ── renamed_from pointing to non-existent concept ─────────────────────────────
+
+
+class TestRenameNonexistentConcept:
+    def test_entity_renamed_from_unknown_label_raises(self) -> None:
+        """Entity renamed_from pointing to an absent label raises SyncError."""
+        report = _report(_entity_modified("Vehicle", renamed_from="Vehicl"))
+        with pytest.raises(SyncError, match="No concept found"):
+            sync(empty_ledger(), report, _cfg())
+
+    def test_property_renamed_from_unknown_label_raises(self) -> None:
+        """Property renamed_from pointing to an absent label raises SyncError."""
+        report = _report(
+            _entity_added("Vehicle"),
+            _prop_modified("Vehicle.Velocity", parent="Vehicle", renamed_from="Vehicle.Speed"),
+        )
+        with pytest.raises(SyncError, match="No concept found"):
+            sync(empty_ledger(), report, _cfg())
+
+
+# ── ENUMERATION_SET ADDED ─────────────────────────────────────────────────────
+
+
+class TestEnumerationSetAdded:
+    def test_kind_stored_correctly(self) -> None:
+        """ENUMERATION_SET ADDED stores the correct kind on the concept row."""
+        report = _report(_entity_added("SpeedUnit", kind=ElementKind.ENUMERATION_SET))
+        tables = sync(empty_ledger(), report, _cfg())
+        assert tables["concepts"].iloc[0]["kind"] == ElementKind.ENUMERATION_SET
+
+    def test_no_bindings(self) -> None:
+        """ENUMERATION_SET ADDED does not create any bindings."""
+        report = _report(_entity_added("SpeedUnit", kind=ElementKind.ENUMERATION_SET))
+        tables = sync(empty_ledger(), report, _cfg())
+        assert len(tables["bindings"]) == 0
+
+    def test_mints_concept_revision_variant(self) -> None:
+        """ENUMERATION_SET ADDED mints exactly one concept, revision, and variant."""
+        report = _report(_entity_added("SpeedUnit", kind=ElementKind.ENUMERATION_SET))
+        tables = sync(empty_ledger(), report, _cfg())
+        assert len(tables["concepts"]) == 1
+        assert len(tables["revisions"]) == 1
+        assert len(tables["variants"]) == 1
+
+    def test_enum_value_parent_uri_links_to_set(self) -> None:
+        """ENUM_VALUE concept carries the ENUMERATION_SET concept URI as parent_uri."""
+        report = _report(
+            _entity_added("SpeedUnit", kind=ElementKind.ENUMERATION_SET),
+            _prop_added("SpeedUnit.KMH", parent="SpeedUnit", kind=ElementKind.ENUM_VALUE),
+        )
+        tables = sync(empty_ledger(), report, _cfg())
+        set_uri = tables["concepts"][tables["concepts"]["current_label"] == "SpeedUnit"].iloc[0]["concept_uri"]
+        val_row = tables["concepts"][tables["concepts"]["current_label"] == "SpeedUnit.KMH"].iloc[0]
+        assert val_row["parent_uri"] == set_uri
+
+    def test_ledger_validates_after_enum_set_and_value(self) -> None:
+        """Full ledger validation passes after ENUMERATION_SET + ENUM_VALUE ADDED."""
+        report = _report(
+            _entity_added("SpeedUnit", kind=ElementKind.ENUMERATION_SET),
+            _prop_added("SpeedUnit.KMH", parent="SpeedUnit", kind=ElementKind.ENUM_VALUE),
+        )
+        validate_ledger(sync(empty_ledger(), report, _cfg()))
+
+
+# ── Rename AND breaking aspect in the same event ──────────────────────────────
+
+
+class TestEntityModifiedRenameAndBreaking:
+    def test_both_applied_simultaneously(self) -> None:
+        """Breaking MODIFIED with rename updates the label and creates a new variant in one event."""
+        cfg = _cfg(entity={"type": True})
+        report = _report(
+            _entity_added("Vehicl", type="branch"),
+            _entity_modified("Vehicle", renamed_from="Vehicl", type="object"),
+        )
+        tables = sync(empty_ledger(), report, cfg)
+        row = tables["concepts"].iloc[0]
+        assert row["current_label"] == "Vehicle"
+        assert "Vehicl" in json.loads(row["previous_labels"])
+        variants = tables["variants"]
+        assert len(variants) == 2
+        assert (variants["status"] == ElementStatus.SUPERSEDED).sum() == 1
+        assert (variants["status"] == ElementStatus.ACTIVE).sum() == 1
+
+
+class TestPropertyModifiedRenameAndNonBreaking:
+    def test_rename_non_breaking_updates_label_no_new_variant(self) -> None:
+        """Non-breaking property MODIFIED with rename updates label but does not create a new variant."""
+        cfg = _cfg(property={"description": False})
+        report = _report(
+            _entity_added("Vehicle"),
+            _prop_added("Vehicle.Vel", parent="Vehicle"),
+            _prop_modified("Vehicle.Velocity", parent="Vehicle", renamed_from="Vehicle.Vel", description="updated"),
+        )
+        tables = sync(empty_ledger(), report, cfg)
+        row = tables["concepts"][tables["concepts"]["current_label"] == "Vehicle.Velocity"].iloc[0]
+        assert "Vehicle.Vel" in json.loads(row["previous_labels"])
+        prop_uri = row["concept_uri"]
+        assert len(tables["variants"][tables["variants"]["concept_uri"] == prop_uri]) == 1
+
+
+# ── Instance list shrinks (non-breaking) ──────────────────────────────────────
+
+
+class TestEntityModifiedInstanceShrinks:
+    def test_shrink_mints_no_new_bindings(self) -> None:
+        """Non-breaking instance shrink does not create new bindings."""
+        cfg = _cfg(entity={"instances": False})
+        report = _report(
+            _entity_added("Door", instances=["Left", "Right", "Rear"]),
+            _prop_added("Door.IsOpen", parent="Door"),
+            _entity_modified("Door", instances=["Left", "Right"]),
+        )
+        tables = sync(empty_ledger(), report, cfg)
+        # 3 original bindings; no new ones minted because no instances were added
+        assert len(tables["bindings"]) == 3
+
+    def test_shrink_updates_entity_instances_column(self) -> None:
+        """Entity concept row reflects the reduced instance list after a shrink."""
+        cfg = _cfg(entity={"instances": False})
+        report = _report(
+            _entity_added("Door", instances=["Left", "Right", "Rear"]),
+            _prop_added("Door.IsOpen", parent="Door"),
+            _entity_modified("Door", instances=["Left", "Right"]),
+        )
+        tables = sync(empty_ledger(), report, cfg)
+        row = tables["concepts"][tables["concepts"]["current_label"] == "Door"].iloc[0]
+        assert json.loads(row["instances"]) == ["Left", "Right"]
+
+    def test_shrink_child_gets_new_revision(self) -> None:
+        """Child property still gets a new revision even when the instance list shrinks."""
+        cfg = _cfg(entity={"instances": False})
+        report = _report(
+            _entity_added("Door", instances=["Left", "Right", "Rear"]),
+            _prop_added("Door.IsOpen", parent="Door"),
+            _entity_modified("Door", instances=["Left", "Right"]),
+        )
+        tables = sync(empty_ledger(), report, cfg)
+        prop_uri = tables["concepts"][tables["concepts"]["current_label"] == "Door.IsOpen"].iloc[0]["concept_uri"]
+        prop_revs = tables["revisions"][tables["revisions"]["concept_uri"] == prop_uri]
+        assert len(prop_revs) == 2
+
+
+# ── Multiple child properties — cascade coverage ──────────────────────────────
+
+
+class TestMultipleChildPropertiesCascade:
+    def test_breaking_instance_cascades_to_all_children(self) -> None:
+        """Breaking instance change mints new variants for every child property."""
+        cfg = _cfg(entity={"instances": True})
+        report = _report(
+            _entity_added("Door", instances=["Left", "Right"]),
+            _prop_added("Door.IsOpen", parent="Door"),
+            _prop_added("Door.IsLocked", parent="Door"),
+            _entity_modified("Door", instances=["Left", "Right", "Center"]),
+        )
+        tables = sync(empty_ledger(), report, cfg)
+        for label in ("Door.IsOpen", "Door.IsLocked"):
+            prop_uri = tables["concepts"][tables["concepts"]["current_label"] == label].iloc[0]["concept_uri"]
+            prop_variants = tables["variants"][tables["variants"]["concept_uri"] == prop_uri]
+            assert len(prop_variants) == 2, f"Expected 2 variants for {label}"
+            assert (prop_variants["status"] == ElementStatus.SUPERSEDED).sum() == 1
+            assert (prop_variants["status"] == ElementStatus.ACTIVE).sum() == 1
+
+    def test_nonbreaking_instance_cascades_new_bindings_to_all_children(self) -> None:
+        """Non-breaking instance addition appends new bindings for every child property."""
+        cfg = _cfg(entity={"instances": False})
+        report = _report(
+            _entity_added("Door", instances=["Left", "Right"]),
+            _prop_added("Door.IsOpen", parent="Door"),
+            _prop_added("Door.IsLocked", parent="Door"),
+            _entity_modified("Door", instances=["Left", "Right", "Center"]),
+        )
+        tables = sync(empty_ledger(), report, cfg)
+        # 2 properties × (2 original + 1 new) = 6 total bindings, all ACTIVE
+        assert len(tables["bindings"]) == 6
+        assert (tables["bindings"]["status"] == ElementStatus.ACTIVE).all()
+
+    def test_breaking_instance_new_bindings_all_point_to_new_variants(self) -> None:
+        """After breaking cascade, every active binding points to the new variant of its property."""
+        cfg = _cfg(entity={"instances": True})
+        report = _report(
+            _entity_added("Door", instances=["Left", "Right"]),
+            _prop_added("Door.IsOpen", parent="Door"),
+            _prop_added("Door.IsLocked", parent="Door"),
+            _entity_modified("Door", instances=["Left", "Right", "Center"]),
+        )
+        tables = sync(empty_ledger(), report, cfg)
+        active_bindings = tables["bindings"][tables["bindings"]["status"] == ElementStatus.ACTIVE]
+        # Collect all new (ACTIVE) variant URIs
+        new_variant_uris = set(
+            tables["variants"][tables["variants"]["status"] == ElementStatus.ACTIVE]["variant_uri"].tolist()
+        )
+        assert set(active_bindings["variant_uri"].tolist()) <= new_variant_uris
+
+
+# ── Three successive syncs — serial continuity ────────────────────────────────
+
+
+class TestThreeSuccessiveSyncs:
+    def test_serial_continuity_across_three_syncs(self, tmp_path) -> None:
+        """Three successive syncs produce unique, monotonically-increasing serials in every table."""
+        from modl.ledger import read_ledger, write_ledger
+
+        cfg = _cfg(property={"output_type": True})
+        ledger_dir = tmp_path / "ledger"
+
+        r1 = _report(_entity_added("Vehicle"), _prop_added("Vehicle.Speed", parent="Vehicle", output_type="Int"))
+        write_ledger(sync(empty_ledger(), r1, cfg), ledger_dir)
+
+        r2 = _report(_prop_modified("Vehicle.Speed", parent="Vehicle", output_type="Float"))
+        write_ledger(sync(read_ledger(ledger_dir), r2, cfg), ledger_dir)
+
+        r3 = _report(_prop_added("Vehicle.Mass", parent="Vehicle", output_type="Float"))
+        write_ledger(sync(read_ledger(ledger_dir), r3, cfg), ledger_dir)
+
+        final = read_ledger(ledger_dir)
+        validate_ledger(final)
+        for table in ("concepts", "revisions", "variants", "bindings"):
+            serials = sorted(final[table]["serial"].tolist())
+            unique_serials = sorted(set(serials))
+            assert serials == unique_serials, f"Duplicate serials in {table}"
+            assert serials == list(range(len(serials))), f"Serial gap in {table}: {serials}"
+
+    def test_incremental_concept_referenced_by_label_across_syncs(self, tmp_path) -> None:
+        """A concept added in run 1 can be modified by label in run 3 after a no-op run 2."""
+        from modl.ledger import read_ledger, write_ledger
+
+        cfg = _cfg(entity={"type": True})
+        ledger_dir = tmp_path / "ledger"
+
+        r1 = _report(_entity_added("Vehicle", type="branch"))
+        write_ledger(sync(empty_ledger(), r1, cfg), ledger_dir)
+
+        # Run 2: unrelated change
+        r2 = _report(_entity_added("Door"))
+        write_ledger(sync(read_ledger(ledger_dir), r2, cfg), ledger_dir)
+
+        # Run 3: break Vehicle added in run 1
+        r3 = _report(_entity_modified("Vehicle", type="object"))
+        write_ledger(sync(read_ledger(ledger_dir), r3, cfg), ledger_dir)
+
+        final = read_ledger(ledger_dir)
+        validate_ledger(final)
+        vehicle_uri = final["concepts"][final["concepts"]["current_label"] == "Vehicle"].iloc[0]["concept_uri"]
+        v_variants = final["variants"][final["variants"]["concept_uri"] == vehicle_uri]
+        assert len(v_variants) == 2

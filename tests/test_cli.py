@@ -118,3 +118,62 @@ class TestCli:
             ["sync", "--ledger-dir", str(ledger_dir), "--config", str(config)],
         )
         assert result.exit_code != 0
+
+    def test_sync_engine_sync_error_surfaces_cleanly(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        """SyncError from the engine exits non-zero with a single logged error line and no traceback."""
+        config = tmp_path / "modl.yaml"
+        config.write_text("namespace:\n  namespace: http://example.org/myns/\n")
+        diff = tmp_path / "diff.json"
+        # nested list in instances triggers the _validate_instances guard
+        diff.write_text(
+            '{"changes": [{"label": "Door", "kind": "ENTITY", "change_type": "ADDED",'
+            ' "aspects": {"instances": [["Front", "Rear"]]}}]}'
+        )
+        result = CliRunner().invoke(
+            cli,
+            ["sync", "--diff-report", str(diff), "--ledger-dir", str(tmp_path / "ledger"), "--config", str(config)],
+        )
+        assert result.exit_code != 0
+        assert "Sync error" in caplog.text
+        assert "Traceback" not in result.output
+
+    def test_sync_corrupt_ledger_surfaces_cleanly(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        """Corrupt ledger (invalid status value) exits non-zero with a single log line and no traceback."""
+        import pandas as pd
+
+        from modl.ledger import empty_ledger, write_ledger
+
+        config = tmp_path / "modl.yaml"
+        config.write_text("namespace:\n  namespace: http://example.org/myns/\n")
+        ledger_dir = tmp_path / "ledger"
+        tables = empty_ledger()
+        tables["concepts"] = pd.DataFrame(
+            {
+                "serial": [0],
+                "concept_uri": ["http://example.org/myns/concepts/0"],
+                "current_label": ["Vehicle"],
+                "previous_labels": [None],
+                "kind": ["ENTITY"],
+                "status": ["PENDING"],  # invalid status — will fail validate_ledger
+                "parent_uri": [None],
+                "instances": [None],
+            }
+        )
+        write_ledger(tables, ledger_dir)
+        result = CliRunner().invoke(
+            cli,
+            ["sync", "--ledger-dir", str(ledger_dir), "--config", str(config)],
+        )
+        assert result.exit_code != 0
+        assert "Ledger validation error" in caplog.text
+        assert "Traceback" not in result.output
+
+    def test_sync_invalid_config_yaml_structure_errors(self, tmp_path: Path) -> None:
+        """Config YAML whose structure fails Pydantic validation causes non-zero exit."""
+        config = tmp_path / "modl.yaml"
+        config.write_text("namespace: not_a_mapping\n")
+        result = CliRunner().invoke(
+            cli,
+            ["sync", "--ledger-dir", str(tmp_path / "ledger"), "--config", str(config)],
+        )
+        assert result.exit_code != 0

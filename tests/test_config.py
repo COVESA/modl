@@ -123,6 +123,32 @@ class TestBreakingChangeConfig:
         cfg = BreakingChangeConfig.model_validate(VALID_CONFIG)
         assert cfg.is_breaking(ElementKind.PROPERTY, {"accuracy": "0.01"}) is True
 
+    def test_is_breaking_rename_name_true(self) -> None:
+        """renamed_from with name: true makes the rename breaking."""
+        cfg = BreakingChangeConfig.model_validate(
+            {"namespace": {"namespace": "https://myproject.org/model/"}, "entity": {"name": True}}
+        )
+        assert cfg.is_breaking(ElementKind.ENTITY, {}, renamed_from="OldVehicle") is True
+
+    def test_is_breaking_rename_name_false(self) -> None:
+        """renamed_from with name: false is explicitly non-breaking."""
+        cfg = BreakingChangeConfig.model_validate(
+            {"namespace": {"namespace": "https://myproject.org/model/"}, "entity": {"name": False}}
+        )
+        assert cfg.is_breaking(ElementKind.ENTITY, {}, renamed_from="OldVehicle") is False
+
+    def test_is_breaking_rename_name_absent(self) -> None:
+        """renamed_from with name absent from config is non-breaking."""
+        cfg = BreakingChangeConfig.model_validate({"namespace": {"namespace": "https://myproject.org/model/"}})
+        assert cfg.is_breaking(ElementKind.ENTITY, {}, renamed_from="OldVehicle") is False
+
+    def test_is_breaking_absent_aspect_key_is_false(self) -> None:
+        """An aspect key absent from config is non-breaking (returns False, not None)."""
+        cfg = BreakingChangeConfig.model_validate(VALID_CONFIG)
+        result = cfg.is_breaking(ElementKind.PROPERTY, {"unknown_key": "value"})
+        assert result is False
+        assert type(result) is bool
+
     def test_is_breaking_rename_absent_not_breaking(self) -> None:
         """Rename is non-breaking when 'name' key is absent from the config."""
         cfg = BreakingChangeConfig.model_validate(VALID_CONFIG)
