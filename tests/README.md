@@ -72,14 +72,14 @@ Data-level constraints enforced by `validate_ledger()`:
 
 | Check | Example failure |
 |---|---|
-| Missing table or column | `bindings.csv` has no `variant_uri` column |
+| Missing table or column | `bindings.csv` has no `contract_uri` column |
 | Extra column | unexpected column present |
 | Null in required field | `concept_uri` is `None` |
 | Invalid `status` / `kind` value | `"PENDING"`, `"BRANCH"` |
 | Negative serial | `serial = -1` |
 | URI suffix ≠ `b36encode(serial)` | serial 1 but URI ends in `z` |
 | FK violation | revision references non-existent concept |
-| Cross-concept variant mismatch | variant's `revision_uri` belongs to a different concept |
+| Cross-concept contract mismatch | contract's `revision_uri` belongs to a different concept |
 | Binding on non-PROPERTY concept | ENTITY or ENUMERATION_SET concept linked to a binding |
 
 ### `TestValidateLedgerDir`
@@ -92,7 +92,7 @@ Round-trip write → read → validate; `next_serial()` returns `max + 1`; `b36e
 
 ## test_models.py
 
-Pydantic row models for the four tables (`ConceptRow`, `RevisionRow`, `VariantRow`, `BindingRow`). Checks required fields, defaults, value constraints (negative serial rejected), and vocabulary kinds (`ENUMERATION_SET`, `ENUM_VALUE`).
+Pydantic row models for the four tables (`ConceptRow`, `RevisionRow`, `ContractRow`, `BindingRow`). Checks required fields, defaults, value constraints (negative serial rejected), and vocabulary kinds (`ENUMERATION_SET`, `ENUM_VALUE`).
 
 ---
 
@@ -102,37 +102,37 @@ The largest file. Each test class exercises one engine path.
 
 ### ADDED events
 
-**`TestEntityAdded`** — entity ADDED mints one concept + revision + variant, no bindings. Instances stored as JSON. Multiple entities get incrementing serials. Non-compliant adapter output (`instances` is a nested list or contains non-strings) raises `SyncError`.
+**`TestEntityAdded`** — entity ADDED mints one concept + revision + contract, no bindings. Instances stored as JSON. Multiple entities get incrementing serials. Non-compliant adapter output (`instances` is a nested list or contains non-strings) raises `SyncError`.
 
 **`TestPropertyAdded`** — property ADDED links to its parent via `parent_uri` and copies the parent's instance list. One binding per instance; singleton binding (null `instance_label`) when the parent has no instances. `ENUM_VALUE` kind gets no bindings.
 
-**`TestEnumerationSetAdded`** — `ENUMERATION_SET` ADDED behaves like ENTITY: one concept/revision/variant, no bindings, correct `kind` stored. `ENUM_VALUE` children carry the set's `concept_uri` as `parent_uri`.
+**`TestEnumerationSetAdded`** — `ENUMERATION_SET` ADDED behaves like ENTITY: one concept/revision/contract, no bindings, correct `kind` stored. `ENUM_VALUE` children carry the set's `concept_uri` as `parent_uri`.
 
 ### MODIFIED events (entity)
 
-**`TestEntityModifiedNonBreaking`** — new revision supersedes the old one; variant is untouched. Revision chain: new revision's `previous_revision_uri` points to the superseded one. Rename: `current_label` updated, old label prepended to `previous_labels`.
+**`TestEntityModifiedNonBreaking`** — new revision supersedes the old one; contract is untouched. Revision chain: new revision's `previous_revision_uri` points to the superseded one. Rename: `current_label` updated, old label prepended to `previous_labels`.
 
-**`TestEntityModifiedBreakingNonInstance`** — breaking non-instance change (e.g. `type`) mints a new entity variant but does not cascade to child properties.
+**`TestEntityModifiedBreakingNonInstance`** — breaking non-instance change (e.g. `type`) mints a new entity contract but does not cascade to child properties.
 
-**`TestEntityModifiedInstanceNonBreaking`** — adding instances non-breakingly mints one new binding per new instance per child property; existing bindings stay ACTIVE; child properties get a new revision but no new variant.
+**`TestEntityModifiedInstanceNonBreaking`** — adding instances non-breakingly mints one new binding per new instance per child property; existing bindings stay ACTIVE; child properties get a new revision but no new contract.
 
-**`TestEntityModifiedInstanceBreaking`** — breaking instance change supersedes all old bindings and mints new bindings for every instance (old + new) anchored to a new child variant.
+**`TestEntityModifiedInstanceBreaking`** — breaking instance change supersedes all old bindings and mints new bindings for every instance (old + new) anchored to a new child contract.
 
-**`TestEntityModifiedRenameAndBreaking`** — rename + breaking aspect in the same MODIFIED event: label updated AND new variant minted in one pass.
+**`TestEntityModifiedRenameAndBreaking`** — rename + breaking aspect in the same MODIFIED event: label updated AND new contract minted in one pass.
 
 **`TestEntityModifiedInstanceShrinks`** — shrinking the instance list (non-breaking): no new bindings minted, instances column updated, child still gets a new revision.
 
 ### MODIFIED events (property)
 
-**`TestPropertyModifiedBreaking`** — old binding superseded, new binding minted under new variant. Works for both singleton and instanced properties. Rename + breaking change applies both in one event.
+**`TestPropertyModifiedBreaking`** — old binding superseded, new binding minted under new contract. Works for both singleton and instanced properties. Rename + breaking change applies both in one event.
 
-**`TestPropertyModifiedNonBreaking`** — new revision only; variant and bindings untouched.
+**`TestPropertyModifiedNonBreaking`** — new revision only; contract and bindings untouched.
 
-**`TestPropertyModifiedRenameAndNonBreaking`** — rename without a breaking aspect: label updated, no new variant.
+**`TestPropertyModifiedRenameAndNonBreaking`** — rename without a breaking aspect: label updated, no new contract.
 
 ### REMOVED events
 
-**`TestEntityRemoved`** — concept marked REMOVED, final REMOVED revision minted, all variants marked REMOVED. Consistency guard: entity REMOVED without explicit REMOVED events for all child properties raises `SyncError`.
+**`TestEntityRemoved`** — concept marked REMOVED, final REMOVED revision minted, all contracts marked REMOVED. Consistency guard: entity REMOVED without explicit REMOVED events for all child properties raises `SyncError`.
 
 **`TestPropertyRemoved`** — concept REMOVED, all bindings marked REMOVED. `ENUM_VALUE` REMOVED never touches bindings.
 
@@ -144,7 +144,7 @@ The largest file. Each test class exercises one engine path.
 
 ### Multi-child cascade
 
-**`TestMultipleChildPropertiesCascade`** — two child properties under the same entity both get new variants (breaking) or new bindings (non-breaking) when the parent's instance list changes.
+**`TestMultipleChildPropertiesCascade`** — two child properties under the same entity both get new contracts (breaking) or new bindings (non-breaking) when the parent's instance list changes.
 
 ### Incremental syncs
 

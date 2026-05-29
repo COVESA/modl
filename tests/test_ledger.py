@@ -20,7 +20,7 @@ class TestEmptyLedger:
     def test_returns_four_tables(self) -> None:
         """Returns exactly the four expected table keys."""
         ledger = empty_ledger()
-        assert set(ledger.keys()) == {"concepts", "revisions", "variants", "bindings"}
+        assert set(ledger.keys()) == {"concepts", "revisions", "contracts", "bindings"}
 
     def test_tables_are_empty(self) -> None:
         """All tables start with zero rows."""
@@ -47,8 +47,8 @@ class TestEmptyLedger:
             "previous_revision_uri",
             "status",
         ]
-        assert list(ledger["variants"].columns) == ["serial", "concept_uri", "variant_uri", "revision_uri", "status"]
-        assert list(ledger["bindings"].columns) == ["serial", "variant_uri", "binding_uri", "instance_label", "status"]
+        assert list(ledger["contracts"].columns) == ["serial", "concept_uri", "contract_uri", "revision_uri", "status"]
+        assert list(ledger["bindings"].columns) == ["serial", "contract_uri", "binding_uri", "instance_label", "status"]
 
     def test_empty_ledger_passes_validation(self) -> None:
         """Empty ledger satisfies all schema constraints."""
@@ -149,11 +149,11 @@ class TestValidateLedger:
                 "status": ["ACTIVE"],
             }
         )
-        ledger["variants"] = pd.DataFrame(
+        ledger["contracts"] = pd.DataFrame(
             {
                 "serial": [0],
                 "concept_uri": ["http://ns.example/concepts/0"],
-                "variant_uri": ["http://ns.example/variants/0"],
+                "contract_uri": ["http://ns.example/contracts/0"],
                 "revision_uri": ["http://ns.example/revisions/0"],
                 "status": ["ACTIVE"],
             }
@@ -161,7 +161,7 @@ class TestValidateLedger:
         ledger["bindings"] = pd.DataFrame(
             {
                 "serial": [0],
-                "variant_uri": ["http://ns.example/variants/0"],
+                "contract_uri": ["http://ns.example/contracts/0"],
                 "binding_uri": ["http://ns.example/bindings/0"],
                 "instance_label": [None],  # singleton — no instance label
                 "status": ["ACTIVE"],
@@ -343,11 +343,11 @@ class TestValidateLedger:
                 "status": ["ACTIVE"],
             }
         )
-        ledger["variants"] = pd.DataFrame(
+        ledger["contracts"] = pd.DataFrame(
             {
                 "serial": [0],
-                "concept_uri": ["http://ns.example/concepts/1"],  # variant claims concept 1
-                "variant_uri": ["http://ns.example/variants/0"],
+                "concept_uri": ["http://ns.example/concepts/1"],  # contract claims concept 1
+                "contract_uri": ["http://ns.example/contracts/0"],
                 "revision_uri": ["http://ns.example/revisions/0"],  # but revision belongs to concept 0
                 "status": ["ACTIVE"],
             }
@@ -379,11 +379,11 @@ class TestValidateLedger:
                 "status": ["ACTIVE"],
             }
         )
-        ledger["variants"] = pd.DataFrame(
+        ledger["contracts"] = pd.DataFrame(
             {
                 "serial": [0],
                 "concept_uri": ["http://ns.example/concepts/0"],
-                "variant_uri": ["http://ns.example/variants/0"],
+                "contract_uri": ["http://ns.example/contracts/0"],
                 "revision_uri": ["http://ns.example/revisions/0"],
                 "status": ["ACTIVE"],
             }
@@ -391,7 +391,7 @@ class TestValidateLedger:
         ledger["bindings"] = pd.DataFrame(
             {
                 "serial": [0],
-                "variant_uri": ["http://ns.example/variants/0"],
+                "contract_uri": ["http://ns.example/contracts/0"],
                 "binding_uri": ["http://ns.example/bindings/0"],
                 "instance_label": ["Left"],
                 "status": ["ACTIVE"],
@@ -423,11 +423,11 @@ class TestValidateLedger:
                 "status": ["ACTIVE"],
             }
         )
-        ledger["variants"] = pd.DataFrame(
+        ledger["contracts"] = pd.DataFrame(
             {
                 "serial": [0],
                 "concept_uri": ["http://ns.example/concepts/0"],
-                "variant_uri": ["http://ns.example/variants/0"],
+                "contract_uri": ["http://ns.example/contracts/0"],
                 "revision_uri": ["http://ns.example/revisions/0"],
                 "status": ["ACTIVE"],
             }
@@ -435,7 +435,7 @@ class TestValidateLedger:
         ledger["bindings"] = pd.DataFrame(
             {
                 "serial": [0],
-                "variant_uri": ["http://ns.example/variants/0"],
+                "contract_uri": ["http://ns.example/contracts/0"],
                 "binding_uri": ["http://ns.example/bindings/0"],
                 "instance_label": [None],
                 "status": ["ACTIVE"],
@@ -468,11 +468,11 @@ class TestValidateLedger:
                 "status": ["ACTIVE"],
             }
         )
-        ledger["variants"] = pd.DataFrame(
+        ledger["contracts"] = pd.DataFrame(
             {
                 "serial": [0],
                 "concept_uri": ["http://ns.example/concepts/0"],
-                "variant_uri": ["http://ns.example/variants/0"],
+                "contract_uri": ["http://ns.example/contracts/0"],
                 "revision_uri": ["http://ns.example/revisions/0"],
                 "status": ["ACTIVE"],
             }
@@ -480,7 +480,7 @@ class TestValidateLedger:
         ledger["bindings"] = pd.DataFrame(
             {
                 "serial": [0],
-                "variant_uri": ["http://ns.example/variants/0"],
+                "contract_uri": ["http://ns.example/contracts/0"],
                 "binding_uri": ["http://ns.example/bindings/0"],
                 "instance_label": [None],
                 "status": ["ACTIVE"],
@@ -524,7 +524,7 @@ class TestReadWriteLedger:
             }
         )
         write_ledger(ledger, tmp_path)
-        for name in ("concepts", "revisions", "variants", "bindings"):
+        for name in ("concepts", "revisions", "contracts", "bindings"):
             assert (tmp_path / f"{name}.csv").exists()
         restored = read_ledger(tmp_path)
         assert restored["concepts"]["current_label"].iloc[0] == "Vehicle"

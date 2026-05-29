@@ -19,7 +19,7 @@ class TestNamespaceConfig:
         ns = NamespaceConfig(namespace="https://myproject.org/model/", prefix="mp")
         assert ns.uri_base("concepts") == "https://myproject.org/model/concepts"
         assert ns.uri_base("revisions") == "https://myproject.org/model/revisions"
-        assert ns.uri_base("variants") == "https://myproject.org/model/variants"
+        assert ns.uri_base("contracts") == "https://myproject.org/model/contracts"
         assert ns.uri_base("bindings") == "https://myproject.org/model/bindings"
 
     def test_uri_base_hash_namespace(self) -> None:

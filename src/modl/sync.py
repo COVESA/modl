@@ -2,7 +2,7 @@
 
 The engine iterates the ordered list of change events from a :class:`~modl.ir.DiffReport`,
 determines whether each change is breaking according to the :class:`~modl.config.BreakingChangeConfig`,
-and writes the appropriate rows to the concepts, revisions, variants, and bindings tables.
+and writes the appropriate rows to the concepts, revisions, contracts, and bindings tables.
 
 Usage::
 
@@ -142,7 +142,7 @@ def _entity_added(
     revision_uri = _mint_revision(
         tables, cfg, concept_uri=concept_uri, prev_revision_uri=None, status=ElementStatus.ACTIVE
     )
-    _mint_variant(tables, cfg, concept_uri=concept_uri, revision_uri=revision_uri)
+    _mint_contract(tables, cfg, concept_uri=concept_uri, revision_uri=revision_uri)
 
     log.info("Entity ADDED: concept=%s revision=%s", concept_uri, revision_uri)
 
@@ -180,23 +180,23 @@ def _entity_modified(
     )
 
     if breaking:
-        # New entity variant
-        prev_variant_uri = _active_variant_uri(tables, concept_uri)
-        _supersede_variant(tables, concept_uri)
-        variant_uri = _mint_variant(tables, cfg, concept_uri=concept_uri, revision_uri=revision_uri)
+        # New entity contract
+        prev_contract_uri = _active_contract_uri(tables, concept_uri)
+        _supersede_contract(tables, concept_uri)
+        contract_uri = _mint_contract(tables, cfg, concept_uri=concept_uri, revision_uri=revision_uri)
 
         if instances_changed:
             # Instance-breaking: update entity instances column, cascade to all child properties
             _set_instances(tables, concept_row_idx, new_instances)
             _cascade_instance_breaking(tables, cfg, entity_concept_uri=concept_uri, new_instances=new_instances or [])
-        # else: non-instance breaking — entity variant already updated; no child cascade
+        # else: non-instance breaking — entity contract already updated; no child cascade
 
         log.info(
-            "Entity MODIFIED (breaking): concept=%s new_revision=%s new_variant=%s prev_variant=%s",
+            "Entity MODIFIED (breaking): concept=%s new_revision=%s new_contract=%s prev_contract=%s",
             concept_uri,
             revision_uri,
-            variant_uri,
-            prev_variant_uri,
+            contract_uri,
+            prev_contract_uri,
         )
     else:
         # Non-breaking
@@ -238,8 +238,8 @@ def _entity_removed(
     _supersede_revision(tables, concept_uri)
     _mint_revision(tables, cfg, concept_uri=concept_uri, prev_revision_uri=prev_rev_uri, status=ElementStatus.REMOVED)
 
-    # All active variants → REMOVED
-    _set_variant_status(tables, concept_uri, ElementStatus.REMOVED)
+    # All active contracts → REMOVED
+    _set_contract_status(tables, concept_uri, ElementStatus.REMOVED)
 
     # Concept → REMOVED
     tables["concepts"].at[concept_row_idx, "status"] = ElementStatus.REMOVED
@@ -271,13 +271,13 @@ def _property_added(
     revision_uri = _mint_revision(
         tables, cfg, concept_uri=concept_uri, prev_revision_uri=None, status=ElementStatus.ACTIVE
     )
-    variant_uri = _mint_variant(tables, cfg, concept_uri=concept_uri, revision_uri=revision_uri)
+    contract_uri = _mint_contract(tables, cfg, concept_uri=concept_uri, revision_uri=revision_uri)
 
     # Mint bindings for PROPERTY kind only
     if event.kind == ElementKind.PROPERTY:
-        _mint_bindings_for_instances(tables, cfg, variant_uri=variant_uri, instances=parent_instances)
+        _mint_bindings_for_instances(tables, cfg, contract_uri=contract_uri, instances=parent_instances)
 
-    log.info("Property ADDED: concept=%s revision=%s variant=%s", concept_uri, revision_uri, variant_uri)
+    log.info("Property ADDED: concept=%s revision=%s contract=%s", concept_uri, revision_uri, contract_uri)
 
 
 def _property_modified(
@@ -299,21 +299,21 @@ def _property_modified(
     )
 
     if breaking:
-        _supersede_variant(tables, concept_uri)
-        variant_uri = _mint_variant(tables, cfg, concept_uri=concept_uri, revision_uri=revision_uri)
+        _supersede_contract(tables, concept_uri)
+        contract_uri = _mint_contract(tables, cfg, concept_uri=concept_uri, revision_uri=revision_uri)
 
         if event.kind == ElementKind.PROPERTY:
-            # Supersede old bindings and mint new ones under new variant
+            # Supersede old bindings and mint new ones under new contract
             instances_json: str | None = tables["concepts"].at[concept_row_idx, "instances"]
             instances = _parse_instances(instances_json)
             _supersede_bindings_by_concept(tables, concept_uri)
-            _mint_bindings_for_instances(tables, cfg, variant_uri=variant_uri, instances=instances)
+            _mint_bindings_for_instances(tables, cfg, contract_uri=contract_uri, instances=instances)
 
         log.info(
-            "Property MODIFIED (breaking): concept=%s new_revision=%s new_variant=%s",
+            "Property MODIFIED (breaking): concept=%s new_revision=%s new_contract=%s",
             concept_uri,
             revision_uri,
-            variant_uri,
+            contract_uri,
         )
     else:
         log.info("Property MODIFIED (non-breaking): concept=%s new_revision=%s", concept_uri, revision_uri)
@@ -330,8 +330,8 @@ def _property_removed(
     _supersede_revision(tables, concept_uri)
     _mint_revision(tables, cfg, concept_uri=concept_uri, prev_revision_uri=prev_rev_uri, status=ElementStatus.REMOVED)
 
-    # All active variants → REMOVED
-    _set_variant_status(tables, concept_uri, ElementStatus.REMOVED)
+    # All active contracts → REMOVED
+    _set_contract_status(tables, concept_uri, ElementStatus.REMOVED)
 
     # All active bindings (PROPERTY kind) → REMOVED
     if tables["concepts"].at[concept_row_idx, "kind"] == ElementKind.PROPERTY:
@@ -351,7 +351,7 @@ def _cascade_instance_breaking(
     entity_concept_uri: str,
     new_instances: list[str],
 ) -> None:
-    """New variants + bindings for all child properties; supersede old bindings."""
+    """New contracts + bindings for all child properties; supersede old bindings."""
     child_df = _child_concepts(tables, entity_concept_uri)
     if child_df.empty:
         return
@@ -372,12 +372,12 @@ def _cascade_instance_breaking(
             tables, cfg, concept_uri=child_uri, prev_revision_uri=prev_rev_uri, status=ElementStatus.ACTIVE
         )
 
-        _supersede_variant(tables, child_uri)
-        variant_uri = _mint_variant(tables, cfg, concept_uri=child_uri, revision_uri=revision_uri)
+        _supersede_contract(tables, child_uri)
+        contract_uri = _mint_contract(tables, cfg, concept_uri=child_uri, revision_uri=revision_uri)
 
         if child_kind == ElementKind.PROPERTY:
             _supersede_bindings_by_concept(tables, child_uri)
-            _mint_bindings_for_instances(tables, cfg, variant_uri=variant_uri, instances=new_instances or None)
+            _mint_bindings_for_instances(tables, cfg, contract_uri=contract_uri, instances=new_instances or None)
 
 
 def _cascade_instance_nonbreaking(
@@ -407,12 +407,12 @@ def _cascade_instance_nonbreaking(
         _supersede_revision(tables, child_uri)
         _mint_revision(tables, cfg, concept_uri=child_uri, prev_revision_uri=prev_rev_uri, status=ElementStatus.ACTIVE)
 
-        # Append new bindings for added instances only (to the existing active variant)
+        # Append new bindings for added instances only (to the existing active contract)
         if child_kind == ElementKind.PROPERTY and added_instances:
-            active_variant = _active_variant_uri(tables, child_uri)
-            if active_variant:
+            active_contract = _active_contract_uri(tables, child_uri)
+            if active_contract:
                 for instance in added_instances:
-                    _mint_binding(tables, cfg, variant_uri=active_variant, instance_label=instance)
+                    _mint_binding(tables, cfg, contract_uri=active_contract, instance_label=instance)
 
 
 # ── Minting helpers ───────────────────────────────────────────────────────────
@@ -467,29 +467,29 @@ def _mint_revision(
     return uri
 
 
-def _mint_variant(
+def _mint_contract(
     tables: dict[str, pd.DataFrame],
     cfg: BreakingChangeConfig,
     concept_uri: str,
     revision_uri: str,
 ) -> str:
-    serial = next_serial(tables["variants"])
-    uri = _mint_uri(cfg, "variants", serial)
+    serial = next_serial(tables["contracts"])
+    uri = _mint_uri(cfg, "contracts", serial)
     new_row: dict[str, Any] = {
         "serial": serial,
-        "variant_uri": uri,
+        "contract_uri": uri,
         "concept_uri": concept_uri,
         "revision_uri": revision_uri,
         "status": ElementStatus.ACTIVE.value,
     }
-    tables["variants"] = pd.concat([tables["variants"], pd.DataFrame([new_row])], ignore_index=True)
+    tables["contracts"] = pd.concat([tables["contracts"], pd.DataFrame([new_row])], ignore_index=True)
     return uri
 
 
 def _mint_binding(
     tables: dict[str, pd.DataFrame],
     cfg: BreakingChangeConfig,
-    variant_uri: str,
+    contract_uri: str,
     instance_label: str | None,
 ) -> str:
     serial = next_serial(tables["bindings"])
@@ -497,7 +497,7 @@ def _mint_binding(
     new_row: dict[str, Any] = {
         "serial": serial,
         "binding_uri": uri,
-        "variant_uri": variant_uri,
+        "contract_uri": contract_uri,
         "instance_label": instance_label,
         "status": ElementStatus.ACTIVE.value,
     }
@@ -508,15 +508,15 @@ def _mint_binding(
 def _mint_bindings_for_instances(
     tables: dict[str, pd.DataFrame],
     cfg: BreakingChangeConfig,
-    variant_uri: str,
+    contract_uri: str,
     instances: list[str] | None,
 ) -> None:
     """Mint one binding per instance, or a single singleton binding when there are no instances."""
     if instances:
         for inst in instances:
-            _mint_binding(tables, cfg, variant_uri=variant_uri, instance_label=inst)
+            _mint_binding(tables, cfg, contract_uri=contract_uri, instance_label=inst)
     else:
-        _mint_binding(tables, cfg, variant_uri=variant_uri, instance_label=None)
+        _mint_binding(tables, cfg, contract_uri=contract_uri, instance_label=None)
 
 
 # ── Mutation helpers ──────────────────────────────────────────────────────────
@@ -528,20 +528,20 @@ def _supersede_revision(tables: dict[str, pd.DataFrame], concept_uri: str) -> No
     tables["revisions"].loc[mask, "status"] = ElementStatus.SUPERSEDED
 
 
-def _supersede_variant(tables: dict[str, pd.DataFrame], concept_uri: str) -> None:
-    """Mark the current ACTIVE variant for a concept as SUPERSEDED."""
-    mask = (tables["variants"]["concept_uri"] == concept_uri) & (tables["variants"]["status"] == ElementStatus.ACTIVE)
-    tables["variants"].loc[mask, "status"] = ElementStatus.SUPERSEDED
+def _supersede_contract(tables: dict[str, pd.DataFrame], concept_uri: str) -> None:
+    """Mark the current ACTIVE contract for a concept as SUPERSEDED."""
+    mask = (tables["contracts"]["concept_uri"] == concept_uri) & (tables["contracts"]["status"] == ElementStatus.ACTIVE)
+    tables["contracts"].loc[mask, "status"] = ElementStatus.SUPERSEDED
 
 
-def _set_variant_status(
+def _set_contract_status(
     tables: dict[str, pd.DataFrame],
     concept_uri: str,
     status: ElementStatus,
 ) -> None:
-    """Set all ACTIVE variants for a concept to the given status."""
-    mask = (tables["variants"]["concept_uri"] == concept_uri) & (tables["variants"]["status"] == ElementStatus.ACTIVE)
-    tables["variants"].loc[mask, "status"] = status
+    """Set all ACTIVE contracts for a concept to the given status."""
+    mask = (tables["contracts"]["concept_uri"] == concept_uri) & (tables["contracts"]["status"] == ElementStatus.ACTIVE)
+    tables["contracts"].loc[mask, "status"] = status
 
 
 def _supersede_bindings_by_concept(
@@ -549,11 +549,13 @@ def _supersede_bindings_by_concept(
     concept_uri: str,
     status: ElementStatus = ElementStatus.SUPERSEDED,
 ) -> None:
-    """Mark all ACTIVE bindings associated with any variant of the given concept."""
-    variant_uris = set(tables["variants"][tables["variants"]["concept_uri"] == concept_uri]["variant_uri"])
-    if not variant_uris:
+    """Mark all ACTIVE bindings associated with any contract of the given concept."""
+    contract_uris = set(tables["contracts"][tables["contracts"]["concept_uri"] == concept_uri]["contract_uri"])
+    if not contract_uris:
         return
-    mask = tables["bindings"]["variant_uri"].isin(variant_uris) & (tables["bindings"]["status"] == ElementStatus.ACTIVE)
+    mask = tables["bindings"]["contract_uri"].isin(contract_uris) & (
+        tables["bindings"]["status"] == ElementStatus.ACTIVE
+    )
     tables["bindings"].loc[mask, "status"] = status
 
 
@@ -606,14 +608,14 @@ def _active_revision_uri(tables: dict[str, pd.DataFrame], concept_uri: str) -> s
     return str(active.iloc[0]["revision_uri"])
 
 
-def _active_variant_uri(tables: dict[str, pd.DataFrame], concept_uri: str) -> str | None:
-    """Return the URI of the current ACTIVE variant for a concept, or None."""
-    df = tables["variants"]
+def _active_contract_uri(tables: dict[str, pd.DataFrame], concept_uri: str) -> str | None:
+    """Return the URI of the current ACTIVE contract for a concept, or None."""
+    df = tables["contracts"]
     mask = (df["concept_uri"] == concept_uri) & (df["status"] == ElementStatus.ACTIVE)
     active = df[mask]
     if active.empty:
         return None
-    return str(active.iloc[0]["variant_uri"])
+    return str(active.iloc[0]["contract_uri"])
 
 
 def _child_concepts(tables: dict[str, pd.DataFrame], parent_uri: str) -> pd.DataFrame:

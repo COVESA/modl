@@ -83,20 +83,20 @@ Examples of changes that trigger a new revision:
 - A field being added or removed
 - An instance list changing
 
-### Variants
+### Contracts
 
-A variant captures the **data contract** for a field — a specific snapshot of its essential metadata. What counts as "essential" is **user-defined** via a configuration file. Any change to an essential attribute triggers a new variant.
+A contract captures the **data contract** for a field — a specific snapshot of its essential metadata. What counts as "essential" is **user-defined** via a configuration file. Any change to an essential attribute triggers a new contract.
 
 For example, if `datatype` is declared essential for `Vehicle.Speed`:
 
-| variant_uri | Snapshot | Status |
+| contract_uri | Snapshot | Status |
 |---|---|---|
-| `http://namespace.example/variants/10` | `Vehicle.Speed { datatype: Int }` | SUPERSEDED |
-| `http://namespace.example/variants/14` | `Vehicle.Speed { datatype: Float }` | ACTIVE |
+| `http://namespace.example/contracts/10` | `Vehicle.Speed { datatype: Int }` | SUPERSEDED |
+| `http://namespace.example/contracts/14` | `Vehicle.Speed { datatype: Float }` | ACTIVE |
 
-These are two variants of the same concept — the meaning of "speed" has not changed, but the data contract has.
+These are two contracts for the same concept — each a distinct variant of the essential metadata. The meaning of "speed" has not changed, but the data contract has.
 
-Variants apply to **both entities and fields**. An entity's essential metadata (e.g., its `type` or instance list) defines its contract just as a field's `datatype` defines its own. Each element's variant is governed independently by its own essential attribute configuration.
+Contracts apply to **both entities and fields**. An entity's essential metadata (e.g., its `type` or instance list) defines its contract just as a field's `datatype` defines its own. Each element's contract is governed independently by its own essential attribute configuration.
 
 ### Bindings
 
@@ -123,31 +123,31 @@ For a property whose parent entity has no instances (e.g., `Battery.StateOfCharg
 
 When a new instance is added (e.g., `Center`), the behavior depends on the breaking change configuration:
 
-| Config | Entity revision | Entity variant | Field revision | Field variant | New binding |
+| Config | Entity revision | Entity contract | Field revision | Field contract | New binding |
 |---|---|---|---|---|---|
-| **Breaking** | yes | yes | yes | yes (new) | yes, anchored to new variant |
-| **Non-breaking** | yes | no | yes | no (unchanged) | yes, appended to existing variant |
+| **Breaking** | yes | yes | yes | yes (new) | yes, anchored to new contract |
+| **Non-breaking** | yes | no | yes | no (unchanged) | yes, appended to existing contract |
 
-In the non-breaking case, existing binding IDs remain stable and consumers are unaffected. Binding sets under a variant are **append-only**.
+In the non-breaking case, existing binding IDs remain stable and consumers are unaffected. Binding sets under a contract are **append-only**.
 
 ### What each event writes to the ledger
 
 The table below shows which rows `modl sync` creates or updates for each type of change event, given the breaking-change classification configured by the user.
 
-| Event | concepts | revisions | variants | bindings |
+| Event | concepts | revisions | contracts | bindings |
 |---|---|---|---|---|
-| Entity `ADDED` | new row | new row | new row (initial variant) | — |
+| Entity `ADDED` | new row | new row | new row (initial contract) | — |
 | Entity `MODIFIED`, non-breaking | update `current_label` if renamed | new row | — (unchanged) | — |
 | Entity `MODIFIED`, breaking | update `current_label` if renamed | new row | new row | new rows for all child properties |
 | Entity `REMOVED` | status → SUPERSEDED | new row | status → SUPERSEDED | status → SUPERSEDED for child property bindings |
-| Property `ADDED` | new row | new row | new row (initial variant) | new binding per instance; one singleton if no instances |
+| Property `ADDED` | new row | new row | new row (initial contract) | new binding per instance; one singleton if no instances |
 | Property `MODIFIED`, non-breaking | update `current_label` if renamed | new row | — (unchanged) | — |
-| Property `MODIFIED`, breaking | update `current_label` if renamed | new row | new row | new rows (anchored to new variant) |
+| Property `MODIFIED`, breaking | update `current_label` if renamed | new row | new row | new rows (anchored to new contract) |
 | Property `REMOVED` | status → SUPERSEDED | new row | status → SUPERSEDED | status → SUPERSEDED |
 
 Key observations:
 - Every event produces a revision — the revision log is unconditional and unfiltered.
-- A variant is only created or superseded when a change is classified as breaking by the config. Non-breaking changes leave the active variant untouched, so any system holding a variant URI or binding URI is unaffected.
+- A contract is only created or superseded when a change is classified as breaking by the config. Non-breaking changes leave the active contract untouched, so any system holding a contract URI or binding URI is unaffected.
 - A rename never changes the concept URI. It updates `current_label` and appends the old label to `previous_labels` in the concept row.
 
 ## The Ledger Tables
@@ -162,7 +162,7 @@ uri = namespace + table_name + "/" + base36(serial)
 
 Base36 uses alphabet `0-9a-z` (lowercase ASCII). Values 0–9 encode as single decimal digits, values 10–35 as single letters (`a`–`z`); larger values use multiple characters (e.g., serial 40 → `14`, serial 103 → `2v`).
 
-**Authorship rule:** the ledger contains only records minted by the project owner. Every row has a serial number and a URI under the project namespace. Foreign Key (FK) columns (`concept_uri`, `variant_uri`, etc.) may reference URIs from other namespaces — those are foreign references, not rows authored here.
+**Authorship rule:** the ledger contains only records minted by the project owner. Every row has a serial number and a URI under the project namespace. Foreign Key (FK) columns (`concept_uri`, `contract_uri`, etc.) may reference URIs from other namespaces — those are foreign references, not rows authored here.
 
 **Cross-namespace imports (Work in progress):** when a model references elements from an external project, the importing project ships its own ledger alongside a pruned copy of the external ledger containing only the referenced rows, annotated with provenance (source namespace, release URL, content hash).
 
@@ -187,19 +187,19 @@ The `kind` column records the structural kind of the concept permanently. Only `
 | 57 | `http://namespace.example/concepts/8` | `http://namespace.example/revisions/1l` | — | SUPERSEDED |
 | 103 | `http://namespace.example/concepts/8` | `http://namespace.example/revisions/2v` | `http://namespace.example/revisions/1l` | ACTIVE |
 
-### `variants.csv`
+### `contracts.csv`
 
-| serial | concept_uri | variant_uri | revision_uri | status |
+| serial | concept_uri | contract_uri | revision_uri | status |
 |---|---|---|---|---|
-| 40 | `http://namespace.example/concepts/8` | `http://namespace.example/variants/14` | `http://namespace.example/revisions/2v` | ACTIVE |
+| 40 | `http://namespace.example/concepts/8` | `http://namespace.example/contracts/14` | `http://namespace.example/revisions/2v` | ACTIVE |
 
 ### `bindings.csv`
 
-| serial | variant_uri | binding_uri | instance_label | status |
+| serial | contract_uri | binding_uri | instance_label | status |
 |---|---|---|---|---|
-| 24 | `http://namespace.example/variants/14` | `http://namespace.example/bindings/o` | Left | ACTIVE |
-| 25 | `http://namespace.example/variants/14` | `http://namespace.example/bindings/p` | Right | ACTIVE |
-| 42 | `http://namespace.example/variants/1e` | `http://namespace.example/bindings/16` | *(null)* | ACTIVE |
+| 24 | `http://namespace.example/contracts/14` | `http://namespace.example/bindings/o` | Left | ACTIVE |
+| 25 | `http://namespace.example/contracts/14` | `http://namespace.example/bindings/p` | Right | ACTIVE |
+| 42 | `http://namespace.example/contracts/1e` | `http://namespace.example/bindings/16` | *(null)* | ACTIVE |
 
 The third row is a **singleton binding** — `Battery.StateOfCharge` whose parent has no instances. `instance_label` is null; the binding still provides a stable, versioned identity for the runtime path.
 
@@ -208,9 +208,9 @@ The third row is a **singleton binding** — `Battery.StateOfCharge` whose paren
 ```mermaid
 erDiagram
     concepts ||--o{ revisions : "tracked by"
-    concepts ||--o{ variants : "realized as"
-    revisions ||--o{ variants : "triggers"
-    variants ||--o{ bindings : "expanded into"
+    concepts ||--o{ contracts : "realized as"
+    revisions ||--o{ contracts : "triggers"
+    contracts ||--o{ bindings : "expanded into"
 
     concepts {
         int serial PK
@@ -227,16 +227,16 @@ erDiagram
         string previous_revision_uri FK
         string status
     }
-    variants {
+    contracts {
         int serial PK
         string concept_uri FK
-        string variant_uri UK
+        string contract_uri UK
         string revision_uri FK
         string status
     }
     bindings {
         int serial PK
-        string variant_uri FK
+        string contract_uri FK
         string binding_uri UK
         string instance_label
         string status
@@ -272,13 +272,13 @@ namespace:
   prefix: "ns"                            # optional display alias; used by inspection commands to shorten output
 
 entity:
-  instances: true   # breaking — triggers a new variant
-  type: true        # breaking — triggers a new variant
+  instances: true   # breaking — triggers a new contract
+  type: true        # breaking — triggers a new contract
   name: false       # renames are non-breaking; suppresses --strict warnings
 
 property:
-  output_type: true  # breaking — triggers a new variant
-  unit: true         # breaking — triggers a new variant
+  output_type: true  # breaking — triggers a new contract
+  unit: true         # breaking — triggers a new contract
   accuracy: true     # user-defined domain-specific attribute
   description: false # known, non-breaking; suppresses --strict warnings
 ```
@@ -289,7 +289,7 @@ Each key maps to a boolean with three distinct states:
 
 | Value | Meaning |
 |---|---|
-| `true` | Aspect is **breaking** — a change triggers a new variant. |
+| `true` | Aspect is **breaking** — a change triggers a new contract. |
 | `false` | Aspect is **known but non-breaking** — changes are silently accepted; no warning even with `--strict`. |
 | *(absent)* | Aspect is **unknown** — treated as non-breaking but produces a warning (error with `--strict`). |
 
@@ -372,7 +372,7 @@ On the first run, the ledger does not exist yet. `modl sync` creates it. For a f
 modl sync --ledger-dir ledger/ --config modl.yaml --diff-report initial_diff.json
 ```
 
-Persist (e.g., release) the four generated CSV files (`concepts.csv`, `revisions.csv`, `variants.csv`, `bindings.csv`) alongside your model.
+Persist (e.g., release) the four generated CSV files (`concepts.csv`, `revisions.csv`, `contracts.csv`, `bindings.csv`) alongside your model.
 
 ### 7. Sync on every subsequent release
 
@@ -409,14 +409,14 @@ This section documents the rationale behind key design decisions and the alterna
 
 ### Why four tables?
 
-One could argue that concepts and variants are sufficient: concepts capture identity, variants capture the data contract. This is true only if what constitutes a breaking change is known a priori and applies uniformly to all downstream consumers. In practice, different teams have different definitions of "breaking". The four-table split reflects this:
+One could argue that concepts and contracts are sufficient: concepts capture identity, contracts capture the data contract. This is true only if what constitutes a breaking change is known a priori and applies uniformly to all downstream consumers. In practice, different teams have different definitions of "breaking". The four-table split reflects this:
 
 - **concepts** — stable identity; what a thing *is*, regardless of how it changes
 - **revisions** — a complete, unfiltered audit log of every detected change; does not judge whether a change is breaking
-- **variants** — derived from revisions using a user-configurable set of essential attributes; two rows share a variant only if nothing essential to *that project's* definition of "breaking" changed
+- **contracts** — derived from revisions using a user-configurable set of essential attributes; two rows share a contract only if nothing essential to *that project's* definition of "breaking" changed
 - **bindings** — some modeling languages define entity instances (e.g., `Door: [Left, Right]`), which expand fields into multiple individually addressable runtime paths; bindings assign a stable identity to each such path
 
-Merging revisions and variants would either force a single global breaking-change policy or lose the audit trail. Merging bindings into variants would require variants to know about instance expansion, coupling two independent concepts.
+Merging revisions and contracts would either force a single global breaking-change policy or lose the audit trail. Merging bindings into contracts would require contracts to know about instance expansion, coupling two independent concepts.
 
 ### Why URIs as identifiers?
 

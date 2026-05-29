@@ -18,11 +18,11 @@ class ElementKind(StrEnum):
 
     The kind is set once when the concept is created and never changes.
 
-    - ``ENTITY``: top-level model container — receives concepts, revisions, variants; **no bindings**.
-    - ``PROPERTY``: field of an entity — receives concepts, revisions, variants, and **bindings**
+    - ``ENTITY``: top-level model container — receives concepts, revisions, contracts; **no bindings**.
+    - ``PROPERTY``: field of an entity — receives concepts, revisions, contracts, and **bindings**
       (one per instance when the parent entity declares instances; one singleton otherwise).
     - ``ENUMERATION_SET`` / ``ENUM_VALUE``: vocabulary elements (enums, units, code lists)
-      that receive concept URIs, revisions and variants but **no bindings**.
+      that receive concept URIs, revisions and contracts but **no bindings**.
     """
 
     ENTITY = "ENTITY"
@@ -54,21 +54,27 @@ class RevisionRow(BaseModel):
     status: ElementStatus
 
 
-class VariantRow(BaseModel):
-    """One row of variants.csv — a snapshot of the essential metadata that constitutes a data contract."""
+class ContractRow(BaseModel):
+    """One row of contracts.csv — a versioned data contract for a concept.
+
+    Each contract captures a distinct variant of the concept's essential metadata — the attributes
+    that matter to downstream consumers (e.g. output type, unit, instance list). A new contract is
+    minted whenever any of those essential attributes changes according to the breaking change config.
+    Non-breaking changes leave the active contract untouched, keeping all downstream binding URIs stable.
+    """
 
     serial: int = Field(ge=0)
     concept_uri: str
-    variant_uri: str
+    contract_uri: str
     revision_uri: str
     status: ElementStatus
 
 
 class BindingRow(BaseModel):
-    """One row of bindings.csv — maps a property variant to a concrete runtime path via an instance label."""
+    """One row of bindings.csv — maps a property contract to a concrete runtime path via an instance label."""
 
     serial: int = Field(ge=0)
-    variant_uri: str
+    contract_uri: str
     binding_uri: str
     instance_label: str | None = None
     status: ElementStatus

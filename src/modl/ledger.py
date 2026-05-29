@@ -11,7 +11,7 @@ from modl.models import ElementKind, ElementStatus
 
 # ── Schema constants ──────────────────────────────────────────────────────────
 
-TABLES = ("concepts", "revisions", "variants", "bindings")
+TABLES = ("concepts", "revisions", "contracts", "bindings")
 
 EXPECTED_COLUMNS: dict[str, list[str]] = {
     "concepts": [
@@ -25,14 +25,14 @@ EXPECTED_COLUMNS: dict[str, list[str]] = {
         "instances",
     ],
     "revisions": ["serial", "concept_uri", "revision_uri", "previous_revision_uri", "status"],
-    "variants": ["serial", "concept_uri", "variant_uri", "revision_uri", "status"],
-    "bindings": ["serial", "variant_uri", "binding_uri", "instance_label", "status"],
+    "contracts": ["serial", "concept_uri", "contract_uri", "revision_uri", "status"],
+    "bindings": ["serial", "contract_uri", "binding_uri", "instance_label", "status"],
 }
 
 UNIQUE_COLUMNS: dict[str, list[str]] = {
     "concepts": ["serial", "concept_uri"],
     "revisions": ["serial", "revision_uri"],
-    "variants": ["serial", "variant_uri"],
+    "contracts": ["serial", "contract_uri"],
     "bindings": ["serial", "binding_uri"],
 }
 
@@ -41,9 +41,9 @@ FK_CONSTRAINTS: list[tuple[str, str, str, str]] = [
     ("concepts", "parent_uri", "concepts", "concept_uri"),
     ("revisions", "concept_uri", "concepts", "concept_uri"),
     ("revisions", "previous_revision_uri", "revisions", "revision_uri"),
-    ("variants", "concept_uri", "concepts", "concept_uri"),
-    ("variants", "revision_uri", "revisions", "revision_uri"),
-    ("bindings", "variant_uri", "variants", "variant_uri"),
+    ("contracts", "concept_uri", "concepts", "concept_uri"),
+    ("contracts", "revision_uri", "revisions", "revision_uri"),
+    ("bindings", "contract_uri", "contracts", "contract_uri"),
 ]
 
 VALID_STATUSES = {s.value for s in ElementStatus}
@@ -53,8 +53,8 @@ VALID_KINDS = {k.value for k in ElementKind}
 REQUIRED_COLUMNS: dict[str, list[str]] = {
     "concepts": ["serial", "concept_uri", "current_label", "kind", "status"],
     "revisions": ["serial", "concept_uri", "revision_uri", "status"],
-    "variants": ["serial", "concept_uri", "variant_uri", "revision_uri", "status"],
-    "bindings": ["serial", "variant_uri", "binding_uri", "status"],
+    "contracts": ["serial", "concept_uri", "contract_uri", "revision_uri", "status"],
+    "bindings": ["serial", "contract_uri", "binding_uri", "status"],
 }
 
 # ── Exception ─────────────────────────────────────────────────────────────────
@@ -203,11 +203,11 @@ def validate_ledger(tables: dict[str, pd.DataFrame]) -> None:
                 f"[{child_table}.{child_col}] References missing from [{parent_table}.{parent_col}]: {sorted(orphans)}"
             )
 
-    # Cross-concept consistency: each variant's revision must belong to the same concept
-    variants_df = tables["variants"]
+    # Cross-concept consistency: each contract's revision must belong to the same concept
+    contracts_df = tables["contracts"]
     revisions_df = tables["revisions"]
-    if not variants_df.empty and not revisions_df.empty:
-        merged = variants_df[["concept_uri", "revision_uri"]].merge(
+    if not contracts_df.empty and not revisions_df.empty:
+        merged = contracts_df[["concept_uri", "revision_uri"]].merge(
             revisions_df[["revision_uri", "concept_uri"]].rename(columns={"concept_uri": "rev_concept_uri"}),
             on="revision_uri",
             how="left",
@@ -216,7 +216,7 @@ def validate_ledger(tables: dict[str, pd.DataFrame]) -> None:
         if not mismatch.empty:
             bad = sorted(mismatch["revision_uri"].dropna().tolist())
             raise LedgerValidationError(
-                f"[variants.revision_uri] References a revision belonging to a different concept: {bad}"
+                f"[contracts.revision_uri] References a revision belonging to a different concept: {bad}"
             )
 
     # Only PROPERTY concepts may have bindings; ENTITY, ENUMERATION_SET, and ENUM_VALUE must not
@@ -226,11 +226,11 @@ def validate_ledger(tables: dict[str, pd.DataFrame]) -> None:
     if not bindings_df.empty and not concepts_df.empty:
         non_binding_uris = set(concepts_df[concepts_df["kind"].isin(non_binding_kinds)]["concept_uri"])
         if non_binding_uris:
-            non_binding_variant_uris = set(
-                tables["variants"][tables["variants"]["concept_uri"].isin(non_binding_uris)]["variant_uri"]
+            non_binding_contract_uris = set(
+                tables["contracts"][tables["contracts"]["concept_uri"].isin(non_binding_uris)]["contract_uri"]
             )
-            if non_binding_variant_uris:
-                bad_bindings = bindings_df[bindings_df["variant_uri"].isin(non_binding_variant_uris)]
+            if non_binding_contract_uris:
+                bad_bindings = bindings_df[bindings_df["contract_uri"].isin(non_binding_contract_uris)]
                 if not bad_bindings.empty:
                     bad = sorted(bad_bindings["binding_uri"].tolist())
                     raise LedgerValidationError(

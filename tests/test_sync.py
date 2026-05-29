@@ -80,7 +80,7 @@ class TestEntityAdded:
         tables = sync(empty_ledger(), _report(_entity_added("Vehicle")), _cfg())
         assert len(tables["concepts"]) == 1
         assert len(tables["revisions"]) == 1
-        assert len(tables["variants"]) == 1
+        assert len(tables["contracts"]) == 1
         assert len(tables["bindings"]) == 0
 
     def test_concept_row_values(self) -> None:
@@ -235,7 +235,7 @@ class TestEntityModifiedNonBreaking:
         """Non-breaking entity MODIFIED does not create a new variant."""
         report = _report(_entity_added("Vehicle"), _entity_modified("Vehicle", description="updated"))
         tables = sync(empty_ledger(), report, _cfg())
-        assert len(tables["variants"]) == 1
+        assert len(tables["contracts"]) == 1
 
     def test_new_revision_supersedes_old(self) -> None:
         """Non-breaking MODIFIED mints a new revision and supersedes the previous one."""
@@ -278,7 +278,7 @@ class TestEntityModifiedBreakingNonInstance:
         cfg = _cfg(entity={"type": True})
         report = _report(_entity_added("Vehicle", type="branch"), _entity_modified("Vehicle", type="object"))
         tables = sync(empty_ledger(), report, cfg)
-        variants = tables["variants"]
+        variants = tables["contracts"]
         assert len(variants) == 2
         assert (variants["status"] == ElementStatus.SUPERSEDED).sum() == 1
         assert (variants["status"] == ElementStatus.ACTIVE).sum() == 1
@@ -293,8 +293,8 @@ class TestEntityModifiedBreakingNonInstance:
         )
         tables = sync(empty_ledger(), report, cfg)
         # Only the entity variant created at ADDED is superseded; one new entity variant; property variant unchanged
-        prop_variants = tables["variants"][
-            tables["variants"]["concept_uri"]
+        prop_variants = tables["contracts"][
+            tables["contracts"]["concept_uri"]
             == tables["concepts"][tables["concepts"]["current_label"] == "Vehicle.Speed"].iloc[0]["concept_uri"]
         ]
         assert (prop_variants["status"] == ElementStatus.ACTIVE).sum() == 1
@@ -340,7 +340,7 @@ class TestEntityModifiedInstanceNonBreaking:
         )
         tables = sync(empty_ledger(), report, cfg)
         prop_uri = tables["concepts"][tables["concepts"]["current_label"] == "Door.IsOpen"].iloc[0]["concept_uri"]
-        prop_variants = tables["variants"][tables["variants"]["concept_uri"] == prop_uri]
+        prop_variants = tables["contracts"][tables["contracts"]["concept_uri"] == prop_uri]
         assert len(prop_variants) == 1  # only the initial variant
 
     def test_child_property_gets_new_revision(self) -> None:
@@ -407,7 +407,7 @@ class TestEntityModifiedInstanceBreaking:
         )
         tables = sync(empty_ledger(), report, cfg)
         prop_uri = tables["concepts"][tables["concepts"]["current_label"] == "Door.IsOpen"].iloc[0]["concept_uri"]
-        prop_variants = tables["variants"][tables["variants"]["concept_uri"] == prop_uri]
+        prop_variants = tables["contracts"][tables["contracts"]["concept_uri"] == prop_uri]
         assert len(prop_variants) == 2
         assert (prop_variants["status"] == ElementStatus.SUPERSEDED).sum() == 1
         assert (prop_variants["status"] == ElementStatus.ACTIVE).sum() == 1
@@ -422,11 +422,11 @@ class TestEntityModifiedInstanceBreaking:
         )
         tables = sync(empty_ledger(), report, cfg)
         prop_uri = tables["concepts"][tables["concepts"]["current_label"] == "Door.IsOpen"].iloc[0]["concept_uri"]
-        new_variant_uri = tables["variants"][
-            (tables["variants"]["concept_uri"] == prop_uri) & (tables["variants"]["status"] == ElementStatus.ACTIVE)
-        ].iloc[0]["variant_uri"]
+        new_contract_uri = tables["contracts"][
+            (tables["contracts"]["concept_uri"] == prop_uri) & (tables["contracts"]["status"] == ElementStatus.ACTIVE)
+        ].iloc[0]["contract_uri"]
         active_bindings = tables["bindings"][tables["bindings"]["status"] == ElementStatus.ACTIVE]
-        assert set(active_bindings["variant_uri"].tolist()) == {new_variant_uri}
+        assert set(active_bindings["contract_uri"].tolist()) == {new_contract_uri}
 
     def test_ledger_validates_after_breaking_instance_change(self) -> None:
         """Full ledger validation passes after breaking instance change."""
@@ -461,7 +461,7 @@ class TestEntityRemoved:
         """All active variants for a removed entity are marked REMOVED."""
         report = _report(_entity_added("Vehicle"), _entity_removed("Vehicle"))
         tables = sync(empty_ledger(), report, _cfg())
-        assert (tables["variants"]["status"] == ElementStatus.REMOVED).all()
+        assert (tables["contracts"]["status"] == ElementStatus.REMOVED).all()
 
     def test_consistency_check_raises_on_missing_child_removed(self) -> None:
         """REMOVED entity without explicit REMOVED events for all child properties raises SyncError."""
@@ -510,7 +510,7 @@ class TestPropertyModifiedBreaking:
         )
         tables = sync(empty_ledger(), report, cfg)
         prop_uri = tables["concepts"][tables["concepts"]["current_label"] == "Vehicle.Speed"].iloc[0]["concept_uri"]
-        prop_variants = tables["variants"][tables["variants"]["concept_uri"] == prop_uri]
+        prop_variants = tables["contracts"][tables["contracts"]["concept_uri"] == prop_uri]
         assert len(prop_variants) == 2
         assert (prop_variants["status"] == ElementStatus.SUPERSEDED).sum() == 1
         assert (prop_variants["status"] == ElementStatus.ACTIVE).sum() == 1
@@ -570,7 +570,7 @@ class TestPropertyModifiedNonBreaking:
         )
         tables = sync(empty_ledger(), report, cfg)
         prop_uri = tables["concepts"][tables["concepts"]["current_label"] == "Vehicle.Speed"].iloc[0]["concept_uri"]
-        assert len(tables["variants"][tables["variants"]["concept_uri"] == prop_uri]) == 1
+        assert len(tables["contracts"][tables["contracts"]["concept_uri"] == prop_uri]) == 1
 
     def test_no_new_bindings(self) -> None:
         """Non-breaking property MODIFIED does not touch bindings."""
@@ -675,7 +675,7 @@ class TestRoundTrip:
         validate_ledger(t_final)
 
         prop_uri = t_final["concepts"][t_final["concepts"]["current_label"] == "Vehicle.Speed"].iloc[0]["concept_uri"]
-        prop_variants = t_final["variants"][t_final["variants"]["concept_uri"] == prop_uri]
+        prop_variants = t_final["contracts"][t_final["contracts"]["concept_uri"] == prop_uri]
         assert len(prop_variants) == 2
         assert (prop_variants["status"] == ElementStatus.SUPERSEDED).sum() == 1
         assert (prop_variants["status"] == ElementStatus.ACTIVE).sum() == 1
@@ -754,7 +754,7 @@ class TestEnumerationSetAdded:
         tables = sync(empty_ledger(), report, _cfg())
         assert len(tables["concepts"]) == 1
         assert len(tables["revisions"]) == 1
-        assert len(tables["variants"]) == 1
+        assert len(tables["contracts"]) == 1
 
     def test_enum_value_parent_uri_links_to_set(self) -> None:
         """ENUM_VALUE concept carries the ENUMERATION_SET concept URI as parent_uri."""
@@ -791,7 +791,7 @@ class TestEntityModifiedRenameAndBreaking:
         row = tables["concepts"].iloc[0]
         assert row["current_label"] == "Vehicle"
         assert "Vehicl" in json.loads(row["previous_labels"])
-        variants = tables["variants"]
+        variants = tables["contracts"]
         assert len(variants) == 2
         assert (variants["status"] == ElementStatus.SUPERSEDED).sum() == 1
         assert (variants["status"] == ElementStatus.ACTIVE).sum() == 1
@@ -810,7 +810,7 @@ class TestPropertyModifiedRenameAndNonBreaking:
         row = tables["concepts"][tables["concepts"]["current_label"] == "Vehicle.Velocity"].iloc[0]
         assert "Vehicle.Vel" in json.loads(row["previous_labels"])
         prop_uri = row["concept_uri"]
-        assert len(tables["variants"][tables["variants"]["concept_uri"] == prop_uri]) == 1
+        assert len(tables["contracts"][tables["contracts"]["concept_uri"] == prop_uri]) == 1
 
 
 # ── Instance list shrinks (non-breaking) ──────────────────────────────────────
@@ -871,7 +871,7 @@ class TestMultipleChildPropertiesCascade:
         tables = sync(empty_ledger(), report, cfg)
         for label in ("Door.IsOpen", "Door.IsLocked"):
             prop_uri = tables["concepts"][tables["concepts"]["current_label"] == label].iloc[0]["concept_uri"]
-            prop_variants = tables["variants"][tables["variants"]["concept_uri"] == prop_uri]
+            prop_variants = tables["contracts"][tables["contracts"]["concept_uri"] == prop_uri]
             assert len(prop_variants) == 2, f"Expected 2 variants for {label}"
             assert (prop_variants["status"] == ElementStatus.SUPERSEDED).sum() == 1
             assert (prop_variants["status"] == ElementStatus.ACTIVE).sum() == 1
@@ -901,11 +901,11 @@ class TestMultipleChildPropertiesCascade:
         )
         tables = sync(empty_ledger(), report, cfg)
         active_bindings = tables["bindings"][tables["bindings"]["status"] == ElementStatus.ACTIVE]
-        # Collect all new (ACTIVE) variant URIs
-        new_variant_uris = set(
-            tables["variants"][tables["variants"]["status"] == ElementStatus.ACTIVE]["variant_uri"].tolist()
+        # Collect all new (ACTIVE) contract URIs
+        new_contract_uris = set(
+            tables["contracts"][tables["contracts"]["status"] == ElementStatus.ACTIVE]["contract_uri"].tolist()
         )
-        assert set(active_bindings["variant_uri"].tolist()) <= new_variant_uris
+        assert set(active_bindings["contract_uri"].tolist()) <= new_contract_uris
 
 
 # ── Three successive syncs — serial continuity ────────────────────────────────
@@ -930,7 +930,7 @@ class TestThreeSuccessiveSyncs:
 
         final = read_ledger(ledger_dir)
         validate_ledger(final)
-        for table in ("concepts", "revisions", "variants", "bindings"):
+        for table in ("concepts", "revisions", "contracts", "bindings"):
             serials = sorted(final[table]["serial"].tolist())
             unique_serials = sorted(set(serials))
             assert serials == unique_serials, f"Duplicate serials in {table}"
@@ -957,5 +957,5 @@ class TestThreeSuccessiveSyncs:
         final = read_ledger(ledger_dir)
         validate_ledger(final)
         vehicle_uri = final["concepts"][final["concepts"]["current_label"] == "Vehicle"].iloc[0]["concept_uri"]
-        v_variants = final["variants"][final["variants"]["concept_uri"] == vehicle_uri]
+        v_variants = final["contracts"][final["contracts"]["concept_uri"] == vehicle_uri]
         assert len(v_variants) == 2

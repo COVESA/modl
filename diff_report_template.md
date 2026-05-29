@@ -68,7 +68,7 @@ The `changes` array is an ordered list of change events. Order does not affect c
 | `change_type` | always | `ADDED`, `REMOVED`, or `MODIFIED`. |
 | `renamed_from` | `MODIFIED` only | Previous label. Signals the ledger to record a rename rather than a separate removal and addition. Must be `null` or absent on `ADDED` and `REMOVED`. |
 | `aspects` | `ADDED` | Full initial-state snapshot of all entity-level attributes. Empty on `REMOVED`. Delta (changed keys only) on `MODIFIED`. |
-| `content` | `MODIFIED` only | Summary of which child properties changed. Each item carries `label` and `change_type`. Absent on `ADDED` and `REMOVED`. The sync engine uses this summary to record which properties were affected by an entity-level change (e.g., a breaking instance-list change that forces new variants on all children). |
+| `content` | `MODIFIED` only | Summary of which child properties changed. Each item carries `label` and `change_type`. Absent on `ADDED` and `REMOVED`. The sync engine uses this summary to record which properties were affected by an entity-level change (e.g., a breaking instance-list change that forces new contracts on all children). |
 
 ### Rules
 
@@ -166,13 +166,13 @@ A single `MODIFIED` event can carry both `renamed_from` and a non-empty `aspects
 }
 ```
 
-The sync engine evaluates the rename and the aspect delta independently against the config. Either one may independently trigger a new variant.
+The sync engine evaluates the rename and the aspect delta independently against the config. Either one may independently trigger a new contract.
 
 ---
 
 ## Vocabulary and governed elements
 
-Models often include shared vocabulary that properties reference — units of measurement, quantity kinds, code lists, enum types. These are first-class model elements with their own identity and change history. ModL treats them exactly like any other ENTITY or PROPERTY: they receive concept URIs, revisions, and variants, but **no bindings** (vocabulary elements are not runtime-addressable paths — and neither are ENTITY concepts; only PROPERTY concepts receive bindings).
+Models often include shared vocabulary that properties reference — units of measurement, quantity kinds, code lists, enum types. These are first-class model elements with their own identity and change history. ModL treats them exactly like any other ENTITY or PROPERTY: they receive concept URIs, revisions, and contracts, but **no bindings** (vocabulary elements are not runtime-addressable paths — and neither are ENTITY concepts; only PROPERTY concepts receive bindings).
 
 ### Mapping vocabulary to the IR
 
@@ -208,13 +208,13 @@ The link lives in the property's `aspects` snapshot. Emit the unit as the value 
 }
 ```
 
-Using the concept URI makes the reference unambiguous and stable across renames. When `unit: true` in the breaking-change config, a change to the referenced unit triggers a new property variant — the old variant permanently records the previous unit URI.
+Using the concept URI makes the reference unambiguous and stable across renames. When `unit: true` in the breaking-change config, a change to the referenced unit triggers a new property contract — the old contract permanently records the previous unit URI.
 
 The `unit` aspect value is treated as an opaque string by `modl`. Use a plain label (`"km/h"`) or a concept URI — whichever convention your project adopts. `modl` does not resolve or validate the value; it is stored verbatim and compared on future syncs to detect changes.
 
 ### Ledger table assignment
 
-| Element kind | concepts | revisions | variants | bindings |
+| Element kind | concepts | revisions | contracts | bindings |
 |---|---|---|---|---|
 | Model entity (`ENTITY`, e.g. `Vehicle.Door`) | ✅ | ✅ | ✅ | ❌ |
 | Model property (`PROPERTY`, parent has instances) | ✅ | ✅ | ✅ | ✅ one per instance |
@@ -366,14 +366,14 @@ namespace:
   prefix: "mp"
 
 entity:
-  instances: true   # breaking — triggers a new variant
-  type: true        # breaking — triggers a new variant
+  instances: true   # breaking — triggers a new contract
+  type: true        # breaking — triggers a new contract
   name: false       # renames are non-breaking; suppresses --strict warnings
 
 property:
-  output_type: true  # breaking — triggers a new variant
-  unit: true         # breaking — triggers a new variant
-  is_required: true  # breaking — triggers a new variant
+  output_type: true  # breaking — triggers a new contract
+  unit: true         # breaking — triggers a new contract
+  is_required: true  # breaking — triggers a new contract
   accuracy: true     # user-defined domain attribute; breaking
   description: false # known, non-breaking; suppresses --strict warnings
 ```
@@ -382,7 +382,7 @@ Each key maps to a boolean with three distinct states:
 
 | Value | Meaning |
 |---|---|
-| `true` | Aspect is **breaking** — a change triggers a new variant. |
+| `true` | Aspect is **breaking** — a change triggers a new contract. |
 | `false` | Aspect is **known but non-breaking** — changes are accepted silently; no warning even with `--strict`. |
 | *(absent)* | Aspect is **unknown** — treated as non-breaking but produces a warning (error with `--strict`). |
 

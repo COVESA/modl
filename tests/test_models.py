@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from modl.models import BindingRow, ConceptRow, ElementKind, ElementStatus, RevisionRow, VariantRow
+from modl.models import BindingRow, ConceptRow, ContractRow, ElementKind, ElementStatus, RevisionRow
 
 
 class TestElementStatus:
@@ -159,25 +159,25 @@ class TestRevisionRow:
         assert row.previous_revision_uri == "ns-r:57"
 
 
-class TestVariantRow:
+class TestContractRow:
     def test_valid(self) -> None:
-        """Variant links a concept URI to a specific revision."""
-        row = VariantRow(
+        """Contract links a concept URI to a specific revision."""
+        row = ContractRow(
             serial=40,
             concept_uri="ns-c:8",
-            variant_uri="ns-v:40",
+            contract_uri="ns-ct:40",
             revision_uri="ns-r:103",
             status=ElementStatus.ACTIVE,
         )
-        assert row.variant_uri == "ns-v:40"
+        assert row.contract_uri == "ns-ct:40"
 
 
 class TestBindingRow:
     def test_valid(self) -> None:
-        """Binding attaches an instance label to a variant URI."""
+        """Binding attaches an instance label to a contract URI."""
         row = BindingRow(
             serial=24,
-            variant_uri="ns-v:40",
+            contract_uri="ns-ct:40",
             binding_uri="ns-b:24",
             instance_label="Left",
             status=ElementStatus.ACTIVE,
@@ -188,7 +188,7 @@ class TestBindingRow:
         """Binding with no instance label is valid (singleton — parent has no instances)."""
         row = BindingRow(
             serial=42,
-            variant_uri="ns-v:40",
+            contract_uri="ns-ct:40",
             binding_uri="ns-b:42",
             status=ElementStatus.ACTIVE,
         )
