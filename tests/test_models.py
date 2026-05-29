@@ -78,6 +78,52 @@ class TestConceptRow:
         )
         assert row.previous_labels == ["Vehicle.Velocity"]
 
+    def test_parent_uri_defaults_to_none(self) -> None:
+        """parent_uri defaults to None when not supplied."""
+        row = ConceptRow(
+            serial=0,
+            concept_uri="ns-c:0",
+            current_label="Vehicle",
+            kind=ElementKind.ENTITY,
+            status=ElementStatus.ACTIVE,
+        )
+        assert row.parent_uri is None
+
+    def test_parent_uri_set_for_property(self) -> None:
+        """parent_uri is accepted for PROPERTY concepts."""
+        row = ConceptRow(
+            serial=1,
+            concept_uri="ns-c:1",
+            current_label="Vehicle.Speed",
+            kind=ElementKind.PROPERTY,
+            status=ElementStatus.ACTIVE,
+            parent_uri="ns-c:0",
+        )
+        assert row.parent_uri == "ns-c:0"
+
+    def test_instances_defaults_to_none(self) -> None:
+        """instances defaults to None when not supplied."""
+        row = ConceptRow(
+            serial=0,
+            concept_uri="ns-c:0",
+            current_label="Vehicle",
+            kind=ElementKind.ENTITY,
+            status=ElementStatus.ACTIVE,
+        )
+        assert row.instances is None
+
+    def test_instances_accepted_as_list(self) -> None:
+        """instances is accepted as a list of strings."""
+        row = ConceptRow(
+            serial=2,
+            concept_uri="ns-c:2",
+            current_label="Door",
+            kind=ElementKind.ENTITY,
+            status=ElementStatus.ACTIVE,
+            instances=["Left", "Right"],
+        )
+        assert row.instances == ["Left", "Right"]
+
     def test_negative_id_rejected(self) -> None:
         """ID must be non-negative."""
         with pytest.raises(ValidationError):

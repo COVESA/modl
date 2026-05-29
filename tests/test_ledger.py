@@ -37,6 +37,8 @@ class TestEmptyLedger:
             "previous_labels",
             "kind",
             "status",
+            "parent_uri",
+            "instances",
         ]
         assert list(ledger["revisions"].columns) == [
             "serial",
@@ -72,7 +74,17 @@ class TestValidateLedger:
         """Unexpected extra column triggers validation failure."""
         ledger = empty_ledger()
         ledger["concepts"] = pd.DataFrame(
-            columns=["serial", "concept_uri", "current_label", "previous_labels", "kind", "status", "extra"]
+            columns=[
+                "serial",
+                "concept_uri",
+                "current_label",
+                "previous_labels",
+                "kind",
+                "status",
+                "parent_uri",
+                "instances",
+                "extra",
+            ]
         )
         with pytest.raises(LedgerValidationError, match="Unexpected columns"):
             validate_ledger(ledger)
@@ -88,6 +100,8 @@ class TestValidateLedger:
                 "previous_labels": [None, None],
                 "kind": ["ENTITY", "ENTITY"],
                 "status": ["ACTIVE", "ACTIVE"],
+                "parent_uri": [None, None],
+                "instances": [None, None],
             }
         )
         with pytest.raises(LedgerValidationError, match="duplicate"):
@@ -104,6 +118,8 @@ class TestValidateLedger:
                 "previous_labels": [None, None],
                 "kind": ["ENTITY", "ENTITY"],
                 "status": ["ACTIVE", "ACTIVE"],
+                "parent_uri": [None, None],
+                "instances": [None, None],
             }
         )
         with pytest.raises(LedgerValidationError, match="duplicate"):
@@ -120,6 +136,8 @@ class TestValidateLedger:
                 "previous_labels": [None],
                 "kind": ["PROPERTY"],
                 "status": ["ACTIVE"],
+                "parent_uri": [None],
+                "instances": [None],
             }
         )
         ledger["revisions"] = pd.DataFrame(
@@ -162,6 +180,8 @@ class TestValidateLedger:
                 "previous_labels": [None],
                 "kind": ["ENTITY"],
                 "status": ["ACTIVE"],
+                "parent_uri": [None],
+                "instances": [None],
             }
         )
         with pytest.raises(LedgerValidationError, match="null"):
@@ -178,6 +198,8 @@ class TestValidateLedger:
                 "previous_labels": [None],
                 "kind": ["ENTITY"],
                 "status": ["PENDING"],
+                "parent_uri": [None],
+                "instances": [None],
             }
         )
         with pytest.raises(LedgerValidationError, match="Invalid status"):
@@ -194,6 +216,8 @@ class TestValidateLedger:
                 "previous_labels": [None],
                 "kind": ["BRANCH"],  # not a valid ElementKind
                 "status": ["ACTIVE"],
+                "parent_uri": [None],
+                "instances": [None],
             }
         )
         with pytest.raises(LedgerValidationError, match="Invalid kind"):
@@ -225,6 +249,8 @@ class TestValidateLedger:
                 "previous_labels": [None],
                 "kind": ["ENTITY"],
                 "status": ["ACTIVE"],
+                "parent_uri": [None],
+                "instances": [None],
             }
         )
         with pytest.raises(LedgerValidationError, match="negative"):
@@ -241,6 +267,8 @@ class TestValidateLedger:
                 "previous_labels": [None],
                 "kind": ["ENTITY"],
                 "status": ["ACTIVE"],
+                "parent_uri": [None],
+                "instances": [None],
             }
         )
         with pytest.raises(LedgerValidationError, match="URI suffix does not match"):
@@ -257,6 +285,8 @@ class TestValidateLedger:
                 "previous_labels": [None],
                 "kind": ["ENTITY"],
                 "status": ["ACTIVE"],
+                "parent_uri": [None],
+                "instances": [None],
             }
         )
         with pytest.raises(LedgerValidationError, match="invalid base-36 suffix"):
@@ -273,6 +303,8 @@ class TestValidateLedger:
                 "previous_labels": [None],
                 "kind": ["ENTITY"],
                 "status": ["ACTIVE"],
+                "parent_uri": [None],
+                "instances": [None],
             }
         )
         ledger["revisions"] = pd.DataFrame(
@@ -298,6 +330,8 @@ class TestValidateLedger:
                 "previous_labels": [None, None],
                 "kind": ["ENTITY", "ENTITY"],
                 "status": ["ACTIVE", "ACTIVE"],
+                "parent_uri": [None, None],
+                "instances": [None, None],
             }
         )
         ledger["revisions"] = pd.DataFrame(
@@ -332,6 +366,8 @@ class TestValidateLedger:
                 "previous_labels": [None],
                 "kind": ["PROPERTY"],
                 "status": ["ACTIVE"],
+                "parent_uri": [None],
+                "instances": [None],
             }
         )
         ledger["revisions"] = pd.DataFrame(
@@ -374,6 +410,8 @@ class TestValidateLedger:
                 "previous_labels": [None],
                 "kind": ["ENUM_VALUE"],
                 "status": ["ACTIVE"],
+                "parent_uri": [None],
+                "instances": [None],
             }
         )
         ledger["revisions"] = pd.DataFrame(
@@ -417,6 +455,8 @@ class TestValidateLedger:
                 "previous_labels": [None],
                 "kind": ["ENTITY"],
                 "status": ["ACTIVE"],
+                "parent_uri": [None],
+                "instances": [None],
             }
         )
         ledger["revisions"] = pd.DataFrame(
@@ -479,6 +519,8 @@ class TestReadWriteLedger:
                 "previous_labels": [None],
                 "kind": ["ENTITY"],
                 "status": ["ACTIVE"],
+                "parent_uri": [None],
+                "instances": [None],
             }
         )
         write_ledger(ledger, tmp_path)

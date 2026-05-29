@@ -9,6 +9,8 @@ from . import __version__, log
 from .config import BreakingChangeConfig
 from .ir import DiffReport, validate_report_aspects
 from .ledger import LedgerValidationError, empty_ledger, read_ledger, validate_ledger_dir, write_ledger
+from .sync import SyncError
+from .sync import sync as run_sync
 
 
 @click.group(context_settings={"auto_envvar_prefix": "modl"})
@@ -82,12 +84,16 @@ def sync(diff_report: Path | None, ledger_dir: Path, config: Path, dry_run: bool
             validate_ledger_dir(ledger_dir)
         except LedgerValidationError as exc:
             log.error("%s", exc)
-            raise SystemExit(1) from exc
+            raise SystemExit(1) from None
 
     ledger_exists = dir_is_non_empty
 
     if ledger_exists:
-        tables = read_ledger(ledger_dir)
+        try:
+            tables = read_ledger(ledger_dir)
+        except LedgerValidationError as exc:
+            log.error("Ledger validation error — %s", exc)
+            raise SystemExit(1) from None
         log.info("Loaded existing ledger from %s", ledger_dir)
     else:
         tables = empty_ledger()
@@ -117,6 +123,12 @@ def sync(diff_report: Path | None, ledger_dir: Path, config: Path, dry_run: bool
 
         if strict and (structural_warnings or aspect_warnings):
             raise SystemExit(1)
+
+        try:
+            tables = run_sync(tables, report, cfg)
+        except SyncError as exc:
+            log.error("Sync error — %s", exc)
+            raise SystemExit(1) from None
 
     if dry_run:
         log.info("Dry run — no changes will be written")

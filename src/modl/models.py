@@ -40,6 +40,8 @@ class ConceptRow(BaseModel):
     previous_labels: list[str] = Field(default_factory=list)
     kind: ElementKind
     status: ElementStatus
+    parent_uri: str | None = None
+    instances: list[str] | None = None
 
 
 class RevisionRow(BaseModel):

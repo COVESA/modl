@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -13,7 +14,16 @@ from modl.models import ElementKind, ElementStatus
 TABLES = ("concepts", "revisions", "variants", "bindings")
 
 EXPECTED_COLUMNS: dict[str, list[str]] = {
-    "concepts": ["serial", "concept_uri", "current_label", "previous_labels", "kind", "status"],
+    "concepts": [
+        "serial",
+        "concept_uri",
+        "current_label",
+        "previous_labels",
+        "kind",
+        "status",
+        "parent_uri",
+        "instances",
+    ],
     "revisions": ["serial", "concept_uri", "revision_uri", "previous_revision_uri", "status"],
     "variants": ["serial", "concept_uri", "variant_uri", "revision_uri", "status"],
     "bindings": ["serial", "variant_uri", "binding_uri", "instance_label", "status"],
@@ -28,6 +38,7 @@ UNIQUE_COLUMNS: dict[str, list[str]] = {
 
 # (child_table, child_column, parent_table, parent_column)
 FK_CONSTRAINTS: list[tuple[str, str, str, str]] = [
+    ("concepts", "parent_uri", "concepts", "concept_uri"),
     ("revisions", "concept_uri", "concepts", "concept_uri"),
     ("revisions", "previous_revision_uri", "revisions", "revision_uri"),
     ("variants", "concept_uri", "concepts", "concept_uri"),
@@ -145,6 +156,40 @@ def validate_ledger(tables: dict[str, pd.DataFrame]) -> None:
             invalid_kinds = set(df["kind"].dropna().unique()) - VALID_KINDS
             if invalid_kinds:
                 raise LedgerValidationError(f"[{name}] Invalid kind values: {sorted(invalid_kinds)}")
+
+            # ENTITY and ENUMERATION_SET must not have a parent_uri
+            no_parent_kinds = {ElementKind.ENTITY.value, ElementKind.ENUMERATION_SET.value}
+            bad_parent = df[df["kind"].isin(no_parent_kinds) & df["parent_uri"].notna()]
+            if not bad_parent.empty:
+                bad = sorted(bad_parent["concept_uri"].tolist())
+                raise LedgerValidationError(
+                    f"[concepts] ENTITY and ENUMERATION_SET concepts must have null parent_uri: {bad}"
+                )
+
+            # ENUMERATION_SET and ENUM_VALUE must not have instances
+            no_instances_kinds = {ElementKind.ENUMERATION_SET.value, ElementKind.ENUM_VALUE.value}
+            bad_instances = df[df["kind"].isin(no_instances_kinds) & df["instances"].notna()]
+            if not bad_instances.empty:
+                bad = sorted(bad_instances["concept_uri"].tolist())
+                raise LedgerValidationError(
+                    f"[concepts] ENUMERATION_SET and ENUM_VALUE concepts must have null instances: {bad}"
+                )
+
+            # Non-null instances must be a valid JSON array of strings
+            for _, row in df[df["instances"].notna()].iterrows():
+                raw = row["instances"]
+                try:
+                    parsed = json.loads(raw)
+                except (json.JSONDecodeError, TypeError) as exc:
+                    raise LedgerValidationError(
+                        f"[concepts] Column 'instances' contains invalid JSON at"
+                        f"concept_uri '{row['concept_uri']}': {exc}"
+                    ) from exc
+                if not isinstance(parsed, list) or not all(isinstance(v, str) for v in parsed):
+                    raise LedgerValidationError(
+                        f"[concepts] Column 'instances' must be a JSON array of strings at"
+                        f"concept_uri '{row['concept_uri']}'. Got: {raw}"
+                    )
 
     # Referential integrity
     for child_table, child_col, parent_table, parent_col in FK_CONSTRAINTS:
