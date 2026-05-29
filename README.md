@@ -1,5 +1,7 @@
 # Model Ledger
 
+![ModL banner](figures/modl_banner.PNG)
+
 **Model Ledger** (`ModL`) is a tool for managing the identity of a domain data model over time — tracking what exists, what changed, and what that means for the systems that consume it.
 
 ## Overview
@@ -85,7 +87,10 @@ Examples of changes that trigger a new revision:
 
 ### Contracts
 
-A contract captures the **data contract** for a field — a specific snapshot of its essential metadata. What counts as "essential" is **user-defined** via a configuration file. Any change to an essential attribute triggers a new contract.
+A contract captures the specific data structure agreement between producers and consumers.
+It assigns identity to a concrete variant of the model that is relevant to the downstream users.
+What counts as "relevant" is **user-defined** via a configuration file. Any change to an essential attribute triggers a new contract.
+In other words, if a braking change is detected, a new contract identy is minted.
 
 For example, if `datatype` is declared essential for `Vehicle.Speed`:
 
