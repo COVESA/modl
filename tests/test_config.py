@@ -3,61 +3,85 @@ from pathlib import Path
 import pytest
 import yaml
 
-from modl.config import BreakingChangeConfig, NamespaceConfig
+from modl.config import BreakingChangeConfig, ModelMetadata
 from modl.models import ElementKind
 
+VALID_METADATA = {
+    "name": "My Project",
+    "id": "https://myproject.org/model/",
+    "preferred_prefix": "mp",
+}
+
 VALID_CONFIG = {
-    "namespace": {"namespace": "https://myproject.org/model/", "prefix": "mp"},
     "entity": {"instances": True, "type": True},
     "property": {"datatype": True, "unit": True, "accuracy": True},
 }
 
 
-class TestNamespaceConfig:
-    def test_uri_base_slash_namespace(self) -> None:
-        """uri_base concatenates namespace and table directly; no extra slash inserted."""
-        ns = NamespaceConfig(namespace="https://myproject.org/model/", prefix="mp")
-        assert ns.uri_base("concepts") == "https://myproject.org/model/concepts"
-        assert ns.uri_base("revisions") == "https://myproject.org/model/revisions"
-        assert ns.uri_base("contracts") == "https://myproject.org/model/contracts"
-        assert ns.uri_base("bindings") == "https://myproject.org/model/bindings"
+class TestModelMetadata:
+    def test_uri_base_slash_id(self) -> None:
+        """uri_base concatenates id and table directly; no extra slash inserted."""
+        meta = ModelMetadata(name="Test", id="https://myproject.org/model/")
+        assert meta.uri_base("concepts") == "https://myproject.org/model/concepts"
+        assert meta.uri_base("revisions") == "https://myproject.org/model/revisions"
+        assert meta.uri_base("contracts") == "https://myproject.org/model/contracts"
+        assert meta.uri_base("bindings") == "https://myproject.org/model/bindings"
 
-    def test_uri_base_hash_namespace(self) -> None:
-        """Hash-terminated namespace also produces a valid concatenated URI."""
-        ns = NamespaceConfig(namespace="https://myproject.org/model#")
-        assert ns.uri_base("concepts") == "https://myproject.org/model#concepts"
+    def test_uri_base_hash_id(self) -> None:
+        """Hash-terminated id also produces a valid concatenated URI."""
+        meta = ModelMetadata(name="Test", id="https://myproject.org/model#")
+        assert meta.uri_base("concepts") == "https://myproject.org/model#concepts"
 
-    def test_uri_base_without_prefix(self) -> None:
-        """Prefix absence does not affect the stored URI — namespace is always used."""
-        ns = NamespaceConfig(namespace="https://myproject.org/model/")
-        assert ns.uri_base("concepts") == "https://myproject.org/model/concepts"
+    def test_uri_base_without_preferred_prefix(self) -> None:
+        """Absence of preferred_prefix does not affect the stored URI — id is always used."""
+        meta = ModelMetadata(name="Test", id="https://myproject.org/model/")
+        assert meta.uri_base("concepts") == "https://myproject.org/model/concepts"
 
-    def test_prefix_is_stored_independently(self) -> None:
-        """Prefix is preserved as a display-only field, not baked into stored URIs."""
-        ns = NamespaceConfig(namespace="https://myproject.org/model/", prefix="mp")
-        assert ns.prefix == "mp"
-        assert not ns.uri_base("concepts").startswith("mp")
+    def test_preferred_prefix_is_stored_independently(self) -> None:
+        """preferred_prefix is preserved as a display-only field, not baked into stored URIs."""
+        meta = ModelMetadata(name="Test", id="https://myproject.org/model/", preferred_prefix="mp")
+        assert meta.preferred_prefix == "mp"
+        assert not meta.uri_base("concepts").startswith("mp")
 
-    def test_namespace_without_separator_rejected(self) -> None:
-        """Namespace not ending in '/' or '#' is rejected at validation time."""
+    def test_id_without_separator_rejected(self) -> None:
+        """id not ending in '/' or '#' is rejected at validation time."""
         from pydantic import ValidationError
 
-        with pytest.raises(ValidationError, match="namespace must end with"):
-            NamespaceConfig(namespace="https://myproject.org/model")
+        with pytest.raises(ValidationError, match="id must end with"):
+            ModelMetadata(name="Test", id="https://myproject.org/model")
 
-    def test_namespace_with_spaces_rejected(self) -> None:
-        """Namespace containing spaces is rejected."""
+    def test_id_with_spaces_rejected(self) -> None:
+        """id containing spaces is rejected."""
         from pydantic import ValidationError
 
         with pytest.raises(ValidationError, match="must not contain spaces"):
-            NamespaceConfig(namespace="https://my project.org/model/")
+            ModelMetadata(name="Test", id="https://my project.org/model/")
 
-    def test_namespace_not_absolute_rejected(self) -> None:
-        """Relative or scheme-less namespace is rejected."""
+    def test_id_not_absolute_rejected(self) -> None:
+        """Relative or scheme-less id is rejected."""
         from pydantic import ValidationError
 
         with pytest.raises(ValidationError, match="must be an absolute URI"):
-            NamespaceConfig(namespace="example-namespace/")
+            ModelMetadata(name="Test", id="example-namespace/")
+
+    def test_name_accepted(self) -> None:
+        """name field is stored as-is."""
+        meta = ModelMetadata(name="My Model", id="https://myproject.org/model/")
+        assert meta.name == "My Model"
+
+    def test_from_yaml(self, tmp_path: Path) -> None:
+        """YAML file round-trips to the expected metadata values."""
+        meta_file = tmp_path / "metadata.yaml"
+        meta_file.write_text(yaml.dump(VALID_METADATA))
+        meta = ModelMetadata.from_yaml(meta_file)
+        assert meta.name == "My Project"
+        assert meta.id == "https://myproject.org/model/"
+        assert meta.preferred_prefix == "mp"
+
+    def test_from_yaml_missing_file_raises(self, tmp_path: Path) -> None:
+        """Non-existent YAML path raises FileNotFoundError."""
+        with pytest.raises(FileNotFoundError):
+            ModelMetadata.from_yaml(tmp_path / "nonexistent.yaml")
 
 
 class TestBreakingChangeConfig:
@@ -66,23 +90,17 @@ class TestBreakingChangeConfig:
         from pydantic import ValidationError
 
         with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
-            BreakingChangeConfig.model_validate(
-                {
-                    "namespace": {"namespace": "myns/"},
-                    "other": {"key": "value"},
-                }
-            )
+            BreakingChangeConfig.model_validate({"other": {"key": "value"}})
 
     def test_load_from_dict(self) -> None:
         """Valid config dict deserialises to the expected field values."""
         cfg = BreakingChangeConfig.model_validate(VALID_CONFIG)
-        assert cfg.namespace.prefix == "mp"
         assert cfg.property["datatype"] is True
         assert cfg.entity["instances"] is True
 
     def test_defaults_empty_dicts(self) -> None:
         """entity and property default to empty dicts when omitted."""
-        cfg = BreakingChangeConfig(namespace=NamespaceConfig(namespace="http://example.org/myns/"))
+        cfg = BreakingChangeConfig()
         assert cfg.entity == {}
         assert cfg.property == {}
 
@@ -93,9 +111,7 @@ class TestBreakingChangeConfig:
 
     def test_is_breaking_entity_false_value(self) -> None:
         """Aspect mapped to false is explicitly non-breaking (not absent — suppresses warnings)."""
-        cfg = BreakingChangeConfig.model_validate(
-            {"namespace": {"namespace": "https://myproject.org/model/"}, "entity": {"description": False}}
-        )
+        cfg = BreakingChangeConfig.model_validate({"entity": {"description": False}})
         assert cfg.is_breaking(ElementKind.ENTITY, {"description": "updated"}) is False
 
     def test_is_breaking_entity_absent(self) -> None:
@@ -125,21 +141,17 @@ class TestBreakingChangeConfig:
 
     def test_is_breaking_rename_name_true(self) -> None:
         """renamed_from with name: true makes the rename breaking."""
-        cfg = BreakingChangeConfig.model_validate(
-            {"namespace": {"namespace": "https://myproject.org/model/"}, "entity": {"name": True}}
-        )
+        cfg = BreakingChangeConfig.model_validate({"entity": {"name": True}})
         assert cfg.is_breaking(ElementKind.ENTITY, {}, renamed_from="OldVehicle") is True
 
     def test_is_breaking_rename_name_false(self) -> None:
         """renamed_from with name: false is explicitly non-breaking."""
-        cfg = BreakingChangeConfig.model_validate(
-            {"namespace": {"namespace": "https://myproject.org/model/"}, "entity": {"name": False}}
-        )
+        cfg = BreakingChangeConfig.model_validate({"entity": {"name": False}})
         assert cfg.is_breaking(ElementKind.ENTITY, {}, renamed_from="OldVehicle") is False
 
     def test_is_breaking_rename_name_absent(self) -> None:
         """renamed_from with name absent from config is non-breaking."""
-        cfg = BreakingChangeConfig.model_validate({"namespace": {"namespace": "https://myproject.org/model/"}})
+        cfg = BreakingChangeConfig()
         assert cfg.is_breaking(ElementKind.ENTITY, {}, renamed_from="OldVehicle") is False
 
     def test_is_breaking_absent_aspect_key_is_false(self) -> None:
@@ -156,31 +168,24 @@ class TestBreakingChangeConfig:
 
     def test_is_breaking_rename_false_not_breaking(self) -> None:
         """Rename is non-breaking (and silent) when 'name' maps to false."""
-        cfg = BreakingChangeConfig.model_validate(
-            {"namespace": {"namespace": "https://myproject.org/model/"}, "property": {"name": False}}
-        )
+        cfg = BreakingChangeConfig.model_validate({"property": {"name": False}})
         assert cfg.is_breaking(ElementKind.PROPERTY, {}, renamed_from="OldName") is False
 
     def test_is_breaking_rename_true_breaking(self) -> None:
         """Rename is breaking when 'name' maps to true."""
-        cfg = BreakingChangeConfig.model_validate(
-            {"namespace": {"namespace": "https://myproject.org/model/"}, "property": {"name": True}}
-        )
+        cfg = BreakingChangeConfig.model_validate({"property": {"name": True}})
         assert cfg.is_breaking(ElementKind.PROPERTY, {}, renamed_from="OldName") is True
 
     def test_is_breaking_entity_rename_true_breaking(self) -> None:
         """Entity rename is breaking when 'name' maps to true under entity."""
-        cfg = BreakingChangeConfig.model_validate(
-            {"namespace": {"namespace": "https://myproject.org/model/"}, "entity": {"name": True}}
-        )
+        cfg = BreakingChangeConfig.model_validate({"entity": {"name": True}})
         assert cfg.is_breaking(ElementKind.ENTITY, {}, renamed_from="OldEntity") is True
 
     def test_load_from_yaml(self, tmp_path: Path) -> None:
         """YAML file round-trips to the expected config values."""
-        config_file = tmp_path / "modl.yaml"
+        config_file = tmp_path / "breaking.yaml"
         config_file.write_text(yaml.dump(VALID_CONFIG))
         cfg = BreakingChangeConfig.from_yaml(config_file)
-        assert cfg.namespace.namespace == "https://myproject.org/model/"
         assert cfg.property["datatype"] is True
         assert cfg.property["unit"] is True
         assert cfg.property["accuracy"] is True

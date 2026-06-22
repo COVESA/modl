@@ -26,7 +26,6 @@ def _config(**kwargs) -> BreakingChangeConfig:
     """Return a minimal config, optionally overriding entity/property aspect dicts."""
     return BreakingChangeConfig.model_validate(
         {
-            "namespace": {"namespace": NS},
             "entity": kwargs.get("entity", {}),
             "property": kwargs.get("property_", {}),
         }

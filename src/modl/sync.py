@@ -17,7 +17,7 @@ from typing import Any
 
 import pandas as pd
 
-from modl.config import BreakingChangeConfig
+from modl.config import BreakingChangeConfig, ModelMetadata
 from modl.ir import ChangeType, DiffReport, EntityChanged, PropertyChanged
 from modl.ledger import b36encode, next_serial
 from modl.models import ElementKind, ElementStatus
@@ -41,6 +41,7 @@ class SyncError(Exception):
 def sync(
     tables: dict[str, pd.DataFrame],
     report: DiffReport,
+    metadata: ModelMetadata,
     cfg: BreakingChangeConfig,
 ) -> dict[str, pd.DataFrame]:
     """Apply a diff report to the ledger tables and return the updated tables.
@@ -72,14 +73,14 @@ def sync(
     rest = [ev for ev in report.changes if ev.change_type != ChangeType.ADDED]
 
     for event in added_entities:
-        _process_entity(tables, event, cfg, removed_labels)
+        _process_entity(tables, event, metadata, cfg, removed_labels)
     for event in added_properties:
-        _process_property(tables, event, cfg)
+        _process_property(tables, event, metadata, cfg)
     for event in rest:
         if isinstance(event, EntityChanged):
-            _process_entity(tables, event, cfg, removed_labels)
+            _process_entity(tables, event, metadata, cfg, removed_labels)
         else:
-            _process_property(tables, event, cfg)
+            _process_property(tables, event, metadata, cfg)
 
     return tables
 
@@ -90,32 +91,34 @@ def sync(
 def _process_entity(
     tables: dict[str, pd.DataFrame],
     event: EntityChanged,
+    metadata: ModelMetadata,
     cfg: BreakingChangeConfig,
     removed_labels: set[str],
 ) -> None:
     ct = event.change_type
 
     if ct == ChangeType.ADDED:
-        _entity_added(tables, event, cfg)
+        _entity_added(tables, event, metadata, cfg)
     elif ct == ChangeType.MODIFIED:
-        _entity_modified(tables, event, cfg)
+        _entity_modified(tables, event, metadata, cfg)
     else:
-        _entity_removed(tables, event, cfg, removed_labels)
+        _entity_removed(tables, event, metadata, cfg, removed_labels)
 
 
 def _process_property(
     tables: dict[str, pd.DataFrame],
     event: PropertyChanged,
+    metadata: ModelMetadata,
     cfg: BreakingChangeConfig,
 ) -> None:
     ct = event.change_type
 
     if ct == ChangeType.ADDED:
-        _property_added(tables, event, cfg)
+        _property_added(tables, event, metadata, cfg)
     elif ct == ChangeType.MODIFIED:
-        _property_modified(tables, event, cfg)
+        _property_modified(tables, event, metadata, cfg)
     else:
-        _property_removed(tables, event, cfg)
+        _property_removed(tables, event, metadata, cfg)
 
 
 # ── Entity handlers ───────────────────────────────────────────────────────────
@@ -124,6 +127,7 @@ def _process_property(
 def _entity_added(
     tables: dict[str, pd.DataFrame],
     event: EntityChanged,
+    metadata: ModelMetadata,
     cfg: BreakingChangeConfig,
 ) -> None:
     instances = event.aspects.get(_INSTANCES_KEY)
@@ -133,16 +137,16 @@ def _entity_added(
 
     concept_uri = _mint_concept(
         tables,
-        cfg,
+        metadata,
         label=event.label,
         kind=event.kind,
         parent_uri=None,
         instances_json=instances_json,
     )
     revision_uri = _mint_revision(
-        tables, cfg, concept_uri=concept_uri, prev_revision_uri=None, status=ElementStatus.ACTIVE
+        tables, metadata, concept_uri=concept_uri, prev_revision_uri=None, status=ElementStatus.ACTIVE
     )
-    _mint_contract(tables, cfg, concept_uri=concept_uri, revision_uri=revision_uri)
+    _mint_contract(tables, metadata, concept_uri=concept_uri, revision_uri=revision_uri)
 
     log.info("Entity ADDED: concept=%s revision=%s", concept_uri, revision_uri)
 
@@ -150,6 +154,7 @@ def _entity_added(
 def _entity_modified(
     tables: dict[str, pd.DataFrame],
     event: EntityChanged,
+    metadata: ModelMetadata,
     cfg: BreakingChangeConfig,
 ) -> None:
     lookup_label = event.renamed_from if event.renamed_from is not None else event.label
@@ -176,19 +181,21 @@ def _entity_modified(
     prev_rev_uri = _active_revision_uri(tables, concept_uri)
     _supersede_revision(tables, concept_uri)
     revision_uri = _mint_revision(
-        tables, cfg, concept_uri=concept_uri, prev_revision_uri=prev_rev_uri, status=ElementStatus.ACTIVE
+        tables, metadata, concept_uri=concept_uri, prev_revision_uri=prev_rev_uri, status=ElementStatus.ACTIVE
     )
 
     if breaking:
         # New entity contract
         prev_contract_uri = _active_contract_uri(tables, concept_uri)
         _supersede_contract(tables, concept_uri)
-        contract_uri = _mint_contract(tables, cfg, concept_uri=concept_uri, revision_uri=revision_uri)
+        contract_uri = _mint_contract(tables, metadata, concept_uri=concept_uri, revision_uri=revision_uri)
 
         if instances_changed:
             # Instance-breaking: update entity instances column, cascade to all child properties
             _set_instances(tables, concept_row_idx, new_instances)
-            _cascade_instance_breaking(tables, cfg, entity_concept_uri=concept_uri, new_instances=new_instances or [])
+            _cascade_instance_breaking(
+                tables, metadata, cfg, entity_concept_uri=concept_uri, new_instances=new_instances or []
+            )
         # else: non-instance breaking — entity contract already updated; no child cascade
 
         log.info(
@@ -206,6 +213,7 @@ def _entity_modified(
             # Cascade to children: new revision per child + new bindings for NEW instances only
             _cascade_instance_nonbreaking(
                 tables,
+                metadata,
                 cfg,
                 entity_concept_uri=concept_uri,
                 old_instances=old_instances or [],
@@ -218,6 +226,7 @@ def _entity_modified(
 def _entity_removed(
     tables: dict[str, pd.DataFrame],
     event: EntityChanged,
+    metadata: ModelMetadata,
     cfg: BreakingChangeConfig,
     removed_labels: set[str],
 ) -> None:
@@ -236,7 +245,9 @@ def _entity_removed(
 
     prev_rev_uri = _active_revision_uri(tables, concept_uri)
     _supersede_revision(tables, concept_uri)
-    _mint_revision(tables, cfg, concept_uri=concept_uri, prev_revision_uri=prev_rev_uri, status=ElementStatus.REMOVED)
+    _mint_revision(
+        tables, metadata, concept_uri=concept_uri, prev_revision_uri=prev_rev_uri, status=ElementStatus.REMOVED
+    )
 
     # All active contracts → REMOVED
     _set_contract_status(tables, concept_uri, ElementStatus.REMOVED)
@@ -253,6 +264,7 @@ def _entity_removed(
 def _property_added(
     tables: dict[str, pd.DataFrame],
     event: PropertyChanged,
+    metadata: ModelMetadata,
     cfg: BreakingChangeConfig,
 ) -> None:
     # Look up parent entity concept for parent_uri and instance list
@@ -262,20 +274,20 @@ def _property_added(
 
     concept_uri = _mint_concept(
         tables,
-        cfg,
+        metadata,
         label=event.label,
         kind=event.kind,
         parent_uri=parent_uri,
         instances_json=parent_instances_json,
     )
     revision_uri = _mint_revision(
-        tables, cfg, concept_uri=concept_uri, prev_revision_uri=None, status=ElementStatus.ACTIVE
+        tables, metadata, concept_uri=concept_uri, prev_revision_uri=None, status=ElementStatus.ACTIVE
     )
-    contract_uri = _mint_contract(tables, cfg, concept_uri=concept_uri, revision_uri=revision_uri)
+    contract_uri = _mint_contract(tables, metadata, concept_uri=concept_uri, revision_uri=revision_uri)
 
     # Mint bindings for PROPERTY kind only
     if event.kind == ElementKind.PROPERTY:
-        _mint_bindings_for_instances(tables, cfg, contract_uri=contract_uri, instances=parent_instances)
+        _mint_bindings_for_instances(tables, metadata, contract_uri=contract_uri, instances=parent_instances)
 
     log.info("Property ADDED: concept=%s revision=%s contract=%s", concept_uri, revision_uri, contract_uri)
 
@@ -283,6 +295,7 @@ def _property_added(
 def _property_modified(
     tables: dict[str, pd.DataFrame],
     event: PropertyChanged,
+    metadata: ModelMetadata,
     cfg: BreakingChangeConfig,
 ) -> None:
     lookup_label = event.renamed_from if event.renamed_from is not None else event.label
@@ -295,19 +308,19 @@ def _property_modified(
     prev_rev_uri = _active_revision_uri(tables, concept_uri)
     _supersede_revision(tables, concept_uri)
     revision_uri = _mint_revision(
-        tables, cfg, concept_uri=concept_uri, prev_revision_uri=prev_rev_uri, status=ElementStatus.ACTIVE
+        tables, metadata, concept_uri=concept_uri, prev_revision_uri=prev_rev_uri, status=ElementStatus.ACTIVE
     )
 
     if breaking:
         _supersede_contract(tables, concept_uri)
-        contract_uri = _mint_contract(tables, cfg, concept_uri=concept_uri, revision_uri=revision_uri)
+        contract_uri = _mint_contract(tables, metadata, concept_uri=concept_uri, revision_uri=revision_uri)
 
         if event.kind == ElementKind.PROPERTY:
             # Supersede old bindings and mint new ones under new contract
             instances_json: str | None = tables["concepts"].at[concept_row_idx, "instances"]
             instances = _parse_instances(instances_json)
             _supersede_bindings_by_concept(tables, concept_uri)
-            _mint_bindings_for_instances(tables, cfg, contract_uri=contract_uri, instances=instances)
+            _mint_bindings_for_instances(tables, metadata, contract_uri=contract_uri, instances=instances)
 
         log.info(
             "Property MODIFIED (breaking): concept=%s new_revision=%s new_contract=%s",
@@ -322,13 +335,16 @@ def _property_modified(
 def _property_removed(
     tables: dict[str, pd.DataFrame],
     event: PropertyChanged,
+    metadata: ModelMetadata,
     cfg: BreakingChangeConfig,
 ) -> None:
     concept_row_idx, concept_uri = _require_concept(tables, event.label)
 
     prev_rev_uri = _active_revision_uri(tables, concept_uri)
     _supersede_revision(tables, concept_uri)
-    _mint_revision(tables, cfg, concept_uri=concept_uri, prev_revision_uri=prev_rev_uri, status=ElementStatus.REMOVED)
+    _mint_revision(
+        tables, metadata, concept_uri=concept_uri, prev_revision_uri=prev_rev_uri, status=ElementStatus.REMOVED
+    )
 
     # All active contracts → REMOVED
     _set_contract_status(tables, concept_uri, ElementStatus.REMOVED)
@@ -347,6 +363,7 @@ def _property_removed(
 
 def _cascade_instance_breaking(
     tables: dict[str, pd.DataFrame],
+    metadata: ModelMetadata,
     cfg: BreakingChangeConfig,
     entity_concept_uri: str,
     new_instances: list[str],
@@ -369,19 +386,20 @@ def _cascade_instance_breaking(
         prev_rev_uri = _active_revision_uri(tables, child_uri)
         _supersede_revision(tables, child_uri)
         revision_uri = _mint_revision(
-            tables, cfg, concept_uri=child_uri, prev_revision_uri=prev_rev_uri, status=ElementStatus.ACTIVE
+            tables, metadata, concept_uri=child_uri, prev_revision_uri=prev_rev_uri, status=ElementStatus.ACTIVE
         )
 
         _supersede_contract(tables, child_uri)
-        contract_uri = _mint_contract(tables, cfg, concept_uri=child_uri, revision_uri=revision_uri)
+        contract_uri = _mint_contract(tables, metadata, concept_uri=child_uri, revision_uri=revision_uri)
 
         if child_kind == ElementKind.PROPERTY:
             _supersede_bindings_by_concept(tables, child_uri)
-            _mint_bindings_for_instances(tables, cfg, contract_uri=contract_uri, instances=new_instances or None)
+            _mint_bindings_for_instances(tables, metadata, contract_uri=contract_uri, instances=new_instances or None)
 
 
 def _cascade_instance_nonbreaking(
     tables: dict[str, pd.DataFrame],
+    metadata: ModelMetadata,
     cfg: BreakingChangeConfig,
     entity_concept_uri: str,
     old_instances: list[str],
@@ -405,34 +423,36 @@ def _cascade_instance_nonbreaking(
 
         prev_rev_uri = _active_revision_uri(tables, child_uri)
         _supersede_revision(tables, child_uri)
-        _mint_revision(tables, cfg, concept_uri=child_uri, prev_revision_uri=prev_rev_uri, status=ElementStatus.ACTIVE)
+        _mint_revision(
+            tables, metadata, concept_uri=child_uri, prev_revision_uri=prev_rev_uri, status=ElementStatus.ACTIVE
+        )
 
         # Append new bindings for added instances only (to the existing active contract)
         if child_kind == ElementKind.PROPERTY and added_instances:
             active_contract = _active_contract_uri(tables, child_uri)
             if active_contract:
                 for instance in added_instances:
-                    _mint_binding(tables, cfg, contract_uri=active_contract, instance_label=instance)
+                    _mint_binding(tables, metadata, contract_uri=active_contract, instance_label=instance)
 
 
 # ── Minting helpers ───────────────────────────────────────────────────────────
 
 
-def _mint_uri(cfg: BreakingChangeConfig, table: str, serial: int) -> str:
+def _mint_uri(metadata: ModelMetadata, table: str, serial: int) -> str:
     """Build a fully-qualified URI for a new record."""
-    return f"{cfg.namespace.uri_base(table)}/{b36encode(serial)}"
+    return f"{metadata.uri_base(table)}/{b36encode(serial)}"
 
 
 def _mint_concept(
     tables: dict[str, pd.DataFrame],
-    cfg: BreakingChangeConfig,
+    metadata: ModelMetadata,
     label: str,
     kind: ElementKind,
     parent_uri: str | None,
     instances_json: str | None,
 ) -> str:
     serial = next_serial(tables["concepts"])
-    uri = _mint_uri(cfg, "concepts", serial)
+    uri = _mint_uri(metadata, "concepts", serial)
     new_row: dict[str, Any] = {
         "serial": serial,
         "concept_uri": uri,
@@ -449,13 +469,13 @@ def _mint_concept(
 
 def _mint_revision(
     tables: dict[str, pd.DataFrame],
-    cfg: BreakingChangeConfig,
+    metadata: ModelMetadata,
     concept_uri: str,
     prev_revision_uri: str | None,
     status: ElementStatus,
 ) -> str:
     serial = next_serial(tables["revisions"])
-    uri = _mint_uri(cfg, "revisions", serial)
+    uri = _mint_uri(metadata, "revisions", serial)
     new_row: dict[str, Any] = {
         "serial": serial,
         "revision_uri": uri,
@@ -469,12 +489,12 @@ def _mint_revision(
 
 def _mint_contract(
     tables: dict[str, pd.DataFrame],
-    cfg: BreakingChangeConfig,
+    metadata: ModelMetadata,
     concept_uri: str,
     revision_uri: str,
 ) -> str:
     serial = next_serial(tables["contracts"])
-    uri = _mint_uri(cfg, "contracts", serial)
+    uri = _mint_uri(metadata, "contracts", serial)
     new_row: dict[str, Any] = {
         "serial": serial,
         "contract_uri": uri,
@@ -488,12 +508,12 @@ def _mint_contract(
 
 def _mint_binding(
     tables: dict[str, pd.DataFrame],
-    cfg: BreakingChangeConfig,
+    metadata: ModelMetadata,
     contract_uri: str,
     instance_label: str | None,
 ) -> str:
     serial = next_serial(tables["bindings"])
-    uri = _mint_uri(cfg, "bindings", serial)
+    uri = _mint_uri(metadata, "bindings", serial)
     new_row: dict[str, Any] = {
         "serial": serial,
         "binding_uri": uri,
@@ -507,16 +527,16 @@ def _mint_binding(
 
 def _mint_bindings_for_instances(
     tables: dict[str, pd.DataFrame],
-    cfg: BreakingChangeConfig,
+    metadata: ModelMetadata,
     contract_uri: str,
     instances: list[str] | None,
 ) -> None:
     """Mint one binding per instance, or a single singleton binding when there are no instances."""
     if instances:
         for inst in instances:
-            _mint_binding(tables, cfg, contract_uri=contract_uri, instance_label=inst)
+            _mint_binding(tables, metadata, contract_uri=contract_uri, instance_label=inst)
     else:
-        _mint_binding(tables, cfg, contract_uri=contract_uri, instance_label=None)
+        _mint_binding(tables, metadata, contract_uri=contract_uri, instance_label=None)
 
 
 # ── Mutation helpers ──────────────────────────────────────────────────────────

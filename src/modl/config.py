@@ -1,4 +1,4 @@
-"""Breaking change configuration and namespace settings, loaded from a YAML file."""
+"""Breaking change configuration and model metadata, loaded from YAML files."""
 
 from __future__ import annotations
 
@@ -12,41 +12,52 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from modl.models import ElementKind
 
 
-class NamespaceConfig(BaseModel):
-    """Base URI and optional display prefix for a modl project.
+class ModelMetadata(BaseModel):
+    """Identity metadata for a data model project, following the s2dm metadata.yaml convention.
 
-    The full URI is always used in stored ledger records. The prefix is a
-    display-only alias for use in inspection and query output.
+    ``id`` is the namespace URI used to mint ledger record identifiers. It must be an
+    absolute URI ending with ``/`` or ``#`` so that URIs are formed by direct concatenation:
+    ``id + table + '/' + serial``.
 
-    The namespace must end with '/' or '#' so that URIs are formed by direct
-    concatenation: ``namespace + table + '/' + id``.
+    ``name`` is the human-readable model name. It is accepted for s2dm compatibility but not
+    used internally by modl.
+
+    ``preferred_prefix`` is an optional display alias used by inspection and query output.
+    It is never stored in ledger records.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    namespace: str
-    prefix: str | None = None
+    name: str
+    id: str
+    preferred_prefix: str | None = None
 
-    @field_validator("namespace")
+    @field_validator("id")
     @classmethod
-    def namespace_must_be_valid(cls, v: str) -> str:
-        """Reject namespace strings that are not absolute URIs ending with '/' or '#'."""
+    def id_must_be_valid_namespace(cls, v: str) -> str:
+        """Reject id values that are not absolute URIs ending with '/' or '#'."""
         if " " in v:
-            raise ValueError("namespace must not contain spaces")
+            raise ValueError("id must not contain spaces")
         parsed = urlparse(v)
         if not parsed.scheme or not (parsed.netloc or parsed.path):
-            raise ValueError("namespace must be an absolute URI (e.g. http://example.org/model/)")
+            raise ValueError("id must be an absolute URI (e.g. http://example.org/model/)")
         if not v.endswith(("/", "#")):
-            raise ValueError("namespace must end with '/' or '#'")
+            raise ValueError("id must end with '/' or '#'")
         return v
 
     def uri_base(self, table: str) -> str:
         """Return the full base URI for minting identifiers in the given table (e.g. 'http://namespace.example/concepts')."""
-        return f"{self.namespace}{table}"
+        return f"{self.id}{table}"
+
+    @classmethod
+    def from_yaml(cls, path: Path) -> ModelMetadata:
+        """Load and validate a ModelMetadata from a YAML file."""
+        raw = yaml.safe_load(path.read_text())
+        return cls.model_validate(raw)
 
 
 class BreakingChangeConfig(BaseModel):
-    """Root configuration for a modl project, combining namespace settings and per-kind breaking change rules.
+    """Per-kind breaking change rules for a modl project.
 
     ``entity`` and ``property`` are flat mappings from aspect key name to a boolean:
 
@@ -72,7 +83,6 @@ class BreakingChangeConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    namespace: NamespaceConfig
     entity: dict[str, bool] = Field(default_factory=dict)
     property: dict[str, bool] = Field(default_factory=dict)
 

@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from modl.config import BreakingChangeConfig
+from modl.config import BreakingChangeConfig, ModelMetadata
 from modl.ir import ChangeType, DiffReport, EntityChanged, PropertyChanged
 from modl.ledger import empty_ledger, validate_ledger
 from modl.models import ElementKind, ElementStatus
@@ -17,8 +17,12 @@ from modl.sync import SyncError, sync
 NS = "http://test.example/model/"
 
 
+def _meta() -> ModelMetadata:
+    return ModelMetadata(name="Test", id=NS)
+
+
 def _cfg(*, entity: dict | None = None, property: dict | None = None) -> BreakingChangeConfig:
-    raw: dict = {"namespace": {"namespace": NS}}
+    raw: dict = {}
     if entity is not None:
         raw["entity"] = entity
     if property is not None:
@@ -77,7 +81,7 @@ def _uri(table: str, serial: int) -> str:
 class TestEntityAdded:
     def test_mints_concept_revision_variant(self) -> None:
         """Entity ADDED creates exactly one concept, revision, and variant row."""
-        tables = sync(empty_ledger(), _report(_entity_added("Vehicle")), _cfg())
+        tables = sync(empty_ledger(), _report(_entity_added("Vehicle")), _meta(), _cfg())
         assert len(tables["concepts"]) == 1
         assert len(tables["revisions"]) == 1
         assert len(tables["contracts"]) == 1
@@ -85,7 +89,7 @@ class TestEntityAdded:
 
     def test_concept_row_values(self) -> None:
         """Concept row has correct label, kind, status, and null parent_uri."""
-        tables = sync(empty_ledger(), _report(_entity_added("Vehicle")), _cfg())
+        tables = sync(empty_ledger(), _report(_entity_added("Vehicle")), _meta(), _cfg())
         row = tables["concepts"].iloc[0]
         assert row["current_label"] == "Vehicle"
         assert row["kind"] == ElementKind.ENTITY
@@ -94,39 +98,39 @@ class TestEntityAdded:
 
     def test_serial_and_uri(self) -> None:
         """Concept URI encodes serial 0 in base-36."""
-        tables = sync(empty_ledger(), _report(_entity_added("Vehicle")), _cfg())
+        tables = sync(empty_ledger(), _report(_entity_added("Vehicle")), _meta(), _cfg())
         row = tables["concepts"].iloc[0]
         assert row["serial"] == 0
         assert row["concept_uri"] == _uri("concepts", 0)
 
     def test_revision_status_active(self) -> None:
         """First revision is ACTIVE with no previous_revision_uri."""
-        tables = sync(empty_ledger(), _report(_entity_added("Vehicle")), _cfg())
+        tables = sync(empty_ledger(), _report(_entity_added("Vehicle")), _meta(), _cfg())
         rev = tables["revisions"].iloc[0]
         assert rev["status"] == ElementStatus.ACTIVE
         assert rev["previous_revision_uri"] is None or str(rev["previous_revision_uri"]) == "nan"
 
     def test_instances_stored_on_concept(self) -> None:
         """Entity ADDED with instances stores them as JSON on the concept row."""
-        tables = sync(empty_ledger(), _report(_entity_added("Door", instances=["Left", "Right"])), _cfg())
+        tables = sync(empty_ledger(), _report(_entity_added("Door", instances=["Left", "Right"])), _meta(), _cfg())
         row = tables["concepts"].iloc[0]
         assert json.loads(row["instances"]) == ["Left", "Right"]
 
     def test_no_instances_stored_as_null(self) -> None:
         """Entity with no instances has null instances column."""
-        tables = sync(empty_ledger(), _report(_entity_added("Vehicle")), _cfg())
+        tables = sync(empty_ledger(), _report(_entity_added("Vehicle")), _meta(), _cfg())
         row = tables["concepts"].iloc[0]
         assert row["instances"] is None or str(row["instances"]) == "nan"
 
     def test_multiple_entities_incrementing_serials(self) -> None:
         """Two ADDED entities get serials 0 and 1."""
-        tables = sync(empty_ledger(), _report(_entity_added("A"), _entity_added("B")), _cfg())
+        tables = sync(empty_ledger(), _report(_entity_added("A"), _entity_added("B")), _meta(), _cfg())
         serials = sorted(tables["concepts"]["serial"].tolist())
         assert serials == [0, 1]
 
     def test_ledger_validates_after_add(self) -> None:
         """Resulting ledger passes full validation."""
-        tables = sync(empty_ledger(), _report(_entity_added("Vehicle")), _cfg())
+        tables = sync(empty_ledger(), _report(_entity_added("Vehicle")), _meta(), _cfg())
         validate_ledger(tables)  # must not raise
 
     def test_nested_list_instances_raises(self) -> None:
@@ -137,7 +141,7 @@ class TestEntityAdded:
             aspects={"instances": [["Front", "Rear"], ["Left", "Right"]]},
         )
         with pytest.raises(SyncError, match="flat list of strings"):
-            sync(empty_ledger(), _report(bad_event), _cfg())
+            sync(empty_ledger(), _report(bad_event), _meta(), _cfg())
 
     def test_non_string_element_instances_raises(self) -> None:
         """Any non-string element in instances raises SyncError on ADDED."""
@@ -147,19 +151,19 @@ class TestEntityAdded:
             aspects={"instances": [1, 2, 3]},
         )
         with pytest.raises(SyncError, match="flat list of strings"):
-            sync(empty_ledger(), _report(bad_event), _cfg())
+            sync(empty_ledger(), _report(bad_event), _meta(), _cfg())
 
     def test_nested_list_instances_raises_on_modified(self) -> None:
         """Nested-list instances raise SyncError on MODIFIED as well."""
         setup = _report(_entity_added("Door", instances=["Front", "Rear"]))
-        tables = sync(empty_ledger(), setup, _cfg())
+        tables = sync(empty_ledger(), setup, _meta(), _cfg())
         bad_event = EntityChanged(
             label="Door",
             change_type=ChangeType.MODIFIED,
             aspects={"instances": [["Front", "Rear"], ["Left", "Right"]]},
         )
         with pytest.raises(SyncError, match="flat list of strings"):
-            sync(tables, _report(bad_event), _cfg())
+            sync(tables, _report(bad_event), _meta(), _cfg())
 
 
 # ── Property ADDED ────────────────────────────────────────────────────────────
@@ -169,7 +173,7 @@ class TestPropertyAdded:
     def test_singleton_binding_when_no_instances(self) -> None:
         """Property added to entity with no instances gets one binding with null instance_label."""
         report = _report(_entity_added("Vehicle"), _prop_added("Vehicle.Speed", parent="Vehicle"))
-        tables = sync(empty_ledger(), report, _cfg())
+        tables = sync(empty_ledger(), report, _meta(), _cfg())
         assert len(tables["bindings"]) == 1
         b = tables["bindings"].iloc[0]
         assert b["instance_label"] is None or str(b["instance_label"]) == "nan"
@@ -180,7 +184,7 @@ class TestPropertyAdded:
             _entity_added("Door", instances=["Left", "Right"]),
             _prop_added("Door.IsOpen", parent="Door"),
         )
-        tables = sync(empty_ledger(), report, _cfg())
+        tables = sync(empty_ledger(), report, _meta(), _cfg())
         assert len(tables["bindings"]) == 2
         instance_labels = set(tables["bindings"]["instance_label"].tolist())
         assert instance_labels == {"Left", "Right"}
@@ -188,7 +192,7 @@ class TestPropertyAdded:
     def test_property_concept_stores_parent_uri(self) -> None:
         """Property concept row carries the parent entity's concept_uri as parent_uri."""
         report = _report(_entity_added("Vehicle"), _prop_added("Vehicle.Speed", parent="Vehicle"))
-        tables = sync(empty_ledger(), report, _cfg())
+        tables = sync(empty_ledger(), report, _meta(), _cfg())
         prop_row = tables["concepts"][tables["concepts"]["current_label"] == "Vehicle.Speed"].iloc[0]
         entity_row = tables["concepts"][tables["concepts"]["current_label"] == "Vehicle"].iloc[0]
         assert prop_row["parent_uri"] == entity_row["concept_uri"]
@@ -199,7 +203,7 @@ class TestPropertyAdded:
             _entity_added("Door", instances=["Left", "Right"]),
             _prop_added("Door.IsOpen", parent="Door"),
         )
-        tables = sync(empty_ledger(), report, _cfg())
+        tables = sync(empty_ledger(), report, _meta(), _cfg())
         prop_row = tables["concepts"][tables["concepts"]["current_label"] == "Door.IsOpen"].iloc[0]
         assert json.loads(prop_row["instances"]) == ["Left", "Right"]
 
@@ -209,14 +213,14 @@ class TestPropertyAdded:
             _entity_added("SpeedUnit", kind=ElementKind.ENUMERATION_SET),
             _prop_added("SpeedUnit.KMH", parent="SpeedUnit", kind=ElementKind.ENUM_VALUE),
         )
-        tables = sync(empty_ledger(), report, _cfg())
+        tables = sync(empty_ledger(), report, _meta(), _cfg())
         assert len(tables["bindings"]) == 0
 
     def test_property_added_raises_on_unknown_parent(self) -> None:
         """Property ADDED for an unknown parent label raises SyncError."""
         report = _report(_prop_added("X.Speed", parent="X"))
         with pytest.raises(SyncError, match="No concept found"):
-            sync(empty_ledger(), report, _cfg())
+            sync(empty_ledger(), report, _meta(), _cfg())
 
     def test_ledger_validates_after_add(self) -> None:
         """Full ledger validation passes after entity + property ADDED."""
@@ -224,7 +228,7 @@ class TestPropertyAdded:
             _entity_added("Door", instances=["Left", "Right"]),
             _prop_added("Door.IsOpen", parent="Door"),
         )
-        validate_ledger(sync(empty_ledger(), report, _cfg()))
+        validate_ledger(sync(empty_ledger(), report, _meta(), _cfg()))
 
 
 # ── Entity MODIFIED (non-breaking) ────────────────────────────────────────────
@@ -234,14 +238,14 @@ class TestEntityModifiedNonBreaking:
     def test_no_new_variant(self) -> None:
         """Non-breaking entity MODIFIED does not create a new variant."""
         report = _report(_entity_added("Vehicle"), _entity_modified("Vehicle", description="updated"))
-        tables = sync(empty_ledger(), report, _cfg())
+        tables = sync(empty_ledger(), report, _meta(), _cfg())
         assert len(tables["contracts"]) == 1
 
     def test_new_revision_supersedes_old(self) -> None:
         """Non-breaking MODIFIED mints a new revision and supersedes the previous one."""
         cfg = _cfg(entity={"description": False})
         report = _report(_entity_added("Vehicle"), _entity_modified("Vehicle", description="updated"))
-        tables = sync(empty_ledger(), report, cfg)
+        tables = sync(empty_ledger(), report, _meta(), cfg)
         revs = tables["revisions"]
         assert len(revs) == 2
         assert (revs["status"] == ElementStatus.SUPERSEDED).sum() == 1
@@ -250,7 +254,7 @@ class TestEntityModifiedNonBreaking:
     def test_revision_chaining(self) -> None:
         """New revision's previous_revision_uri points to the superseded revision."""
         report = _report(_entity_added("Vehicle"), _entity_modified("Vehicle"))
-        tables = sync(empty_ledger(), report, _cfg())
+        tables = sync(empty_ledger(), report, _meta(), _cfg())
         revs = tables["revisions"]
         old_rev_uri = revs[revs["status"] == ElementStatus.SUPERSEDED].iloc[0]["revision_uri"]
         new_rev = revs[revs["status"] == ElementStatus.ACTIVE].iloc[0]
@@ -262,7 +266,7 @@ class TestEntityModifiedNonBreaking:
             _entity_added("Vehicl"),
             _entity_modified("Vehicle", renamed_from="Vehicl"),
         )
-        tables = sync(empty_ledger(), report, _cfg())
+        tables = sync(empty_ledger(), report, _meta(), _cfg())
         row = tables["concepts"].iloc[0]
         assert row["current_label"] == "Vehicle"
         prev = json.loads(row["previous_labels"])
@@ -277,7 +281,7 @@ class TestEntityModifiedBreakingNonInstance:
         """Breaking entity MODIFIED creates a new entity variant and supersedes the old one."""
         cfg = _cfg(entity={"type": True})
         report = _report(_entity_added("Vehicle", type="branch"), _entity_modified("Vehicle", type="object"))
-        tables = sync(empty_ledger(), report, cfg)
+        tables = sync(empty_ledger(), report, _meta(), cfg)
         variants = tables["contracts"]
         assert len(variants) == 2
         assert (variants["status"] == ElementStatus.SUPERSEDED).sum() == 1
@@ -291,7 +295,7 @@ class TestEntityModifiedBreakingNonInstance:
             _prop_added("Vehicle.Speed", parent="Vehicle"),
             _entity_modified("Vehicle", type="object"),
         )
-        tables = sync(empty_ledger(), report, cfg)
+        tables = sync(empty_ledger(), report, _meta(), cfg)
         # Only the entity variant created at ADDED is superseded; one new entity variant; property variant unchanged
         prop_variants = tables["contracts"][
             tables["contracts"]["concept_uri"]
@@ -313,7 +317,7 @@ class TestEntityModifiedInstanceNonBreaking:
             _prop_added("Door.IsOpen", parent="Door"),
             _entity_modified("Door", instances=["Left", "Right", "Center"]),
         )
-        tables = sync(empty_ledger(), report, cfg)
+        tables = sync(empty_ledger(), report, _meta(), cfg)
         # 2 original bindings (Left, Right) + 1 new (Center) = 3
         assert len(tables["bindings"]) == 3
         labels = set(tables["bindings"]["instance_label"].tolist())
@@ -327,7 +331,7 @@ class TestEntityModifiedInstanceNonBreaking:
             _prop_added("Door.IsOpen", parent="Door"),
             _entity_modified("Door", instances=["Left", "Right", "Center"]),
         )
-        tables = sync(empty_ledger(), report, cfg)
+        tables = sync(empty_ledger(), report, _meta(), cfg)
         assert (tables["bindings"]["status"] == ElementStatus.ACTIVE).all()
 
     def test_no_new_child_property_variant(self) -> None:
@@ -338,7 +342,7 @@ class TestEntityModifiedInstanceNonBreaking:
             _prop_added("Door.IsOpen", parent="Door"),
             _entity_modified("Door", instances=["Left", "Right", "Center"]),
         )
-        tables = sync(empty_ledger(), report, cfg)
+        tables = sync(empty_ledger(), report, _meta(), cfg)
         prop_uri = tables["concepts"][tables["concepts"]["current_label"] == "Door.IsOpen"].iloc[0]["concept_uri"]
         prop_variants = tables["contracts"][tables["contracts"]["concept_uri"] == prop_uri]
         assert len(prop_variants) == 1  # only the initial variant
@@ -351,7 +355,7 @@ class TestEntityModifiedInstanceNonBreaking:
             _prop_added("Door.IsOpen", parent="Door"),
             _entity_modified("Door", instances=["Left", "Right", "Center"]),
         )
-        tables = sync(empty_ledger(), report, cfg)
+        tables = sync(empty_ledger(), report, _meta(), cfg)
         prop_uri = tables["concepts"][tables["concepts"]["current_label"] == "Door.IsOpen"].iloc[0]["concept_uri"]
         prop_revs = tables["revisions"][tables["revisions"]["concept_uri"] == prop_uri]
         assert len(prop_revs) == 2  # initial + one from cascade
@@ -364,7 +368,7 @@ class TestEntityModifiedInstanceNonBreaking:
             _prop_added("Door.IsOpen", parent="Door"),
             _entity_modified("Door", instances=["Left", "Right", "Center"]),
         )
-        tables = sync(empty_ledger(), report, cfg)
+        tables = sync(empty_ledger(), report, _meta(), cfg)
         entity_row = tables["concepts"][tables["concepts"]["current_label"] == "Door"].iloc[0]
         assert json.loads(entity_row["instances"]) == ["Left", "Right", "Center"]
 
@@ -381,7 +385,7 @@ class TestEntityModifiedInstanceBreaking:
             _prop_added("Door.IsOpen", parent="Door"),
             _entity_modified("Door", instances=["Left", "Right", "Center"]),
         )
-        tables = sync(empty_ledger(), report, cfg)
+        tables = sync(empty_ledger(), report, _meta(), cfg)
         superseded = tables["bindings"][tables["bindings"]["status"] == ElementStatus.SUPERSEDED]
         assert len(superseded) == 2  # Left + Right originally
 
@@ -393,7 +397,7 @@ class TestEntityModifiedInstanceBreaking:
             _prop_added("Door.IsOpen", parent="Door"),
             _entity_modified("Door", instances=["Left", "Right", "Center"]),
         )
-        tables = sync(empty_ledger(), report, cfg)
+        tables = sync(empty_ledger(), report, _meta(), cfg)
         active_bindings = tables["bindings"][tables["bindings"]["status"] == ElementStatus.ACTIVE]
         assert len(active_bindings) == 3  # Left, Right, Center
 
@@ -405,7 +409,7 @@ class TestEntityModifiedInstanceBreaking:
             _prop_added("Door.IsOpen", parent="Door"),
             _entity_modified("Door", instances=["Left", "Right", "Center"]),
         )
-        tables = sync(empty_ledger(), report, cfg)
+        tables = sync(empty_ledger(), report, _meta(), cfg)
         prop_uri = tables["concepts"][tables["concepts"]["current_label"] == "Door.IsOpen"].iloc[0]["concept_uri"]
         prop_variants = tables["contracts"][tables["contracts"]["concept_uri"] == prop_uri]
         assert len(prop_variants) == 2
@@ -420,7 +424,7 @@ class TestEntityModifiedInstanceBreaking:
             _prop_added("Door.IsOpen", parent="Door"),
             _entity_modified("Door", instances=["Left", "Right", "Center"]),
         )
-        tables = sync(empty_ledger(), report, cfg)
+        tables = sync(empty_ledger(), report, _meta(), cfg)
         prop_uri = tables["concepts"][tables["concepts"]["current_label"] == "Door.IsOpen"].iloc[0]["concept_uri"]
         new_contract_uri = tables["contracts"][
             (tables["contracts"]["concept_uri"] == prop_uri) & (tables["contracts"]["status"] == ElementStatus.ACTIVE)
@@ -436,7 +440,7 @@ class TestEntityModifiedInstanceBreaking:
             _prop_added("Door.IsOpen", parent="Door"),
             _entity_modified("Door", instances=["Left", "Right", "Center"]),
         )
-        validate_ledger(sync(empty_ledger(), report, cfg))
+        validate_ledger(sync(empty_ledger(), report, _meta(), cfg))
 
 
 # ── Entity REMOVED ────────────────────────────────────────────────────────────
@@ -446,21 +450,21 @@ class TestEntityRemoved:
     def test_concept_status_removed(self) -> None:
         """Entity REMOVED sets the concept status to REMOVED."""
         report = _report(_entity_added("Vehicle"), _entity_removed("Vehicle"))
-        tables = sync(empty_ledger(), report, _cfg())
+        tables = sync(empty_ledger(), report, _meta(), _cfg())
         row = tables["concepts"].iloc[0]
         assert row["status"] == ElementStatus.REMOVED
 
     def test_revision_status_removed(self) -> None:
         """Entity REMOVED mints a final revision with REMOVED status."""
         report = _report(_entity_added("Vehicle"), _entity_removed("Vehicle"))
-        tables = sync(empty_ledger(), report, _cfg())
+        tables = sync(empty_ledger(), report, _meta(), _cfg())
         revs = tables["revisions"]
         assert (revs["status"] == ElementStatus.REMOVED).sum() == 1
 
     def test_variants_removed(self) -> None:
         """All active variants for a removed entity are marked REMOVED."""
         report = _report(_entity_added("Vehicle"), _entity_removed("Vehicle"))
-        tables = sync(empty_ledger(), report, _cfg())
+        tables = sync(empty_ledger(), report, _meta(), _cfg())
         assert (tables["contracts"]["status"] == ElementStatus.REMOVED).all()
 
     def test_consistency_check_raises_on_missing_child_removed(self) -> None:
@@ -471,7 +475,7 @@ class TestEntityRemoved:
             _entity_removed("Vehicle"),  # Missing REMOVED for Vehicle.Speed
         )
         with pytest.raises(SyncError, match="Vehicle.Speed"):
-            sync(empty_ledger(), report, _cfg())
+            sync(empty_ledger(), report, _meta(), _cfg())
 
     def test_consistency_check_passes_with_all_children_removed(self) -> None:
         """REMOVED entity with explicit REMOVED for all children completes without error."""
@@ -481,7 +485,7 @@ class TestEntityRemoved:
             _entity_removed("Vehicle"),
             _prop_removed("Vehicle.Speed", parent="Vehicle"),
         )
-        tables = sync(empty_ledger(), report, _cfg())  # must not raise
+        tables = sync(empty_ledger(), report, _meta(), _cfg())  # must not raise
         assert len(tables["concepts"]) == 2
 
     def test_no_bindings_affected_directly(self) -> None:
@@ -492,7 +496,7 @@ class TestEntityRemoved:
             _entity_removed("Vehicle"),
             _prop_removed("Vehicle.Speed", parent="Vehicle"),
         )
-        tables = sync(empty_ledger(), report, _cfg())
+        tables = sync(empty_ledger(), report, _meta(), _cfg())
         assert (tables["bindings"]["status"] == ElementStatus.REMOVED).all()
 
 
@@ -508,7 +512,7 @@ class TestPropertyModifiedBreaking:
             _prop_added("Vehicle.Speed", parent="Vehicle", output_type="Int"),
             _prop_modified("Vehicle.Speed", parent="Vehicle", output_type="Float"),
         )
-        tables = sync(empty_ledger(), report, cfg)
+        tables = sync(empty_ledger(), report, _meta(), cfg)
         prop_uri = tables["concepts"][tables["concepts"]["current_label"] == "Vehicle.Speed"].iloc[0]["concept_uri"]
         prop_variants = tables["contracts"][tables["contracts"]["concept_uri"] == prop_uri]
         assert len(prop_variants) == 2
@@ -523,7 +527,7 @@ class TestPropertyModifiedBreaking:
             _prop_added("Vehicle.Speed", parent="Vehicle", output_type="Int"),
             _prop_modified("Vehicle.Speed", parent="Vehicle", output_type="Float"),
         )
-        tables = sync(empty_ledger(), report, cfg)
+        tables = sync(empty_ledger(), report, _meta(), cfg)
         assert (tables["bindings"]["status"] == ElementStatus.SUPERSEDED).sum() == 1
         assert (tables["bindings"]["status"] == ElementStatus.ACTIVE).sum() == 1
 
@@ -535,7 +539,7 @@ class TestPropertyModifiedBreaking:
             _prop_added("Door.IsOpen", parent="Door", output_type="Boolean"),
             _prop_modified("Door.IsOpen", parent="Door", output_type="Int"),
         )
-        tables = sync(empty_ledger(), report, cfg)
+        tables = sync(empty_ledger(), report, _meta(), cfg)
         superseded = tables["bindings"][tables["bindings"]["status"] == ElementStatus.SUPERSEDED]
         active = tables["bindings"][tables["bindings"]["status"] == ElementStatus.ACTIVE]
         assert len(superseded) == 2
@@ -549,7 +553,7 @@ class TestPropertyModifiedBreaking:
             _prop_added("Vehicle.Velocity", parent="Vehicle", output_type="Int"),
             _prop_modified("Vehicle.Speed", parent="Vehicle", renamed_from="Vehicle.Velocity", output_type="Float"),
         )
-        tables = sync(empty_ledger(), report, cfg)
+        tables = sync(empty_ledger(), report, _meta(), cfg)
         row = tables["concepts"][tables["concepts"]["current_label"] == "Vehicle.Speed"].iloc[0]
         assert row["current_label"] == "Vehicle.Speed"
         prev = json.loads(row["previous_labels"])
@@ -568,7 +572,7 @@ class TestPropertyModifiedNonBreaking:
             _prop_added("Vehicle.Speed", parent="Vehicle"),
             _prop_modified("Vehicle.Speed", parent="Vehicle", description="better docs"),
         )
-        tables = sync(empty_ledger(), report, cfg)
+        tables = sync(empty_ledger(), report, _meta(), cfg)
         prop_uri = tables["concepts"][tables["concepts"]["current_label"] == "Vehicle.Speed"].iloc[0]["concept_uri"]
         assert len(tables["contracts"][tables["contracts"]["concept_uri"] == prop_uri]) == 1
 
@@ -580,7 +584,7 @@ class TestPropertyModifiedNonBreaking:
             _prop_added("Vehicle.Speed", parent="Vehicle"),
             _prop_modified("Vehicle.Speed", parent="Vehicle", description="better docs"),
         )
-        tables = sync(empty_ledger(), report, cfg)
+        tables = sync(empty_ledger(), report, _meta(), cfg)
         assert len(tables["bindings"]) == 1
         assert tables["bindings"].iloc[0]["status"] == ElementStatus.ACTIVE
 
@@ -596,7 +600,7 @@ class TestPropertyRemoved:
             _prop_added("Vehicle.Speed", parent="Vehicle"),
             _prop_removed("Vehicle.Speed", parent="Vehicle"),
         )
-        tables = sync(empty_ledger(), report, _cfg())
+        tables = sync(empty_ledger(), report, _meta(), _cfg())
         prop_row = tables["concepts"][tables["concepts"]["current_label"] == "Vehicle.Speed"].iloc[0]
         assert prop_row["status"] == ElementStatus.REMOVED
 
@@ -607,7 +611,7 @@ class TestPropertyRemoved:
             _prop_added("Vehicle.Speed", parent="Vehicle"),
             _prop_removed("Vehicle.Speed", parent="Vehicle"),
         )
-        tables = sync(empty_ledger(), report, _cfg())
+        tables = sync(empty_ledger(), report, _meta(), _cfg())
         prop_uri = tables["concepts"][tables["concepts"]["current_label"] == "Vehicle.Speed"].iloc[0]["concept_uri"]
         prop_revs = tables["revisions"][tables["revisions"]["concept_uri"] == prop_uri]
         assert (prop_revs["status"] == ElementStatus.REMOVED).sum() == 1
@@ -619,7 +623,7 @@ class TestPropertyRemoved:
             _prop_added("Vehicle.Speed", parent="Vehicle"),
             _prop_removed("Vehicle.Speed", parent="Vehicle"),
         )
-        tables = sync(empty_ledger(), report, _cfg())
+        tables = sync(empty_ledger(), report, _meta(), _cfg())
         assert (tables["bindings"]["status"] == ElementStatus.REMOVED).all()
 
     def test_enum_value_removed_no_binding_touched(self) -> None:
@@ -629,7 +633,7 @@ class TestPropertyRemoved:
             _prop_added("SpeedUnit.KMH", parent="SpeedUnit", kind=ElementKind.ENUM_VALUE),
             _prop_removed("SpeedUnit.KMH", parent="SpeedUnit"),
         )
-        tables = sync(empty_ledger(), report, _cfg())
+        tables = sync(empty_ledger(), report, _meta(), _cfg())
         assert len(tables["bindings"]) == 0
 
 
@@ -647,7 +651,7 @@ class TestRoundTrip:
             _prop_added("Door.IsOpen", parent="Door", output_type="Boolean"),
             _prop_added("Door.IsLocked", parent="Door", output_type="Boolean"),
         )
-        tables = sync(empty_ledger(), report, cfg)
+        tables = sync(empty_ledger(), report, _meta(), cfg)
         ledger_dir = tmp_path / "ledger"
         write_ledger(tables, ledger_dir)
         reloaded = read_ledger(ledger_dir)
@@ -662,13 +666,13 @@ class TestRoundTrip:
 
         # First run: add entity + property
         r1 = _report(_entity_added("Vehicle"), _prop_added("Vehicle.Speed", parent="Vehicle", output_type="Int"))
-        t1 = sync(empty_ledger(), r1, cfg)
+        t1 = sync(empty_ledger(), r1, _meta(), cfg)
         write_ledger(t1, ledger_dir)
 
         # Second run: modify property (breaking)
         t_loaded = read_ledger(ledger_dir)
         r2 = _report(_prop_modified("Vehicle.Speed", parent="Vehicle", output_type="Float"))
-        t2 = sync(t_loaded, r2, cfg)
+        t2 = sync(t_loaded, r2, _meta(), cfg)
         write_ledger(t2, ledger_dir)
 
         t_final = read_ledger(ledger_dir)
@@ -692,7 +696,7 @@ class TestEntitySecondRename:
             _entity_modified("Vehicle", renamed_from="Vehicl"),
             _entity_modified("VehicleNode", renamed_from="Vehicle"),
         )
-        tables = sync(empty_ledger(), report, _cfg())
+        tables = sync(empty_ledger(), report, _meta(), _cfg())
         row = tables["concepts"].iloc[0]
         assert row["current_label"] == "VehicleNode"
         prev = json.loads(row["previous_labels"])
@@ -706,7 +710,7 @@ class TestEntitySecondRename:
             _entity_modified("C", renamed_from="B"),
             _entity_modified("D", renamed_from="C"),
         )
-        tables = sync(empty_ledger(), report, _cfg())
+        tables = sync(empty_ledger(), report, _meta(), _cfg())
         row = tables["concepts"].iloc[0]
         assert row["current_label"] == "D"
         assert json.loads(row["previous_labels"]) == ["C", "B", "A"]
@@ -720,7 +724,7 @@ class TestRenameNonexistentConcept:
         """Entity renamed_from pointing to an absent label raises SyncError."""
         report = _report(_entity_modified("Vehicle", renamed_from="Vehicl"))
         with pytest.raises(SyncError, match="No concept found"):
-            sync(empty_ledger(), report, _cfg())
+            sync(empty_ledger(), report, _meta(), _cfg())
 
     def test_property_renamed_from_unknown_label_raises(self) -> None:
         """Property renamed_from pointing to an absent label raises SyncError."""
@@ -729,7 +733,7 @@ class TestRenameNonexistentConcept:
             _prop_modified("Vehicle.Velocity", parent="Vehicle", renamed_from="Vehicle.Speed"),
         )
         with pytest.raises(SyncError, match="No concept found"):
-            sync(empty_ledger(), report, _cfg())
+            sync(empty_ledger(), report, _meta(), _cfg())
 
 
 # ── ENUMERATION_SET ADDED ─────────────────────────────────────────────────────
@@ -739,19 +743,19 @@ class TestEnumerationSetAdded:
     def test_kind_stored_correctly(self) -> None:
         """ENUMERATION_SET ADDED stores the correct kind on the concept row."""
         report = _report(_entity_added("SpeedUnit", kind=ElementKind.ENUMERATION_SET))
-        tables = sync(empty_ledger(), report, _cfg())
+        tables = sync(empty_ledger(), report, _meta(), _cfg())
         assert tables["concepts"].iloc[0]["kind"] == ElementKind.ENUMERATION_SET
 
     def test_no_bindings(self) -> None:
         """ENUMERATION_SET ADDED does not create any bindings."""
         report = _report(_entity_added("SpeedUnit", kind=ElementKind.ENUMERATION_SET))
-        tables = sync(empty_ledger(), report, _cfg())
+        tables = sync(empty_ledger(), report, _meta(), _cfg())
         assert len(tables["bindings"]) == 0
 
     def test_mints_concept_revision_variant(self) -> None:
         """ENUMERATION_SET ADDED mints exactly one concept, revision, and variant."""
         report = _report(_entity_added("SpeedUnit", kind=ElementKind.ENUMERATION_SET))
-        tables = sync(empty_ledger(), report, _cfg())
+        tables = sync(empty_ledger(), report, _meta(), _cfg())
         assert len(tables["concepts"]) == 1
         assert len(tables["revisions"]) == 1
         assert len(tables["contracts"]) == 1
@@ -762,7 +766,7 @@ class TestEnumerationSetAdded:
             _entity_added("SpeedUnit", kind=ElementKind.ENUMERATION_SET),
             _prop_added("SpeedUnit.KMH", parent="SpeedUnit", kind=ElementKind.ENUM_VALUE),
         )
-        tables = sync(empty_ledger(), report, _cfg())
+        tables = sync(empty_ledger(), report, _meta(), _cfg())
         set_uri = tables["concepts"][tables["concepts"]["current_label"] == "SpeedUnit"].iloc[0]["concept_uri"]
         val_row = tables["concepts"][tables["concepts"]["current_label"] == "SpeedUnit.KMH"].iloc[0]
         assert val_row["parent_uri"] == set_uri
@@ -773,7 +777,7 @@ class TestEnumerationSetAdded:
             _entity_added("SpeedUnit", kind=ElementKind.ENUMERATION_SET),
             _prop_added("SpeedUnit.KMH", parent="SpeedUnit", kind=ElementKind.ENUM_VALUE),
         )
-        validate_ledger(sync(empty_ledger(), report, _cfg()))
+        validate_ledger(sync(empty_ledger(), report, _meta(), _cfg()))
 
 
 # ── Rename AND breaking aspect in the same event ──────────────────────────────
@@ -787,7 +791,7 @@ class TestEntityModifiedRenameAndBreaking:
             _entity_added("Vehicl", type="branch"),
             _entity_modified("Vehicle", renamed_from="Vehicl", type="object"),
         )
-        tables = sync(empty_ledger(), report, cfg)
+        tables = sync(empty_ledger(), report, _meta(), cfg)
         row = tables["concepts"].iloc[0]
         assert row["current_label"] == "Vehicle"
         assert "Vehicl" in json.loads(row["previous_labels"])
@@ -806,7 +810,7 @@ class TestPropertyModifiedRenameAndNonBreaking:
             _prop_added("Vehicle.Vel", parent="Vehicle"),
             _prop_modified("Vehicle.Velocity", parent="Vehicle", renamed_from="Vehicle.Vel", description="updated"),
         )
-        tables = sync(empty_ledger(), report, cfg)
+        tables = sync(empty_ledger(), report, _meta(), cfg)
         row = tables["concepts"][tables["concepts"]["current_label"] == "Vehicle.Velocity"].iloc[0]
         assert "Vehicle.Vel" in json.loads(row["previous_labels"])
         prop_uri = row["concept_uri"]
@@ -825,7 +829,7 @@ class TestEntityModifiedInstanceShrinks:
             _prop_added("Door.IsOpen", parent="Door"),
             _entity_modified("Door", instances=["Left", "Right"]),
         )
-        tables = sync(empty_ledger(), report, cfg)
+        tables = sync(empty_ledger(), report, _meta(), cfg)
         # 3 original bindings; no new ones minted because no instances were added
         assert len(tables["bindings"]) == 3
 
@@ -837,7 +841,7 @@ class TestEntityModifiedInstanceShrinks:
             _prop_added("Door.IsOpen", parent="Door"),
             _entity_modified("Door", instances=["Left", "Right"]),
         )
-        tables = sync(empty_ledger(), report, cfg)
+        tables = sync(empty_ledger(), report, _meta(), cfg)
         row = tables["concepts"][tables["concepts"]["current_label"] == "Door"].iloc[0]
         assert json.loads(row["instances"]) == ["Left", "Right"]
 
@@ -849,7 +853,7 @@ class TestEntityModifiedInstanceShrinks:
             _prop_added("Door.IsOpen", parent="Door"),
             _entity_modified("Door", instances=["Left", "Right"]),
         )
-        tables = sync(empty_ledger(), report, cfg)
+        tables = sync(empty_ledger(), report, _meta(), cfg)
         prop_uri = tables["concepts"][tables["concepts"]["current_label"] == "Door.IsOpen"].iloc[0]["concept_uri"]
         prop_revs = tables["revisions"][tables["revisions"]["concept_uri"] == prop_uri]
         assert len(prop_revs) == 2
@@ -868,7 +872,7 @@ class TestMultipleChildPropertiesCascade:
             _prop_added("Door.IsLocked", parent="Door"),
             _entity_modified("Door", instances=["Left", "Right", "Center"]),
         )
-        tables = sync(empty_ledger(), report, cfg)
+        tables = sync(empty_ledger(), report, _meta(), cfg)
         for label in ("Door.IsOpen", "Door.IsLocked"):
             prop_uri = tables["concepts"][tables["concepts"]["current_label"] == label].iloc[0]["concept_uri"]
             prop_variants = tables["contracts"][tables["contracts"]["concept_uri"] == prop_uri]
@@ -885,7 +889,7 @@ class TestMultipleChildPropertiesCascade:
             _prop_added("Door.IsLocked", parent="Door"),
             _entity_modified("Door", instances=["Left", "Right", "Center"]),
         )
-        tables = sync(empty_ledger(), report, cfg)
+        tables = sync(empty_ledger(), report, _meta(), cfg)
         # 2 properties × (2 original + 1 new) = 6 total bindings, all ACTIVE
         assert len(tables["bindings"]) == 6
         assert (tables["bindings"]["status"] == ElementStatus.ACTIVE).all()
@@ -899,7 +903,7 @@ class TestMultipleChildPropertiesCascade:
             _prop_added("Door.IsLocked", parent="Door"),
             _entity_modified("Door", instances=["Left", "Right", "Center"]),
         )
-        tables = sync(empty_ledger(), report, cfg)
+        tables = sync(empty_ledger(), report, _meta(), cfg)
         active_bindings = tables["bindings"][tables["bindings"]["status"] == ElementStatus.ACTIVE]
         # Collect all new (ACTIVE) contract URIs
         new_contract_uris = set(
@@ -920,13 +924,13 @@ class TestThreeSuccessiveSyncs:
         ledger_dir = tmp_path / "ledger"
 
         r1 = _report(_entity_added("Vehicle"), _prop_added("Vehicle.Speed", parent="Vehicle", output_type="Int"))
-        write_ledger(sync(empty_ledger(), r1, cfg), ledger_dir)
+        write_ledger(sync(empty_ledger(), r1, _meta(), cfg), ledger_dir)
 
         r2 = _report(_prop_modified("Vehicle.Speed", parent="Vehicle", output_type="Float"))
-        write_ledger(sync(read_ledger(ledger_dir), r2, cfg), ledger_dir)
+        write_ledger(sync(read_ledger(ledger_dir), r2, _meta(), cfg), ledger_dir)
 
         r3 = _report(_prop_added("Vehicle.Mass", parent="Vehicle", output_type="Float"))
-        write_ledger(sync(read_ledger(ledger_dir), r3, cfg), ledger_dir)
+        write_ledger(sync(read_ledger(ledger_dir), r3, _meta(), cfg), ledger_dir)
 
         final = read_ledger(ledger_dir)
         validate_ledger(final)
@@ -944,15 +948,15 @@ class TestThreeSuccessiveSyncs:
         ledger_dir = tmp_path / "ledger"
 
         r1 = _report(_entity_added("Vehicle", type="branch"))
-        write_ledger(sync(empty_ledger(), r1, cfg), ledger_dir)
+        write_ledger(sync(empty_ledger(), r1, _meta(), cfg), ledger_dir)
 
         # Run 2: unrelated change
         r2 = _report(_entity_added("Door"))
-        write_ledger(sync(read_ledger(ledger_dir), r2, cfg), ledger_dir)
+        write_ledger(sync(read_ledger(ledger_dir), r2, _meta(), cfg), ledger_dir)
 
         # Run 3: break Vehicle added in run 1
         r3 = _report(_entity_modified("Vehicle", type="object"))
-        write_ledger(sync(read_ledger(ledger_dir), r3, cfg), ledger_dir)
+        write_ledger(sync(read_ledger(ledger_dir), r3, _meta(), cfg), ledger_dir)
 
         final = read_ledger(ledger_dir)
         validate_ledger(final)

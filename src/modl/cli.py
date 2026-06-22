@@ -6,7 +6,7 @@ from pydantic import ValidationError as PydanticValidationError
 from rich.traceback import install
 
 from . import __version__, log
-from .config import BreakingChangeConfig
+from .config import BreakingChangeConfig, ModelMetadata
 from .ir import DiffReport, validate_report_aspects
 from .ledger import LedgerValidationError, empty_ledger, read_ledger, validate_ledger_dir, write_ledger
 from .sync import SyncError
@@ -53,11 +53,18 @@ def cli(ctx: click.Context, log_level: str, log_file: Path | None) -> None:
     help="Directory containing (or to create) the ledger CSV files",
 )
 @click.option(
-    "-c",
-    "--config",
+    "-m",
+    "--model-metadata",
     required=True,
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
-    help="Path to the breaking change config YAML file",
+    help="Path to the model metadata YAML file (name, id, preferred_prefix)",
+)
+@click.option(
+    "-b",
+    "--breaking-aspects",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Path to the breaking aspects config YAML file",
 )
 @click.option("-n", "--dry-run", is_flag=True, default=False, help="Preview changes without writing to disk")
 @click.option(
@@ -67,15 +74,28 @@ def cli(ctx: click.Context, log_level: str, log_file: Path | None) -> None:
     default=False,
     help="Treat unconfigured aspect keys in the diff report as errors instead of warnings",
 )
-def sync(diff_report: Path | None, ledger_dir: Path, config: Path, dry_run: bool, strict: bool) -> None:
+def sync(
+    diff_report: Path | None,
+    ledger_dir: Path,
+    model_metadata: Path,
+    breaking_aspects: Path,
+    dry_run: bool,
+    strict: bool,
+) -> None:
     """Synchronise the ledger with a diff report, or initialise it if none exists."""
     try:
-        cfg = BreakingChangeConfig.from_yaml(config)
+        metadata = ModelMetadata.from_yaml(model_metadata)
     except PydanticValidationError as exc:
         for error in exc.errors():
-            log.error("Invalid config — %s: %s", error["loc"][-1], error["msg"])
+            log.error("Invalid model metadata — %s: %s", error["loc"][-1], error["msg"])
         raise SystemExit(1) from exc
-    log.debug("Loaded config: namespace=%s prefix=%s", cfg.namespace.namespace, cfg.namespace.prefix)
+    try:
+        cfg = BreakingChangeConfig.from_yaml(breaking_aspects)
+    except PydanticValidationError as exc:
+        for error in exc.errors():
+            log.error("Invalid breaking aspects config — %s: %s", error["loc"][-1], error["msg"])
+        raise SystemExit(1) from exc
+    log.debug("Loaded metadata: id=%s preferred_prefix=%s", metadata.id, metadata.preferred_prefix)
 
     # Fail early: if the directory exists and is non-empty it must be a valid ledger
     dir_is_non_empty = ledger_dir.exists() and ledger_dir.is_dir() and any(ledger_dir.iterdir())
@@ -125,7 +145,7 @@ def sync(diff_report: Path | None, ledger_dir: Path, config: Path, dry_run: bool
             raise SystemExit(1)
 
         try:
-            tables = run_sync(tables, report, cfg)
+            tables = run_sync(tables, report, metadata, cfg)
         except SyncError as exc:
             log.error("Sync error — %s", exc)
             raise SystemExit(1) from None

@@ -29,34 +29,78 @@ flowchart LR
     SYNC --> |Updated| LEDGER
 ```
 
-The diff report describes changes at the level of objects and their fields:
+### Underlying pattern
+The diff report describes changes using four element kinds:
 
+| Kind | Also known as | Receives bindings? |
+|---|---|---|
+| `ENTITY` | Container, branch, object type, class, feature of interest | No |
+| `PROPERTY` | Field, attribute, signal, characteristic | Yes — one per instance, or one singleton |
+| `ENUMERATION_SET` | Enum type, allowed values, expected values | No |
+| `ENUM_VALUE` | Enum member, allowed value, listed option | No |
+
+`ENTITY` and `PROPERTY` cover the structural model. `ENUMERATION_SET` and `ENUM_VALUE` cover shared **vocabulary** — types, units, and code lists that properties reference. All four kinds receive concept URIs, revisions, and contracts in the ledger. Only `PROPERTY` concepts are runtime-addressable and therefore receive bindings.
+
+```mermaid
+graph TB
+    E[ENTITY] --> |has property| P1[PROPERTY 1]
+    E --> |has property| P2[PROPERTY 2]
+    E --> |has property| PN[PROPERTY N]
+    ES[ENUMERATION_SET] --> |has value| EV1[ENUM_VALUE 1]
+    ES --> |has value| EV2[ENUM_VALUE 2]
+    P1 -.->|references| ES
+```
+
+#### Example: model pattern
+A `Person` that has a `name` and owns a `Car`
+```mermaid
+graph TB
+    E[Person] --> |name| P1[String]
+    E --> |ownsCar| P2[Car]
+```
+
+Notice that some properties can resolve to a primitive data type (e.g., `name` resolves to `String`), whereas others resolve to another entity (e.g., `ownsCar` resolves to `Car`). Hence, such a simple pattern resembles a graph when used systematically.
+
+```mermaid
+graph TB
+    E[Person*] --> |name| P1[String]
+    E --> |ownsCar| V[Vehicle*]
+    V --> |speed| P3[Float]
+```
+`*` indicates that the element is an `ENTITY`.
+
+#### Example: reported changes
+A diff function (specific to the data modeling language and agnostic to `ModL`) must report changes to entities, properties, and vocabulary elements, indicating whether they were `ADDED`, `REMOVED`, or `MODIFIED`.
 | Change | Example |
 |---|---|
-| Object added | New `Vehicle.Window` branch |
-| Object removed | `Vehicle.OldFeature` deleted |
-| Object modified | `Vehicle.Door` instances list changed |
-| Field added | `Vehicle.Door.IsLocked` added |
-| Field removed | `Vehicle.Door.IsOpen` removed |
-| Field modified | `Vehicle.Speed` datatype changed from `Int` to `Float` |
+| `ENTITY` added | New `Vehicle.Door` branch |
+| `ENTITY` removed | `Vehicle.OldFeature` deleted |
+| `ENTITY` modified | `Vehicle.Door` instances list changed |
+| `PROPERTY` added | `Vehicle.Door.IsLocked` added |
+| `PROPERTY` removed | `Vehicle.Door.IsOpen` removed |
+| `PROPERTY` modified | `Vehicle.Speed` datatype changed from `Float` to `Int` |
+| `ENUMERATION_SET` added | New `SpeedUnit` vocabulary type |
+| `ENUM_VALUE` added | New `SpeedUnit.KMH` member |
+| `ENUM_VALUE` modified | `SpeedUnit.KMH` symbol changed |
 
 ## Building Blocks
 
-`ModL` tracks model identity across four dimensions. The following example is used throughout:
+`ModL` tracks model identity across four dimensions. Namely: `Concepts`, `Revisions`, `Contracts` and `Bindings`.
+The following example, written in [vspec](https://covesa.github.io/vehicle_signal_specification/), is used throughout:
 
 ```yaml
-Vehicle:
+Vehicle:  # This is an ENTITY
     type: branch
 
-Vehicle.Speed:
+Vehicle.Speed:  # This is an PROPERTY
     type: sensor
     datatype: Float
 
-Vehicle.Door:
+Vehicle.Door:  # This is an ENTITY
     type: branch
     instances: [Left, Right]
 
-Vehicle.Door.IsOpen:
+Vehicle.Door.IsOpen:  # This is an PROPERTY
     type: sensor
     datatype: Boolean
 ```
@@ -67,10 +111,12 @@ A concept is the **agreed meaning** of a model element — what it *is*, indepen
 
 | Kind | Label | Meaning |
 |---|---|---|
-| Entity | `Vehicle` | A motorized thing used for transporting people or goods |
-| Entity | `Door` | A hinged or sliding barrier at the entrance to a vehicle |
-| Field | `Vehicle.Speed` | The rate at which a vehicle moves |
-| Field | `Door.IsOpen` | Whether a door is open or closed |
+| ENTITY | `Vehicle` | A motorized thing used for transporting people or goods |
+| ENTITY | `Door` | A hinged or sliding barrier at the entrance to a vehicle |
+| PROPERTY | `Vehicle.Speed` | The rate at which a vehicle moves |
+| PROPERTY | `Door.IsOpen` | Whether a door is open or closed |
+| ENUMERATION_SET | `SpeedUnit` | A vocabulary type enumerating recognised speed units |
+| ENUM_VALUE | `SpeedUnit.KMH` | The kilometre-per-hour speed unit |
 
 Concepts are identified once and never reassigned. If a concept is renamed, the old label is recorded as a previous label — the concept identity does not change.
 
@@ -141,19 +187,28 @@ The table below shows which rows `modl sync` creates or updates for each type of
 
 | Event | concepts | revisions | contracts | bindings |
 |---|---|---|---|---|
-| Entity `ADDED` | new row | new row | new row (initial contract) | — |
-| Entity `MODIFIED`, non-breaking | update `current_label` if renamed | new row | — (unchanged) | — |
-| Entity `MODIFIED`, breaking | update `current_label` if renamed | new row | new row | new rows for all child properties |
-| Entity `REMOVED` | status → SUPERSEDED | new row | status → SUPERSEDED | status → SUPERSEDED for child property bindings |
+| ENTITY `ADDED` | new row | new row | new row (initial contract) | — |
+| ENTITY `MODIFIED`, non-breaking (no instance change) | update `current_label` if renamed | new row | — (unchanged) | — |
+| ENTITY `MODIFIED`, non-breaking (instances added) | update `current_label` if renamed | new row; new child revisions | — (unchanged) | new bindings for added instances on child properties |
+| ENTITY `MODIFIED`, breaking (non-instance) | update `current_label` if renamed | new row | new row | — |
+| ENTITY `MODIFIED`, breaking (instances changed) | update `current_label` if renamed | new row; new child revisions | new row; new child contracts | new bindings for all child properties (old bindings superseded) |
+| ENTITY `REMOVED` | status → REMOVED | new row | status → REMOVED | status → REMOVED for child property bindings (via child REMOVED events) |
 | Property `ADDED` | new row | new row | new row (initial contract) | new binding per instance; one singleton if no instances |
 | Property `MODIFIED`, non-breaking | update `current_label` if renamed | new row | — (unchanged) | — |
-| Property `MODIFIED`, breaking | update `current_label` if renamed | new row | new row | new rows (anchored to new contract) |
-| Property `REMOVED` | status → SUPERSEDED | new row | status → SUPERSEDED | status → SUPERSEDED |
+| Property `MODIFIED`, breaking | update `current_label` if renamed | new row | new row | new bindings anchored to new contract (old bindings superseded) |
+| Property `REMOVED` | status → REMOVED | new row | status → REMOVED | status → REMOVED |
+| `ENUMERATION_SET` `ADDED` | new row | new row | new row (initial contract) | — |
+| `ENUMERATION_SET` `MODIFIED` | update `current_label` if renamed | new row | new row if breaking, unchanged if not | — |
+| `ENUMERATION_SET` `REMOVED` | status → REMOVED | new row | status → REMOVED | — |
+| `ENUM_VALUE` `ADDED` | new row | new row | new row (initial contract) | — |
+| `ENUM_VALUE` `MODIFIED` | update `current_label` if renamed | new row | new row if breaking, unchanged if not | — |
+| `ENUM_VALUE` `REMOVED` | status → REMOVED | new row | status → REMOVED | — |
 
 Key observations:
 - Every event produces a revision — the revision log is unconditional and unfiltered.
 - A contract is only created or superseded when a change is classified as breaking by the config. Non-breaking changes leave the active contract untouched, so any system holding a contract URI or binding URI is unaffected.
 - A rename never changes the concept URI. It updates `current_label` and appends the old label to `previous_labels` in the concept row.
+- `ENUMERATION_SET` and `ENUM_VALUE` events follow the same revision and contract rules as `ENTITY` and `PROPERTY` respectively, but **never produce bindings** regardless of configuration.
 
 ## The Ledger Tables
 
@@ -258,24 +313,33 @@ The following commands assume an active environment, see [CONTRIBUTING](./CONTRI
 Synchronises the ledger with a diff report. If no ledger exists yet, it is created. If no diff report is provided, an empty ledger is initialised.
 
 ```shell
-modl sync --ledger-dir PATH --config PATH [--diff-report PATH] [--dry-run] [--strict]
+modl sync --ledger-dir PATH --model-metadata PATH --breaking-aspects PATH [--diff-report PATH] [--dry-run] [--strict]
 ```
 
 | Option | Description |
 |---|---|
 | `-d`, `--diff-report` | Path to the diff report JSON file (optional). Omit to initialise an empty ledger. |
 | `-o`, `--ledger-dir` | Directory where the four ledger CSV files are read from and written to. |
-| `-c`, `--config` | Path to the breaking change config YAML file. |
+| `-m`, `--model-metadata` | Path to the model metadata YAML file (`name`, `id`, `preferred_prefix`). |
+| `-b`, `--breaking-aspects` | Path to the breaking aspects config YAML file. |
 | `-n`, `--dry-run` | Preview what would change without writing anything to disk. Exits with code `1` if changes would be made. |
 | `-s`, `--strict` | Treat aspect keys in the diff report that are not declared in the config as errors instead of warnings. |
 
-#### Config file format
+#### Model metadata file format
+
+The model metadata file follows the [s2dm](https://github.com/COVESA/s2dm) `metadata.yaml` convention:
 
 ```yaml
-namespace:
-  namespace: "http://namespace.example/"  # must end with '/' or '#'; full URIs are stored in the ledger
-  prefix: "ns"                            # optional display alias; used by inspection commands to shorten output
+name: MyModel                           # human-readable model name
+id: "http://namespace.example/"         # must end with '/' or '#'; full URIs are stored in the ledger
+preferred_prefix: "ns"                  # optional display alias; used by inspection commands to shorten output
+```
 
+All three fields are required except `preferred_prefix`. `id` is used as the namespace base URI for minting ledger record identifiers.
+
+#### Breaking aspects file format
+
+```yaml
 entity:
   instances: true   # breaking — triggers a new contract
   type: true        # breaking — triggers a new contract
@@ -288,7 +352,7 @@ property:
   description: false # known, non-breaking; suppresses --strict warnings
 ```
 
-Only `namespace.namespace` is required. The `entity` and `property` sections default to empty — all changes are treated as non-breaking if omitted.
+The `entity` and `property` sections default to empty — all changes are treated as non-breaking if omitted.
 
 Each key maps to a boolean with three distinct states:
 
@@ -308,7 +372,7 @@ Each change event covers either an **entity** (container, object type, branch) o
 
 | Field | Values |
 |---|---|
-| `kind` | `ENTITY` or `PROPERTY` |
+| `kind` | `ENTITY`, `PROPERTY`, `ENUMERATION_SET`, or `ENUM_VALUE` |
 | `change_type` | `ADDED`, `REMOVED`, or `MODIFIED` |
 | `aspects` | On `ADDED`: full initial-state snapshot. On `MODIFIED`: delta of changed keys only. Absent on `REMOVED`. |
 | `renamed_from` | Previous label when the element was renamed (`MODIFIED` only). |
@@ -347,24 +411,34 @@ write_json("diff.json", to_modl_ir(changes))
 
 The adapter is a one-time investment per modeling language. See [diff_report_template.md](diff_report_template.md) for the full field reference, rename semantics, and an adapter implementation checklist.
 
-### 4. Author a breaking-change config
+### 4. Author a model metadata file and a breaking-aspects config
 
-Create a YAML config that declares your project's namespace and which aspect keys constitute a breaking change. Start minimal — only `namespace` is required:
+Create a `metadata.yaml` that declares your project's namespace following the s2dm convention. Only `name` and `id` are required:
 
 ```yaml
-namespace:
-  namespace: "https://myproject.org/model/"
-  prefix: "mp"
+name: MyModel
+id: "https://myproject.org/model/"
+preferred_prefix: "mp"
 ```
 
-Add `entity` and `property` keys as you identify which attributes define your data contract. Use `true` for breaking aspects, `false` to explicitly mark a key as known-but-non-breaking (silences `--strict` warnings).
+Create a `breaking-aspects.yaml` that lists which aspect keys constitute a breaking change. Start minimal — an empty file (or `{}`) is valid and treats all changes as non-breaking:
+
+```yaml
+entity:
+  instances: true
+property:
+  output_type: true
+  unit: true
+```
+
+Use `true` for breaking aspects, `false` to explicitly mark a key as known-but-non-breaking (silences `--strict` warnings).
 
 ### 5. Validate with a dry run
 
 Before touching the ledger, pass the diff report through `modl sync` with `--dry-run` and `--strict`:
 
 ```shell
-modl sync --ledger-dir ledger/ --config modl.yaml --diff-report diff.json --dry-run --strict
+modl sync --ledger-dir ledger/ --model-metadata metadata.yaml --breaking-aspects breaking.yaml --diff-report diff.json --dry-run --strict
 ```
 
 Review any warnings about undeclared aspect keys. For each unknown key, decide: is it breaking (`true`) or intentionally non-breaking (`false`)? Update the config and re-run until the dry run is clean.
@@ -374,7 +448,7 @@ Review any warnings about undeclared aspect keys. For each unknown key, decide: 
 On the first run, the ledger does not exist yet. `modl sync` creates it. For a first release where you want to capture the initial model state, pass the diff report that treats every element as `ADDED`. To start with an empty ledger and add history in subsequent syncs, omit `--diff-report`.
 
 ```shell
-modl sync --ledger-dir ledger/ --config modl.yaml --diff-report initial_diff.json
+modl sync --ledger-dir ledger/ --model-metadata metadata.yaml --breaking-aspects breaking.yaml --diff-report initial_diff.json
 ```
 
 Persist (e.g., release) the four generated CSV files (`concepts.csv`, `revisions.csv`, `contracts.csv`, `bindings.csv`) alongside your model.
@@ -384,7 +458,7 @@ Persist (e.g., release) the four generated CSV files (`concepts.csv`, `revisions
 For each new model release, produce a diff between the previous and current snapshots, run the adapter, and sync:
 
 ```shell
-modl sync --ledger-dir ledger/ --config modl.yaml --diff-report diff.json
+modl sync --ledger-dir ledger/ --model-metadata metadata.yaml --breaking-aspects breaking.yaml --diff-report diff.json
 ```
 
 Persist (e.g., release) the updated ledger files with the latest composed model. The ledger is append-only — existing records are never modified, only new rows are added or existing ones marked `SUPERSEDED`.
@@ -394,13 +468,13 @@ Persist (e.g., release) the updated ledger files with the latest composed model.
 ```
 1. validate model
 2. run adapter → diff.json
-3. modl sync --ledger-dir ledger/ --config modl.yaml --diff-report diff.json --strict
+3. modl sync --ledger-dir ledger/ --model-metadata metadata.yaml --breaking-aspects breaking.yaml --diff-report diff.json --strict
 4. commit and tag updated ledger CSV files
 ```
 
 ### 8. Iterate on the config as the model evolves
 
-When the adapter emits a new aspect key that is not yet in the config, `modl` warns. Decide whether it is breaking or non-breaking and add it to the config. Run the dry run again to confirm the warning is resolved before syncing.
+When the adapter emits a new aspect key that is not yet in the breaking-aspects config, `modl` warns. Decide whether it is breaking or non-breaking and add it to `breaking-aspects.yaml`. Run the dry run again to confirm the warning is resolved before syncing.
 
 
 

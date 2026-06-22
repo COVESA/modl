@@ -18,8 +18,8 @@ dependencies = [
 requires-python = ">=3.11"
 
 [project.urls]
-homepage = "https://github.com/COVESA/model-ledger"
-documentation = "https://github.com/COVESA/model-ledger/blob/main/README.md"
+homepage = "https://github.com/COVESA/modl"
+documentation = "https://github.com/COVESA/modl/blob/main/README.md"
 
 [project.scripts]
 modl = "modl.cli:cli"

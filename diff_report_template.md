@@ -360,11 +360,19 @@ Use this checklist when building an adapter for a new modeling language:
 
 The breaking-change config tells `modl` which aspect keys constitute a data-contract change. The adapter does not need to know this — it reports all changes; `modl` decides which are breaking.
 
-```yaml
-namespace:
-  namespace: "https://myproject.org/model/"
-  prefix: "mp"
+`modl sync` takes two config files:
 
+**`metadata.yaml`** — identifies the model project (follows the s2dm convention):
+
+```yaml
+name: MyModel
+id: "https://myproject.org/model/"   # must end with '/' or '#'
+preferred_prefix: "mp"               # optional display alias
+```
+
+**`breaking-aspects.yaml`** — declares which aspect keys are breaking:
+
+```yaml
 entity:
   instances: true   # breaking — triggers a new contract
   type: true        # breaking — triggers a new contract
