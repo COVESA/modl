@@ -22,6 +22,12 @@ from modl.models import ElementKind
 #   values.added/removed   — ENUM_VALUE added/removed under an ENUMERATION_SET
 #   instances.added/removed — instance label added/removed on an ENTITY
 
+# Directional instance keys emitted by _aspect_ops_for_event → canonical config key ("instances")
+_INSTANCE_KEY_TRANSLATIONS: dict[str, tuple[str, str]] = {
+    "instances_added": ("instances", "added"),
+    "instances_removed": ("instances", "removed"),
+}
+
 _STRUCTURAL_KEYS: dict[ElementKind, frozenset[str]] = {
     ElementKind.ENTITY: frozenset(
         {
@@ -30,6 +36,9 @@ _STRUCTURAL_KEYS: dict[ElementKind, frozenset[str]] = {
             "properties.removed",
             "instances.added",
             "instances.removed",
+            # Directional forms emitted by _aspect_ops_for_event (recognised so they never warn)
+            "instances_added",
+            "instances_removed",
         }
     ),
     ElementKind.ENUMERATION_SET: frozenset(
@@ -243,7 +252,9 @@ class BreakingChangeConfig(BaseModel):
         *aspect_ops* maps each changed aspect key to the operation that occurred
         (``"added"``, ``"removed"``, or ``"modified"``).  Structural keys such as
         ``"properties"``, ``"instances"``, and ``"values"`` should be included with their
-        directional op when applicable.
+        directional op when applicable.  The directional instance keys ``"instances_added"``
+        and ``"instances_removed"`` (emitted by the engine) are translated to the canonical
+        ``instances`` config key automatically.
 
         Returns ``True`` when any declared breaking rule fires.  Unknown keys (absent from
         config and not structural) are treated as non-breaking.
@@ -254,7 +265,11 @@ class BreakingChangeConfig(BaseModel):
         if renamed_from is not None and self._lookup(cfg, "name", "modified") is True:
             return True
 
-        return any(self._lookup(cfg, base_key, op) is True for base_key, op in aspect_ops.items())
+        for base_key, op in aspect_ops.items():
+            canonical_key, canonical_op = _INSTANCE_KEY_TRANSLATIONS.get(base_key, (base_key, op))
+            if self._lookup(cfg, canonical_key, canonical_op) is True:
+                return True
+        return False
 
     def unknown_keys(self, kind: ElementKind, aspect_ops: dict[str, str], renamed_from: str | None = None) -> list[str]:
         """Return aspect keys that are undeclared in the config and not structural.

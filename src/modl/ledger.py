@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from pathlib import Path
 
 import pandas as pd
@@ -151,11 +153,23 @@ def validate_ledger(tables: dict[str, pd.DataFrame]) -> None:
         if invalid:
             raise LedgerValidationError(f"[{name}] Invalid status values: {sorted(invalid)}")
 
-        # Valid kind values (concepts table only)
+        # Valid kind values and label uniqueness (concepts table only)
         if name == "concepts":
             invalid_kinds = set(df["kind"].dropna().unique()) - VALID_KINDS
             if invalid_kinds:
                 raise LedgerValidationError(f"[{name}] Invalid kind values: {sorted(invalid_kinds)}")
+
+            # current_label must be globally unique across all concepts
+            dup_mask = df["current_label"].duplicated(keep=False)
+            if dup_mask.any():
+                msgs: list[str] = []
+                for label, group in df[dup_mask].groupby("current_label"):
+                    details = ", ".join(
+                        f"concept_uri='{row['concept_uri']}' kind={row['kind']} parent_uri={row['parent_uri']!r}"
+                        for _, row in group.iterrows()
+                    )
+                    msgs.append(f"  '{label}': {details}")
+                raise LedgerValidationError("[concepts] Duplicate current_label values:\n" + "\n".join(msgs))
 
             # ENTITY and ENUMERATION_SET must not have a parent_uri
             no_parent_kinds = {ElementKind.ENTITY.value, ElementKind.ENUMERATION_SET.value}
@@ -271,7 +285,16 @@ def read_ledger(ledger_dir: Path) -> dict[str, pd.DataFrame]:
 
 
 def write_ledger(tables: dict[str, pd.DataFrame], ledger_dir: Path) -> None:
-    """Write the four ledger DataFrames to CSV files in the given directory."""
+    """Write the four ledger DataFrames to CSV files in the given directory.
+
+    All four files are written to a temporary directory on the same filesystem first,
+    then atomically renamed into place.  A crash or disk-full error during writing
+    leaves any pre-existing ledger intact.
+    """
     ledger_dir.mkdir(parents=True, exist_ok=True)
-    for name in TABLES:
-        tables[name].to_csv(ledger_dir / f"{name}.csv", index=False)
+    with tempfile.TemporaryDirectory(dir=ledger_dir.parent, prefix=".modl-tmp-") as tmp:
+        tmp_path = Path(tmp)
+        for name in TABLES:
+            tables[name].to_csv(tmp_path / f"{name}.csv", index=False)
+        for name in TABLES:
+            os.replace(tmp_path / f"{name}.csv", ledger_dir / f"{name}.csv")

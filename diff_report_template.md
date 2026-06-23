@@ -63,17 +63,17 @@ The `changes` array is an ordered list of change events. Order does not affect c
 
 | Field | Required | Notes |
 |---|---|---|
-| `label` | always | The current label of the entity (after any rename). |
+| `label` | always | The current label of the entity (after any rename). Must be **globally unique** across all element kinds in the ledger — use the full dotted path (e.g. `Vehicle.Door`). |
 | `kind` | always | Must be `"ENTITY"`. |
 | `change_type` | always | `ADDED`, `REMOVED`, or `MODIFIED`. |
 | `renamed_from` | `MODIFIED` only | Previous label. Signals the ledger to record a rename rather than a separate removal and addition. Must be `null` or absent on `ADDED` and `REMOVED`. |
 | `aspects` | `ADDED` | Full initial-state snapshot of all entity-level attributes. Empty on `REMOVED`. Delta (changed keys only) on `MODIFIED`. |
-| `content` | `MODIFIED` only | Summary of which child properties changed. Each item carries `label` and `change_type`. Absent on `ADDED` and `REMOVED`. |
+| `content` | `MODIFIED` only | Declares which child elements changed. Each item carries `label` and `change_type`. The engine evaluates `ADDED` and `REMOVED` content items against the `properties.added` / `properties.removed` config keys (or `values.added` / `values.removed` for `ENUMERATION_SET`) to decide whether a new entity contract is warranted. Every label in `content` must have a corresponding standalone event in the same diff report, and vice versa. Absent on `ADDED` and `REMOVED`. |
 
 ### Rules
 
 - **ADDED**: `aspects` carries the full snapshot. Use `instances` to carry the full list of instance labels. `content` must be absent. `renamed_from` must be absent.
-- **MODIFIED**: `aspects` carries only the keys that actually changed. For instance-list changes use `instances_added` and `instances_removed` (the directional delta — not the full list). `renamed_from` is set only when a rename occurred. `content` lists affected children.
+- **MODIFIED**: `aspects` carries only the keys that actually changed. For instance-list changes use `instances_added` and `instances_removed` (the directional delta — not the full list). `renamed_from` is set only when a rename occurred. `content` lists affected children — every item must have a corresponding standalone event in the same report, and every standalone child event must be reflected in the parent's `content`.
 - **REMOVED**: `aspects` must be empty. `content` must be absent. `renamed_from` must be absent.
 
 > **Reserved keys on entity events:** `"name"` is forbidden in `aspects` — signal renames via `renamed_from`. On `MODIFIED` events, `"instances"` is also forbidden — use `"instances_added"` / `"instances_removed"` to report the directional delta. `"instances"` is only valid on `ADDED` events (full initial snapshot).
@@ -95,7 +95,7 @@ The `changes` array is an ordered list of change events. Order does not affect c
 
 | Field | Required | Notes |
 |---|---|---|
-| `label` | always | The current label of the property. |
+| `label` | always | The current label of the property. Must be **globally unique** across all element kinds in the ledger — use the full dotted path (e.g. `Vehicle.Door.IsOpen`). |
 | `parent_label` | always | The label of the immediate parent entity. |
 | `kind` | always | Must be `"PROPERTY"`. |
 | `change_type` | always | `ADDED`, `REMOVED`, or `MODIFIED`. |
@@ -134,7 +134,7 @@ For entity `MODIFIED` events — use directional delta keys instead of `instance
 
 | Key | Type | Meaning |
 |---|---|---|
-| `instances_added` | `string[]` | Instance labels that appeared since the last sync. |
+| `instances_added` | `string[]` | Instance labels that appeared since the last sync. Values must be unique and must not overlap with the instance labels already stored in the ledger for this entity. |
 | `instances_removed` | `string[]` | Instance labels that disappeared since the last sync. |
 
 All other keys are **adapter-defined**. Examples: `unit`, `min`, `max`, `accuracy`, `description`.
@@ -369,7 +369,7 @@ Use this checklist when building an adapter for a new modeling language:
   - [ ] If the element was also modified in the same release, include both `renamed_from` and the changed keys in `aspects` within the same event
   - [ ] Detect changes to entity-level attributes → emit `MODIFIED` with changed keys in `aspects`
   - [ ] Detect added/removed instances → emit `MODIFIED` with `instances_added` and/or `instances_removed` (the directional delta — **not** the full list)
-  - [ ] Detect added/removed/modified child properties → emit `MODIFIED` entity event with `content` summary **and** individual property events
+  - [ ] Detect added/removed/modified child properties → emit `MODIFIED` entity event with `content` summary **and** individual property events. The `content` list and the set of standalone property events in the same report must be consistent: every label listed in `content` must have a standalone event, and every standalone child event whose parent has a `MODIFIED` event must appear in that parent's `content`. Mismatches produce warnings (errors with `--strict`).
 - [ ] For each vocabulary entity (enum type, unit group, code list): set `kind` to `ENUMERATION_SET` in the entity `ADDED` event
 - [ ] For each vocabulary property (enum value, unit entry): set `kind` to `ENUM_VALUE` in the property `ADDED` event
 - [ ] For each property that exists in current but not previous: emit `ADDED` property event with full `aspects`; include `output_type` for typed properties (signals, fields) — omit for vocabulary elements (enum values, unit definitions) where no type resolution is involved

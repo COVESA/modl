@@ -232,7 +232,11 @@ class DiffReport(BaseModel):
     def validate_structure(self, *, strict: bool = False) -> list[str]:
         """Check structural constraints across the report; return warning messages.
 
-        Detects duplicate events for the same label within the same kind.
+        Detects:
+        - Duplicate events for the same label within the same kind.
+        - The same label appearing as both an entity event and a property event (cross-kind
+          duplicate), which would violate global label uniqueness.
+
         Raises :exc:`DiffReportValidationError` if *strict* is ``True`` and any warnings arise.
         """
         warnings: list[str] = []
@@ -252,6 +256,45 @@ class DiffReport(BaseModel):
                     )
                 seen_properties.add(key)
 
+        # Cross-kind: same label used as both an entity and a property
+        cross_kind = seen_entities & {label for label, _ in seen_properties}
+        for label in sorted(cross_kind):
+            warnings.append(
+                f"Label '{label}' appears as both an entity event and a property event — labels must be globally unique"
+            )
+
+        # ── Content cross-validation ──────────────────────────────────────────
+        # Forward: every label in EntityChanged.content must have a standalone event.
+        all_standalone_labels: set[str] = {change.label for change in self.changes}
+        for change in self.changes:
+            if not isinstance(change, EntityChanged) or change.change_type != ChangeType.MODIFIED:
+                continue
+            for item in change.content:
+                if item.label not in all_standalone_labels:
+                    warnings.append(
+                        f"[{change.label}] content entry '{item.label}' ({item.change_type.value}) "
+                        "has no corresponding standalone event in the diff report"
+                    )
+
+        # Reverse: each standalone property/enum-value event should be reflected in its
+        # parent entity's content list (when the parent has a MODIFIED event in this report).
+        entity_content_labels: dict[str, set[str]] = {
+            change.label: {item.label for item in change.content}
+            for change in self.changes
+            if isinstance(change, EntityChanged) and change.change_type == ChangeType.MODIFIED
+        }
+        for change in self.changes:
+            if not isinstance(change, PropertyChanged):
+                continue
+            parent = change.parent_label
+            if parent not in entity_content_labels:
+                continue  # parent entity has no MODIFIED event in this report — no expectation
+            if change.label not in entity_content_labels[parent]:
+                warnings.append(
+                    f"[{change.label}] {change.change_type.value} event is not listed in "
+                    f"parent entity '{parent}' content"
+                )
+
         if strict and warnings:
             raise DiffReportValidationError("\n".join(warnings))
         return warnings
@@ -264,8 +307,11 @@ def _aspect_ops_for_event(change: EntityChanged | PropertyChanged) -> dict[str, 
     """Build an aspect_ops dict for a MODIFIED event, including structural synthetic keys.
 
     For entity events, ``instances_added`` and ``instances_removed`` in the aspects dict
-    are mapped to the structural keys ``instances.added`` / ``instances.removed`` and their
-    ops are set to ``"added"`` / ``"removed"`` respectively.
+    are preserved as **distinct keys** (with ops ``"added"`` and ``"removed"`` respectively)
+    so that both can be present simultaneously when an event adds and removes instances at
+    once.  :meth:`~modl.config.BreakingChangeConfig.is_breaking` translates them to the
+    canonical ``instances`` config key (``instances.added`` / ``instances.removed``) at
+    evaluation time.
 
     For all events, the plain aspects are passed through :func:`extract_aspect_ops`.
     """
@@ -273,12 +319,12 @@ def _aspect_ops_for_event(change: EntityChanged | PropertyChanged) -> dict[str, 
     result: dict[str, str] = {}
 
     if isinstance(change, EntityChanged):
-        # Map directional instance keys to their structural equivalents
+        # Preserve directional instance keys as distinct entries so both can coexist.
         if "instances_added" in raw_ops:
-            result["instances"] = "added"
+            result["instances_added"] = "added"
         if "instances_removed" in raw_ops:
-            result["instances"] = "removed"
-        # Keep other non-instance keys
+            result["instances_removed"] = "removed"
+        # Keep other non-instance keys unchanged.
         for key, op in raw_ops.items():
             if key not in _INSTANCE_DELTA_KEYS:
                 result[key] = op

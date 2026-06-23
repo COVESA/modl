@@ -7,7 +7,7 @@ import json
 import pytest
 
 from modl.config import BreakingChangeConfig, ModelMetadata
-from modl.ir import ChangeType, DiffReport, EntityChanged, PropertyChanged
+from modl.ir import ChangeType, ContentItem, DiffReport, EntityChanged, PropertyChanged
 from modl.ledger import empty_ledger, validate_ledger
 from modl.models import ElementKind, ElementStatus
 from modl.sync import SyncError, sync
@@ -967,3 +967,203 @@ class TestThreeSuccessiveSyncs:
         vehicle_uri = final["concepts"][final["concepts"]["current_label"] == "Vehicle"].iloc[0]["concept_uri"]
         v_variants = final["contracts"][final["contracts"]["concept_uri"] == vehicle_uri]
         assert len(v_variants) == 2
+
+
+# ── New tests for implemented improvements ────────────────────────────────────
+
+
+# Step 1: simultaneous instances_added + instances_removed classification
+class TestSimultaneousInstanceAddAndRemove:
+    def test_both_fire_breaking_when_added_is_breaking(self) -> None:
+        """When instances.added: true and instances.removed: false, a simultaneous add+remove is breaking."""
+        cfg = _cfg(entity={"instances.added": True, "instances.removed": False})
+        report = _report(
+            _entity_added("Door", instances=["Left", "Right"]),
+            _prop_added("Door.IsOpen", parent="Door"),
+            EntityChanged(
+                label="Door",
+                change_type=ChangeType.MODIFIED,
+                aspects={"instances_added": ["Center"], "instances_removed": ["Right"]},
+            ),
+        )
+        tables = sync(empty_ledger(), report, _meta(), cfg)
+        entity_uri = tables["concepts"][tables["concepts"]["current_label"] == "Door"].iloc[0]["concept_uri"]
+        entity_contracts = tables["contracts"][tables["contracts"]["concept_uri"] == entity_uri]
+        # Breaking → new entity contract
+        assert len(entity_contracts) == 2
+
+    def test_both_fire_breaking_when_removed_is_breaking(self) -> None:
+        """When instances.removed: true and instances.added: false, a simultaneous add+remove is breaking."""
+        cfg = _cfg(entity={"instances.added": False, "instances.removed": True})
+        report = _report(
+            _entity_added("Door", instances=["Left", "Right"]),
+            _prop_added("Door.IsOpen", parent="Door"),
+            EntityChanged(
+                label="Door",
+                change_type=ChangeType.MODIFIED,
+                aspects={"instances_added": ["Center"], "instances_removed": ["Right"]},
+            ),
+        )
+        tables = sync(empty_ledger(), report, _meta(), cfg)
+        entity_uri = tables["concepts"][tables["concepts"]["current_label"] == "Door"].iloc[0]["concept_uri"]
+        entity_contracts = tables["contracts"][tables["contracts"]["concept_uri"] == entity_uri]
+        assert len(entity_contracts) == 2
+
+    def test_both_non_breaking_when_both_declared_false(self) -> None:
+        """When both instances.added: false and instances.removed: false, the event is non-breaking."""
+        cfg = _cfg(entity={"instances.added": False, "instances.removed": False})
+        report = _report(
+            _entity_added("Door", instances=["Left", "Right"]),
+            _prop_added("Door.IsOpen", parent="Door"),
+            EntityChanged(
+                label="Door",
+                change_type=ChangeType.MODIFIED,
+                aspects={"instances_added": ["Center"], "instances_removed": ["Right"]},
+            ),
+        )
+        tables = sync(empty_ledger(), report, _meta(), cfg)
+        entity_uri = tables["concepts"][tables["concepts"]["current_label"] == "Door"].iloc[0]["concept_uri"]
+        entity_contracts = tables["contracts"][tables["contracts"]["concept_uri"] == entity_uri]
+        assert len(entity_contracts) == 1  # non-breaking — no new contract
+
+
+# Step 2: properties.added / properties.removed wired from content
+class TestContentDerivedBreaking:
+    def test_properties_removed_breaking_mints_new_entity_contract(self) -> None:
+        """properties.removed: true in config + REMOVED content item triggers new entity contract."""
+        cfg = _cfg(entity={"properties.removed": True})
+        report = _report(
+            _entity_added("Vehicle"),
+            _prop_added("Vehicle.Speed", parent="Vehicle"),
+            EntityChanged(
+                label="Vehicle",
+                change_type=ChangeType.MODIFIED,
+                content=[ContentItem(label="Vehicle.Speed", change_type=ChangeType.REMOVED)],
+            ),
+            _prop_removed("Vehicle.Speed", parent="Vehicle"),
+        )
+        tables = sync(empty_ledger(), report, _meta(), cfg)
+        entity_uri = tables["concepts"][tables["concepts"]["current_label"] == "Vehicle"].iloc[0]["concept_uri"]
+        entity_contracts = tables["contracts"][tables["contracts"]["concept_uri"] == entity_uri]
+        assert len(entity_contracts) == 2
+        assert (entity_contracts["status"] == ElementStatus.SUPERSEDED).sum() == 1
+        assert (entity_contracts["status"] == ElementStatus.ACTIVE).sum() == 1
+
+    def test_properties_removed_false_no_new_entity_contract(self) -> None:
+        """properties.removed: false + REMOVED content item does not trigger new entity contract."""
+        cfg = _cfg(entity={"properties.removed": False})
+        report = _report(
+            _entity_added("Vehicle"),
+            _prop_added("Vehicle.Speed", parent="Vehicle"),
+            EntityChanged(
+                label="Vehicle",
+                change_type=ChangeType.MODIFIED,
+                content=[ContentItem(label="Vehicle.Speed", change_type=ChangeType.REMOVED)],
+            ),
+            _prop_removed("Vehicle.Speed", parent="Vehicle"),
+        )
+        tables = sync(empty_ledger(), report, _meta(), cfg)
+        entity_uri = tables["concepts"][tables["concepts"]["current_label"] == "Vehicle"].iloc[0]["concept_uri"]
+        assert len(tables["contracts"][tables["contracts"]["concept_uri"] == entity_uri]) == 1
+
+    def test_properties_added_breaking_mints_new_entity_contract(self) -> None:
+        """properties.added: true + ADDED content item triggers new entity contract."""
+        cfg = _cfg(entity={"properties.added": True})
+        report = _report(
+            _entity_added("Vehicle"),
+            EntityChanged(
+                label="Vehicle",
+                change_type=ChangeType.MODIFIED,
+                content=[ContentItem(label="Vehicle.Mass", change_type=ChangeType.ADDED)],
+            ),
+            _prop_added("Vehicle.Mass", parent="Vehicle"),
+        )
+        tables = sync(empty_ledger(), report, _meta(), cfg)
+        entity_uri = tables["concepts"][tables["concepts"]["current_label"] == "Vehicle"].iloc[0]["concept_uri"]
+        assert len(tables["contracts"][tables["contracts"]["concept_uri"] == entity_uri]) == 2
+
+    def test_empty_content_no_new_entity_contract(self) -> None:
+        """Entity MODIFIED with no content items does not trigger content-derived breaking."""
+        cfg = _cfg(entity={"properties.removed": True})
+        report = _report(_entity_added("Vehicle"), _entity_modified("Vehicle"))
+        tables = sync(empty_ledger(), report, _meta(), cfg)
+        entity_uri = tables["concepts"][tables["concepts"]["current_label"] == "Vehicle"].iloc[0]["concept_uri"]
+        assert len(tables["contracts"][tables["contracts"]["concept_uri"] == entity_uri]) == 1
+
+    def test_values_removed_breaking_on_enumeration_set(self) -> None:
+        """values.removed: true + REMOVED content item on ENUMERATION_SET triggers new contract."""
+        cfg = _cfg(enumeration_set={"values.removed": True})
+        report = _report(
+            _entity_added("SpeedUnit", kind=ElementKind.ENUMERATION_SET),
+            _prop_added("SpeedUnit.KMH", parent="SpeedUnit", kind=ElementKind.ENUM_VALUE),
+            EntityChanged(
+                label="SpeedUnit",
+                kind=ElementKind.ENUMERATION_SET,
+                change_type=ChangeType.MODIFIED,
+                content=[ContentItem(label="SpeedUnit.KMH", change_type=ChangeType.REMOVED)],
+            ),
+            _prop_removed("SpeedUnit.KMH", parent="SpeedUnit"),
+        )
+        tables = sync(empty_ledger(), report, _meta(), cfg)
+        set_uri = tables["concepts"][tables["concepts"]["current_label"] == "SpeedUnit"].iloc[0]["concept_uri"]
+        assert len(tables["contracts"][tables["contracts"]["concept_uri"] == set_uri]) == 2
+
+
+# Step 4: child concept instances kept in sync during cascade
+class TestChildConceptInstancesSync:
+    def test_child_concept_instances_updated_on_nonbreaking_add(self) -> None:
+        """After non-breaking instance addition, child property concept instances reflect new parent list."""
+        cfg = _cfg(entity={"instances": False})
+        report = _report(
+            _entity_added("Door", instances=["Left", "Right"]),
+            _prop_added("Door.IsOpen", parent="Door"),
+            _entity_modified("Door", instances_added=["Center"]),
+        )
+        tables = sync(empty_ledger(), report, _meta(), cfg)
+        prop_row = tables["concepts"][tables["concepts"]["current_label"] == "Door.IsOpen"].iloc[0]
+        assert json.loads(prop_row["instances"]) == ["Left", "Right", "Center"]
+
+    def test_child_concept_instances_updated_on_breaking_remove(self) -> None:
+        """After breaking instance removal, child property concept instances reflect new parent list."""
+        cfg = _cfg(entity={"instances": True})
+        report = _report(
+            _entity_added("Door", instances=["Left", "Right", "Rear"]),
+            _prop_added("Door.IsOpen", parent="Door"),
+            _entity_modified("Door", instances_removed=["Rear"]),
+        )
+        tables = sync(empty_ledger(), report, _meta(), cfg)
+        prop_row = tables["concepts"][tables["concepts"]["current_label"] == "Door.IsOpen"].iloc[0]
+        assert json.loads(prop_row["instances"]) == ["Left", "Right"]
+
+
+# Step 5: duplicate and overlap validation
+class TestInstanceDuplicateValidation:
+    def test_duplicate_in_added_snapshot_raises(self) -> None:
+        """Duplicate values in the instances list of an ADDED event raise SyncError."""
+        report = _report(_entity_added("Door", instances=["Left", "Left"]))
+        with pytest.raises(SyncError, match="duplicate"):
+            sync(empty_ledger(), report, _meta(), _cfg())
+
+    def test_duplicate_in_instances_added_raises(self) -> None:
+        """Duplicate values in instances_added on a MODIFIED event raise SyncError."""
+        setup = _report(_entity_added("Door", instances=["Right"]))
+        tables = sync(empty_ledger(), setup, _meta(), _cfg())
+        bad = EntityChanged(
+            label="Door",
+            change_type=ChangeType.MODIFIED,
+            aspects={"instances_added": ["Left", "Left"]},
+        )
+        with pytest.raises(SyncError, match="duplicate"):
+            sync(tables, _report(bad), _meta(), _cfg())
+
+    def test_overlap_with_existing_instances_raises(self) -> None:
+        """instances_added containing a value already in the stored list raises SyncError."""
+        setup = _report(_entity_added("Door", instances=["Left", "Right"]))
+        tables = sync(empty_ledger(), setup, _meta(), _cfg())
+        bad = EntityChanged(
+            label="Door",
+            change_type=ChangeType.MODIFIED,
+            aspects={"instances_added": ["Left"]},
+        )
+        with pytest.raises(SyncError, match="already present"):
+            sync(tables, _report(bad), _meta(), _cfg())

@@ -683,27 +683,38 @@ class TestExtractAspectOps:
 
 
 class TestAspectOpsForEvent:
-    def test_entity_instances_added_mapped_to_structural(self) -> None:
-        """instances_added in entity aspects maps to structural key instances with op 'added'."""
+    def test_entity_instances_added_preserved_as_distinct_key(self) -> None:
+        """instances_added is preserved as a distinct key so both add and remove can coexist."""
         event = EntityChanged(
             label="Door",
             change_type=ChangeType.MODIFIED,
             aspects={"instances_added": ["Center"]},
         )
         ops = _aspect_ops_for_event(event)
-        assert ops.get("instances") == "added"
-        assert "instances_added" not in ops
+        assert ops.get("instances_added") == "added"
+        assert "instances" not in ops
 
-    def test_entity_instances_removed_mapped_to_structural(self) -> None:
-        """instances_removed in entity aspects maps to structural key instances with op 'removed'."""
+    def test_entity_instances_removed_preserved_as_distinct_key(self) -> None:
+        """instances_removed is preserved as a distinct key so both add and remove can coexist."""
         event = EntityChanged(
             label="Door",
             change_type=ChangeType.MODIFIED,
             aspects={"instances_removed": ["Front"]},
         )
         ops = _aspect_ops_for_event(event)
-        assert ops.get("instances") == "removed"
-        assert "instances_removed" not in ops
+        assert ops.get("instances_removed") == "removed"
+        assert "instances" not in ops
+
+    def test_entity_instances_both_directions_no_collision(self) -> None:
+        """instances_added and instances_removed coexist as distinct keys without overwriting each other."""
+        event = EntityChanged(
+            label="Door",
+            change_type=ChangeType.MODIFIED,
+            aspects={"instances_added": ["Center"], "instances_removed": ["Rear"]},
+        )
+        ops = _aspect_ops_for_event(event)
+        assert ops.get("instances_added") == "added"
+        assert ops.get("instances_removed") == "removed"
 
     def test_non_instance_keys_passed_through(self) -> None:
         """Non-instance aspect keys are passed through with their extracted op."""
@@ -859,3 +870,149 @@ class TestVocabularyKinds:
         )
         cfg = _config(enum_value={"symbol": False})  # declared in enum_value config
         assert validate_report_aspects(report, cfg) == []
+
+
+# ── New tests for implemented improvements ────────────────────────────────────
+
+
+# Step 1: is_breaking translates directional instance keys to canonical config key
+class TestIsBreakingDirectionalInstanceKeys:
+    def test_instances_added_evaluated_against_instances_added_config(self) -> None:
+        """instances_added key in aspect_ops is evaluated against instances.added config rule."""
+        cfg = BreakingChangeConfig.model_validate({"entity": {"instances.added": True}})
+        assert cfg.is_breaking(ElementKind.ENTITY, {"instances_added": "added"}) is True
+
+    def test_instances_removed_evaluated_against_instances_removed_config(self) -> None:
+        """instances_removed key in aspect_ops is evaluated against instances.removed config rule."""
+        cfg = BreakingChangeConfig.model_validate({"entity": {"instances.removed": True}})
+        assert cfg.is_breaking(ElementKind.ENTITY, {"instances_removed": "removed"}) is True
+
+    def test_instances_added_not_breaking_when_removed_is_true_only(self) -> None:
+        """instances_added is non-breaking when only instances.removed: true is configured."""
+        cfg = BreakingChangeConfig.model_validate({"entity": {"instances.removed": True}})
+        assert cfg.is_breaking(ElementKind.ENTITY, {"instances_added": "added"}) is False
+
+    def test_both_keys_independent_breaking_check(self) -> None:
+        """Both keys are evaluated independently; breaking if any matching rule fires."""
+        cfg = BreakingChangeConfig.model_validate({"entity": {"instances.added": True, "instances.removed": False}})
+        # instances_added fires → breaking overall
+        assert cfg.is_breaking(ElementKind.ENTITY, {"instances_added": "added", "instances_removed": "removed"}) is True
+
+    def test_directional_keys_not_unknown(self) -> None:
+        """instances_added and instances_removed are structural — unknown_keys returns []."""
+        cfg = BreakingChangeConfig.model_validate({"entity": {"instances.added": False}})
+        unknown = cfg.unknown_keys(ElementKind.ENTITY, {"instances_added": "added"})
+        assert unknown == []
+
+
+# Step 3: cross-kind label duplicate warning
+class TestValidateStructureCrossKind:
+    def test_same_label_entity_and_property_warns(self) -> None:
+        """Same label appearing as both entity and property event produces a warning."""
+        report = DiffReport(
+            changes=[
+                EntityChanged(label="Vehicle.Speed", change_type=ChangeType.ADDED),
+                PropertyChanged(
+                    label="Vehicle.Speed",
+                    parent_label="Vehicle",
+                    change_type=ChangeType.ADDED,
+                    aspects={"output_type": "Float"},
+                ),
+            ]
+        )
+        warnings = report.validate_structure()
+        assert any("globally unique" in w for w in warnings)
+
+    def test_distinct_labels_no_cross_kind_warning(self) -> None:
+        """Distinct labels never produce a cross-kind warning."""
+        report = DiffReport(
+            changes=[
+                EntityChanged(label="Vehicle", change_type=ChangeType.ADDED),
+                PropertyChanged(
+                    label="Vehicle.Speed",
+                    parent_label="Vehicle",
+                    change_type=ChangeType.ADDED,
+                    aspects={"output_type": "Float"},
+                ),
+            ]
+        )
+        assert report.validate_structure() == []
+
+
+# Step 6: content cross-validation
+class TestValidateStructureContent:
+    def test_content_item_missing_standalone_event_warns(self) -> None:
+        """Content entry with no corresponding standalone event produces a warning."""
+        report = DiffReport(
+            changes=[
+                EntityChanged(
+                    label="Vehicle",
+                    change_type=ChangeType.MODIFIED,
+                    content=[ContentItem(label="Vehicle.Mass", change_type=ChangeType.ADDED)],
+                )
+                # Vehicle.Mass has no standalone event
+            ]
+        )
+        warnings = report.validate_structure()
+        assert any("Vehicle.Mass" in w and "no corresponding standalone" in w for w in warnings)
+
+    def test_content_item_with_standalone_event_no_warning(self) -> None:
+        """Content entry with a matching standalone event produces no warning."""
+        report = DiffReport(
+            changes=[
+                EntityChanged(
+                    label="Vehicle",
+                    change_type=ChangeType.MODIFIED,
+                    content=[ContentItem(label="Vehicle.Mass", change_type=ChangeType.ADDED)],
+                ),
+                PropertyChanged(
+                    label="Vehicle.Mass",
+                    parent_label="Vehicle",
+                    change_type=ChangeType.ADDED,
+                    aspects={"output_type": "Float"},
+                ),
+            ]
+        )
+        assert report.validate_structure() == []
+
+    def test_standalone_event_not_in_parent_content_warns(self) -> None:
+        """Standalone property event not listed in parent entity content produces a warning."""
+        report = DiffReport(
+            changes=[
+                EntityChanged(
+                    label="Vehicle",
+                    change_type=ChangeType.MODIFIED,
+                    content=[ContentItem(label="Vehicle.Mass", change_type=ChangeType.ADDED)],
+                ),
+                PropertyChanged(
+                    label="Vehicle.Mass",
+                    parent_label="Vehicle",
+                    change_type=ChangeType.ADDED,
+                    aspects={},
+                ),
+                PropertyChanged(
+                    label="Vehicle.Speed",
+                    parent_label="Vehicle",
+                    change_type=ChangeType.MODIFIED,
+                    aspects={"unit": "mph"},
+                ),
+            ]
+        )
+        warnings = report.validate_structure()
+        # Vehicle.Speed is MODIFIED but not listed in Vehicle's content
+        assert any("Vehicle.Speed" in w and "not listed in" in w for w in warnings)
+
+    def test_no_parent_modified_event_no_reverse_warning(self) -> None:
+        """Standalone property event whose parent has no MODIFIED event in this report does not warn."""
+        report = DiffReport(
+            changes=[
+                PropertyChanged(
+                    label="Vehicle.Speed",
+                    parent_label="Vehicle",
+                    change_type=ChangeType.MODIFIED,
+                    aspects={"unit": "mph"},
+                ),
+            ]
+        )
+        # No Vehicle MODIFIED event in this report — no expectation to check
+        assert report.validate_structure() == []

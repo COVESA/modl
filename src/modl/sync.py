@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from typing import Any
 
 import pandas as pd
@@ -167,6 +168,20 @@ def _entity_modified(
     aspect_ops = _aspect_ops_for_event(event)
     breaking = cfg.is_breaking(event.kind, aspect_ops, renamed_from=event.renamed_from)
 
+    # Evaluate content-derived structural keys (properties.added/removed for ENTITY,
+    # values.added/removed for ENUMERATION_SET).  Each content item is evaluated
+    # independently so that both "added" and "removed" children in the same event are
+    # checked against the config without one overwriting the other.
+    if event.content and not breaking:
+        content_key = "properties" if event.kind == ElementKind.ENTITY else "values"
+        for item in event.content:
+            if item.change_type == ChangeType.ADDED and cfg.is_breaking(event.kind, {content_key: "added"}):
+                breaking = True
+                break
+            if item.change_type == ChangeType.REMOVED and cfg.is_breaking(event.kind, {content_key: "removed"}):
+                breaking = True
+                break
+
     # Rename
     if event.renamed_from is not None:
         _apply_rename(tables, concept_row_idx, event.label, event.renamed_from)
@@ -183,6 +198,15 @@ def _entity_modified(
     # Derive the new complete instance list from the stored one + delta
     old_instances_json: str | None = tables["concepts"].at[concept_row_idx, "instances"]
     old_instances: list[str] = _parse_instances(old_instances_json) or []
+
+    # Reject instances_added values that overlap with the existing instance list
+    if instances_added and old_instances:
+        overlap = set(instances_added) & set(old_instances)
+        if overlap:
+            raise SyncError(
+                f"[{event.label}] 'instances_added' contains values already present "
+                f"in the stored instance list: {sorted(overlap)}"
+            )
     new_instances: list[str] = [i for i in old_instances if i not in instances_removed] + instances_added
 
     # --- Entity revision ---
@@ -397,9 +421,10 @@ def _cascade_instance_bindings(
 
     removed_set = set(instances_removed)
 
-    for _, child_row in child_df.iterrows():
-        child_uri: str = child_row["concept_uri"]
-        child_kind: str = child_row["kind"]
+    for child_idx in child_df.index.tolist():
+        child_idx = int(child_idx)
+        child_uri: str = tables["concepts"].at[child_idx, "concept_uri"]
+        child_kind: str = tables["concepts"].at[child_idx, "kind"]
 
         if child_kind != ElementKind.PROPERTY:
             continue
@@ -425,6 +450,11 @@ def _cascade_instance_bindings(
             if active_contract:
                 for instance in instances_added:
                     _mint_binding(tables, metadata, contract_uri=active_contract, instance_label=instance)
+
+        # Keep child concept instances column in sync with the updated parent list
+        old_child_instances = _parse_instances(tables["concepts"].at[child_idx, "instances"]) or []
+        new_child_instances = [i for i in old_child_instances if i not in removed_set] + instances_added
+        _set_instances(tables, child_idx, new_child_instances or None)
 
 
 # ── Minting helpers ───────────────────────────────────────────────────────────
@@ -645,7 +675,7 @@ def _child_concepts(tables: dict[str, pd.DataFrame], parent_uri: str) -> pd.Data
 
 def _parse_instances(value: Any) -> list[str] | None:
     """Deserialise a JSON-encoded instance list from the CSV; returns None for missing/null values."""
-    if value is None or (isinstance(value, float) and __import__("math").isnan(value)):
+    if value is None or (isinstance(value, float) and math.isnan(value)):
         return None
     if isinstance(value, list):
         return value
@@ -660,10 +690,11 @@ def _serialize_instances(instances: list[str] | None) -> str | None:
 
 
 def _validate_instances(instances: Any, label: str) -> None:
-    """Raise :exc:`SyncError` when *instances* is not a flat list of strings.
+    """Raise :exc:`SyncError` when *instances* is not a flat, duplicate-free list of strings.
 
     Catches nested lists, dicts, numbers, and other non-string elements that indicate
-    a non-compliant diff adapter (e.g. multi-dimensional instance arrays).
+    a non-compliant diff adapter (e.g. multi-dimensional instance arrays).  Also rejects
+    duplicate values within the list.
     """
     if not isinstance(instances, list):
         raise SyncError(f"[{label}] 'instances' must be a list of strings, got {type(instances).__name__!r}")
@@ -675,11 +706,15 @@ def _validate_instances(instances: Any, label: str) -> None:
             f"element(s) at index {bad} are not strings (got {bad_types}). "
             "Multi-dimensional instances must be flattened by the adapter before reaching the diff report."
         )
+    seen: set[str] = set()
+    dupes = [v for v in instances if v in seen or seen.add(v)]  # type: ignore[func-returns-value]
+    if dupes:
+        raise SyncError(f"[{label}] 'instances' contains duplicate values: {sorted(set(dupes))}")
 
 
 def _parse_previous_labels(value: Any) -> list[str]:
     """Deserialise previous_labels from the CSV; returns empty list for missing/null values."""
-    if value is None or (isinstance(value, float) and __import__("math").isnan(value)):
+    if value is None or (isinstance(value, float) and math.isnan(value)):
         return []
     if isinstance(value, list):
         return value

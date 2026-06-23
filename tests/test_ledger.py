@@ -613,3 +613,116 @@ class TestB36:
         """Negative input raises ValueError."""
         with pytest.raises(ValueError, match="non-negative"):
             b36encode(-1)
+
+
+# ── New tests for implemented improvements ────────────────────────────────────
+
+
+# Step 3: global label uniqueness in validate_ledger
+class TestLabelUniqueness:
+    def test_duplicate_current_label_raises(self, tmp_path: Path) -> None:
+        """Two concepts with the same current_label fail validation."""
+        ledger = empty_ledger()
+        ledger["concepts"] = pd.DataFrame(
+            {
+                "serial": [0, 1],
+                "concept_uri": [
+                    "http://ns.example/concepts/0",
+                    "http://ns.example/concepts/1",
+                ],
+                "current_label": ["Vehicle.Speed", "Vehicle.Speed"],  # duplicate
+                "previous_labels": [None, None],
+                "kind": ["PROPERTY", "PROPERTY"],
+                "status": ["ACTIVE", "ACTIVE"],
+                "parent_uri": [None, None],
+                "instances": [None, None],
+            }
+        )
+        with pytest.raises(LedgerValidationError, match="Duplicate current_label"):
+            validate_ledger(ledger)
+
+    def test_error_includes_both_concept_uris(self, tmp_path: Path) -> None:
+        """Duplicate label error message contains both concept_uris for debuggability."""
+        ledger = empty_ledger()
+        ledger["concepts"] = pd.DataFrame(
+            {
+                "serial": [0, 1],
+                "concept_uri": [
+                    "http://ns.example/concepts/0",
+                    "http://ns.example/concepts/1",
+                ],
+                "current_label": ["Dupe", "Dupe"],
+                "previous_labels": [None, None],
+                "kind": ["ENTITY", "ENTITY"],
+                "status": ["ACTIVE", "ACTIVE"],
+                "parent_uri": [None, None],
+                "instances": [None, None],
+            }
+        )
+        with pytest.raises(LedgerValidationError) as exc_info:
+            validate_ledger(ledger)
+        msg = str(exc_info.value)
+        assert "http://ns.example/concepts/0" in msg
+        assert "http://ns.example/concepts/1" in msg
+
+    def test_distinct_labels_pass(self, tmp_path: Path) -> None:
+        """Distinct current_labels in the concepts table pass validation."""
+        ledger = empty_ledger()
+        ledger["concepts"] = pd.DataFrame(
+            {
+                "serial": [0, 1],
+                "concept_uri": [
+                    "http://ns.example/concepts/0",
+                    "http://ns.example/concepts/1",
+                ],
+                "current_label": ["Vehicle", "Door"],
+                "previous_labels": [None, None],
+                "kind": ["ENTITY", "ENTITY"],
+                "status": ["ACTIVE", "ACTIVE"],
+                "parent_uri": [None, None],
+                "instances": [None, None],
+            }
+        )
+        validate_ledger(ledger)  # must not raise
+
+
+# Step 7: atomic write — crash safety
+class TestAtomicWrite:
+    def test_existing_ledger_intact_when_write_fails(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """If writing fails midway, the pre-existing ledger CSVs are unchanged."""
+        ledger_dir = tmp_path / "ledger"
+        # Write a valid first ledger
+        ledger_v1 = empty_ledger()
+        ledger_v1["concepts"] = pd.DataFrame(
+            {
+                "serial": [0],
+                "concept_uri": ["http://ns.example/concepts/0"],
+                "current_label": ["Vehicle"],
+                "previous_labels": [None],
+                "kind": ["ENTITY"],
+                "status": ["ACTIVE"],
+                "parent_uri": [None],
+                "instances": [None],
+            }
+        )
+        write_ledger(ledger_v1, ledger_dir)
+        original_concepts = (ledger_dir / "concepts.csv").read_text()
+
+        # Simulate a crash during the second write (to_csv raises on the first table)
+        call_count = {"n": 0}
+        original_to_csv = pd.DataFrame.to_csv
+
+        def failing_to_csv(self, path, **kwargs):  # type: ignore[override]
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise OSError("simulated disk full")
+            return original_to_csv(self, path, **kwargs)
+
+        monkeypatch.setattr(pd.DataFrame, "to_csv", failing_to_csv)
+
+        ledger_v2 = empty_ledger()
+        with pytest.raises(OSError, match="simulated disk full"):
+            write_ledger(ledger_v2, ledger_dir)
+
+        # Original concepts.csv must be untouched
+        assert (ledger_dir / "concepts.csv").read_text() == original_concepts

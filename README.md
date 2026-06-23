@@ -401,7 +401,7 @@ Each change event covers either an **entity** (container, object type, branch) o
 | `aspects` | On `ADDED`: full initial-state snapshot. On `MODIFIED`: delta of changed keys only. Absent on `REMOVED`. |
 | `renamed_from` | Previous label when the element was renamed (`MODIFIED` only). |
 | `parent_label` | Required for `PROPERTY` — the label of the owning entity. |
-| `content` | `ENTITY` `MODIFIED` only — list of `{label, change_type}` for children that changed. |
+| `content` | `ENTITY` `MODIFIED` only — list of `{label, change_type}` for children that changed. Evaluated against `properties.added`/`properties.removed` config keys; must be consistent with standalone child events in the same report. |
 
 See [diff_report_template.md](diff_report_template.md) for the full field reference, rename semantics, examples, and an adapter implementation checklist.
 
@@ -485,6 +485,8 @@ For each new model release, produce a diff between the previous and current snap
 ```shell
 modl sync --ledger-dir ledger/ --model-metadata metadata.yaml --breaking-aspects breaking.yaml --diff-report diff.json
 ```
+
+> **Important:** the `id` field in `metadata.yaml` is **locked** once the first `modl sync` run writes concept rows into the ledger. Every subsequent run must use the same `id`. Changing it causes `modl sync` to exit with a namespace-mismatch error, because the new namespace would be inconsistent with the URIs already stored in the ledger. If you need to change the namespace, create a fresh ledger.
 
 Persist (e.g., release) the updated ledger files with the latest composed model. The ledger is append-only — existing records are never modified, only new rows are added or existing ones marked `SUPERSEDED`.
 

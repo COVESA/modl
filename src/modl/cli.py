@@ -119,6 +119,23 @@ def sync(
             log.error("Ledger validation error — %s", exc)
             raise SystemExit(1) from None
         log.info("Loaded existing ledger from %s", ledger_dir)
+
+        # Guard: all concept URIs in the existing ledger must use the current metadata namespace.
+        concepts_df = tables["concepts"]
+        if not concepts_df.empty:
+            existing_uri = str(concepts_df.iloc[0]["concept_uri"])
+            expected_prefix = f"{metadata.id}concepts/"
+            if not existing_uri.startswith(expected_prefix):
+                found_ns = existing_uri.split("concepts/", 1)[0] if "concepts/" in existing_uri else existing_uri
+                log.error(
+                    "Namespace mismatch: the existing ledger uses namespace '%s' "
+                    "(detected from concept_uri '%s') but the current metadata id is '%s'. "
+                    "Use the same metadata id that was used to create this ledger.",
+                    found_ns,
+                    existing_uri,
+                    metadata.id,
+                )
+                raise SystemExit(1)
     else:
         tables = empty_ledger()
         log.info("No existing ledger found — starting with empty tables")
