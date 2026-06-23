@@ -18,7 +18,7 @@ from typing import Any
 import pandas as pd
 
 from modl.config import BreakingChangeConfig, ModelMetadata
-from modl.ir import ChangeType, DiffReport, EntityChanged, PropertyChanged
+from modl.ir import ChangeType, DiffReport, EntityChanged, PropertyChanged, _aspect_ops_for_event
 from modl.ledger import b36encode, next_serial
 from modl.models import ElementKind, ElementStatus
 
@@ -27,8 +27,11 @@ log = logging.getLogger(__name__)
 # Kinds whose concepts receive bindings
 _BINDING_KINDS = {ElementKind.PROPERTY}
 
-# Canonical instances aspect key on entity events
-_INSTANCES_KEY = "instances"
+# Aspect keys for directional instance changes on MODIFIED entity events
+_INSTANCES_ADDED_KEY = "instances_added"
+_INSTANCES_REMOVED_KEY = "instances_removed"
+# Aspect key for full instance list on ADDED entity events
+_INSTANCES_SNAPSHOT_KEY = "instances"
 
 
 class SyncError(Exception):
@@ -130,7 +133,7 @@ def _entity_added(
     metadata: ModelMetadata,
     cfg: BreakingChangeConfig,
 ) -> None:
-    instances = event.aspects.get(_INSTANCES_KEY)
+    instances = event.aspects.get(_INSTANCES_SNAPSHOT_KEY)
     if instances is not None:
         _validate_instances(instances, event.label)
     instances_json = _serialize_instances(instances)
@@ -159,23 +162,28 @@ def _entity_modified(
 ) -> None:
     lookup_label = event.renamed_from if event.renamed_from is not None else event.label
     concept_row_idx, concept_uri = _require_concept(tables, lookup_label)
-    breaking = cfg.is_breaking(event.kind, event.aspects, renamed_from=event.renamed_from)
+
+    # Build aspect_ops from the event (maps structural+aspect keys to their op strings)
+    aspect_ops = _aspect_ops_for_event(event)
+    breaking = cfg.is_breaking(event.kind, aspect_ops, renamed_from=event.renamed_from)
 
     # Rename
     if event.renamed_from is not None:
         _apply_rename(tables, concept_row_idx, event.label, event.renamed_from)
 
-    # Determine old/new instance lists
-    old_instances_json: str | None = tables["concepts"].at[concept_row_idx, "instances"]
-    old_instances: list[str] | None = _parse_instances(old_instances_json)
+    # Read directional instance deltas from the event
+    instances_added: list[str] = event.aspects.get(_INSTANCES_ADDED_KEY) or []
+    instances_removed: list[str] = event.aspects.get(_INSTANCES_REMOVED_KEY) or []
+    if instances_added:
+        _validate_instances(instances_added, event.label)
+    if instances_removed:
+        _validate_instances(instances_removed, event.label)
+    instances_changed = bool(instances_added or instances_removed)
 
-    new_instances: list[str] | None = None
-    instances_changed = False
-    if _INSTANCES_KEY in event.aspects:
-        new_instances = event.aspects[_INSTANCES_KEY]
-        if new_instances is not None:
-            _validate_instances(new_instances, event.label)
-        instances_changed = new_instances != old_instances
+    # Derive the new complete instance list from the stored one + delta
+    old_instances_json: str | None = tables["concepts"].at[concept_row_idx, "instances"]
+    old_instances: list[str] = _parse_instances(old_instances_json) or []
+    new_instances: list[str] = [i for i in old_instances if i not in instances_removed] + instances_added
 
     # --- Entity revision ---
     prev_rev_uri = _active_revision_uri(tables, concept_uri)
@@ -191,12 +199,18 @@ def _entity_modified(
         contract_uri = _mint_contract(tables, metadata, concept_uri=concept_uri, revision_uri=revision_uri)
 
         if instances_changed:
-            # Instance-breaking: update entity instances column, cascade to all child properties
-            _set_instances(tables, concept_row_idx, new_instances)
-            _cascade_instance_breaking(
-                tables, metadata, cfg, entity_concept_uri=concept_uri, new_instances=new_instances or []
+            _set_instances(tables, concept_row_idx, new_instances or None)
+            # Instance cascade: update bindings only — child property contracts are NOT changed.
+            # Old bindings for removed instances are marked REMOVED; new bindings for added
+            # instances are appended to each child's existing active contract.
+            _cascade_instance_bindings(
+                tables,
+                metadata,
+                entity_concept_uri=concept_uri,
+                instances_added=instances_added,
+                instances_removed=instances_removed,
             )
-        # else: non-instance breaking — entity contract already updated; no child cascade
+        # else: non-instance breaking — entity contract updated; no child cascade
 
         log.info(
             "Entity MODIFIED (breaking): concept=%s new_revision=%s new_contract=%s prev_contract=%s",
@@ -208,16 +222,15 @@ def _entity_modified(
     else:
         # Non-breaking
         if instances_changed:
-            # Update entity instances column
-            _set_instances(tables, concept_row_idx, new_instances)
-            # Cascade to children: new revision per child + new bindings for NEW instances only
-            _cascade_instance_nonbreaking(
+            _set_instances(tables, concept_row_idx, new_instances or None)
+            # Same binding cascade regardless of breaking/non-breaking:
+            # child property contracts are never changed by an instance-list delta.
+            _cascade_instance_bindings(
                 tables,
                 metadata,
-                cfg,
                 entity_concept_uri=concept_uri,
-                old_instances=old_instances or [],
-                new_instances=new_instances or [],
+                instances_added=instances_added,
+                instances_removed=instances_removed,
             )
 
         log.info("Entity MODIFIED (non-breaking): concept=%s new_revision=%s", concept_uri, revision_uri)
@@ -300,7 +313,8 @@ def _property_modified(
 ) -> None:
     lookup_label = event.renamed_from if event.renamed_from is not None else event.label
     concept_row_idx, concept_uri = _require_concept(tables, lookup_label)
-    breaking = cfg.is_breaking(event.kind, event.aspects, renamed_from=event.renamed_from)
+    aspect_ops = _aspect_ops_for_event(event)
+    breaking = cfg.is_breaking(event.kind, aspect_ops, renamed_from=event.renamed_from)
 
     if event.renamed_from is not None:
         _apply_rename(tables, concept_row_idx, event.label, event.renamed_from)
@@ -361,77 +375,55 @@ def _property_removed(
 # ── Instance cascade helpers ──────────────────────────────────────────────────
 
 
-def _cascade_instance_breaking(
+def _cascade_instance_bindings(
     tables: dict[str, pd.DataFrame],
     metadata: ModelMetadata,
-    cfg: BreakingChangeConfig,
     entity_concept_uri: str,
-    new_instances: list[str],
+    instances_added: list[str],
+    instances_removed: list[str],
 ) -> None:
-    """New contracts + bindings for all child properties; supersede old bindings."""
+    """Update child property bindings for an instance-list change.
+
+    Child property **contracts are never changed** by an instance-list delta — only bindings
+    are affected.  This holds regardless of whether the parent entity change is classified as
+    breaking or non-breaking:
+
+    - Bindings for *removed* instances are marked ``REMOVED``.
+    - New bindings for *added* instances are appended to each child's active contract.
+    """
     child_df = _child_concepts(tables, entity_concept_uri)
     if child_df.empty:
         return
 
-    new_instances_json = _serialize_instances(new_instances if new_instances else None)
+    removed_set = set(instances_removed)
 
     for _, child_row in child_df.iterrows():
         child_uri: str = child_row["concept_uri"]
-        child_idx = tables["concepts"].index[tables["concepts"]["concept_uri"] == child_uri][0]
         child_kind: str = child_row["kind"]
 
-        # Update child instances column
-        tables["concepts"].at[child_idx, "instances"] = new_instances_json
+        if child_kind != ElementKind.PROPERTY:
+            continue
 
-        prev_rev_uri = _active_revision_uri(tables, child_uri)
-        _supersede_revision(tables, child_uri)
-        revision_uri = _mint_revision(
-            tables, metadata, concept_uri=child_uri, prev_revision_uri=prev_rev_uri, status=ElementStatus.ACTIVE
-        )
+        # Mark bindings for removed instances as REMOVED
+        if removed_set:
+            active_contracts = set(
+                tables["contracts"][
+                    (tables["contracts"]["concept_uri"] == child_uri)
+                    & (tables["contracts"]["status"] == ElementStatus.ACTIVE)
+                ]["contract_uri"]
+            )
+            mask = (
+                tables["bindings"]["contract_uri"].isin(active_contracts)
+                & tables["bindings"]["instance_label"].isin(removed_set)
+                & (tables["bindings"]["status"] == ElementStatus.ACTIVE)
+            )
+            tables["bindings"].loc[mask, "status"] = ElementStatus.REMOVED
 
-        _supersede_contract(tables, child_uri)
-        contract_uri = _mint_contract(tables, metadata, concept_uri=child_uri, revision_uri=revision_uri)
-
-        if child_kind == ElementKind.PROPERTY:
-            _supersede_bindings_by_concept(tables, child_uri)
-            _mint_bindings_for_instances(tables, metadata, contract_uri=contract_uri, instances=new_instances or None)
-
-
-def _cascade_instance_nonbreaking(
-    tables: dict[str, pd.DataFrame],
-    metadata: ModelMetadata,
-    cfg: BreakingChangeConfig,
-    entity_concept_uri: str,
-    old_instances: list[str],
-    new_instances: list[str],
-) -> None:
-    """New revisions for all child properties; new bindings only for newly added instances."""
-    child_df = _child_concepts(tables, entity_concept_uri)
-    if child_df.empty:
-        return
-
-    added_instances = [inst for inst in new_instances if inst not in old_instances]
-    new_instances_json = _serialize_instances(new_instances if new_instances else None)
-
-    for _, child_row in child_df.iterrows():
-        child_uri: str = child_row["concept_uri"]
-        child_idx = tables["concepts"].index[tables["concepts"]["concept_uri"] == child_uri][0]
-        child_kind: str = child_row["kind"]
-
-        # Update child instances column
-        tables["concepts"].at[child_idx, "instances"] = new_instances_json
-
-        prev_rev_uri = _active_revision_uri(tables, child_uri)
-        _supersede_revision(tables, child_uri)
-        _mint_revision(
-            tables, metadata, concept_uri=child_uri, prev_revision_uri=prev_rev_uri, status=ElementStatus.ACTIVE
-        )
-
-        # Append new bindings for added instances only (to the existing active contract)
-        if child_kind == ElementKind.PROPERTY and added_instances:
+        # Append bindings for added instances to the existing active contract
+        if instances_added:
             active_contract = _active_contract_uri(tables, child_uri)
             if active_contract:
-                for instance in added_instances:
+                for instance in instances_added:
                     _mint_binding(tables, metadata, contract_uri=active_contract, instance_label=instance)
 
 
@@ -599,7 +591,11 @@ def _set_instances(
     concept_idx: int,
     instances: list[str] | None,
 ) -> None:
-    tables["concepts"].at[concept_idx, "instances"] = _serialize_instances(instances)
+    col = "instances"
+    # An all-null column starts as float64; cast to object so strings can be stored.
+    if tables["concepts"][col].dtype != object:
+        tables["concepts"][col] = tables["concepts"][col].astype(object)
+    tables["concepts"].at[concept_idx, col] = _serialize_instances(instances)
 
 
 # ── Query helpers ─────────────────────────────────────────────────────────────

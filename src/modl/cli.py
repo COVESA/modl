@@ -87,13 +87,17 @@ def sync(
         metadata = ModelMetadata.from_yaml(model_metadata)
     except PydanticValidationError as exc:
         for error in exc.errors():
-            log.error("Invalid model metadata — %s: %s", error["loc"][-1], error["msg"])
+            loc = " → ".join(str(p) for p in error["loc"])
+            prefix = f"[{loc}] " if loc else ""
+            log.error("Invalid model metadata — %s%s", prefix, error["msg"])
         raise SystemExit(1) from exc
     try:
         cfg = BreakingChangeConfig.from_yaml(breaking_aspects)
     except PydanticValidationError as exc:
         for error in exc.errors():
-            log.error("Invalid breaking aspects config — %s: %s", error["loc"][-1], error["msg"])
+            loc = " → ".join(str(p) for p in error["loc"])
+            prefix = f"[{loc}] " if loc else ""
+            log.error("Invalid breaking aspects config — %s%s", prefix, error["msg"])
         raise SystemExit(1) from exc
     log.debug("Loaded metadata: id=%s preferred_prefix=%s", metadata.id, metadata.preferred_prefix)
 
@@ -148,6 +152,9 @@ def sync(
             tables = run_sync(tables, report, metadata, cfg)
         except SyncError as exc:
             log.error("Sync error — %s", exc)
+            raise SystemExit(1) from None
+        except Exception as exc:
+            log.error("Unexpected error — %s: %s", type(exc).__name__, exc)
             raise SystemExit(1) from None
 
     if dry_run:

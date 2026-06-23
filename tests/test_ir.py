@@ -5,14 +5,15 @@ from pydantic import ValidationError
 
 from modl.config import BreakingChangeConfig
 from modl.ir import (
-    CANONICAL_ASPECT_KEYS,
-    CANONICAL_ENTITY_ASPECT_KEYS,
     ChangeType,
     ContentItem,
     DiffReport,
     DiffReportValidationError,
     EntityChanged,
     PropertyChanged,
+    _aspect_ops_for_event,
+    extract_aspect_ops,
+    extract_op,
     validate_report_aspects,
 )
 from modl.models import ElementKind
@@ -23,11 +24,13 @@ NS = "http://example.org/myns/"
 
 
 def _config(**kwargs) -> BreakingChangeConfig:
-    """Return a minimal config, optionally overriding entity/property aspect dicts."""
+    """Return a minimal config, optionally overriding any of the four section dicts."""
     return BreakingChangeConfig.model_validate(
         {
             "entity": kwargs.get("entity", {}),
             "property": kwargs.get("property_", {}),
+            "enumeration_set": kwargs.get("enumeration_set", {}),
+            "enum_value": kwargs.get("enum_value", {}),
         }
     )
 
@@ -104,14 +107,14 @@ class TestEntityChanged:
             )
 
     def test_modified_delta_aspects(self) -> None:
-        """MODIFIED entity carries only changed keys in aspects."""
+        """MODIFIED entity carries only changed keys in aspects; directional instance keys accepted."""
         event = EntityChanged(
             label="Vehicle.Door",
             change_type=ChangeType.MODIFIED,
-            aspects={"instances": ["Left", "Right", "Center"]},
+            aspects={"instances_added": ["Center"], "instances_removed": ["Front"]},
             content=[ContentItem(label="Vehicle.Door.IsLocked", change_type=ChangeType.ADDED)],
         )
-        assert event.aspects == {"instances": ["Left", "Right", "Center"]}
+        assert event.aspects == {"instances_added": ["Center"], "instances_removed": ["Front"]}
         assert len(event.content) == 1
         assert event.content[0].label == "Vehicle.Door.IsLocked"
 
@@ -124,7 +127,23 @@ class TestEntityChanged:
         )
         assert event.renamed_from == "Vehicle.Glass"
 
-    def test_removed_empty_payload(self) -> None:
+    def test_instances_on_modified_rejected(self) -> None:
+        """Plain 'instances' key on a MODIFIED entity event is forbidden; use instances_added/removed."""
+        with pytest.raises(ValidationError, match="instances_added"):
+            EntityChanged(
+                label="Vehicle.Door",
+                change_type=ChangeType.MODIFIED,
+                aspects={"instances": ["Left", "Right", "Center"]},
+            )
+
+    def test_name_key_in_aspects_rejected_entity(self) -> None:
+        """'name' key in aspects is forbidden on EntityChanged; use renamed_from."""
+        with pytest.raises(ValidationError, match="renamed_from"):
+            EntityChanged(
+                label="Vehicle",
+                change_type=ChangeType.MODIFIED,
+                aspects={"name": "NewVehicle"},
+            )
         """REMOVED entity carries no aspects or content."""
         event = EntityChanged(label="Vehicle.OldFeature", change_type=ChangeType.REMOVED)
         assert event.aspects == {}
@@ -247,6 +266,16 @@ class TestPropertyChanged:
         assert event.aspects["unit"] == "DEG_C"
         assert event.aspects["min"] == -40
         assert event.aspects["accuracy"] == 0.5
+
+    def test_name_key_in_aspects_rejected_property(self) -> None:
+        """'name' key in aspects is forbidden on PropertyChanged; use renamed_from."""
+        with pytest.raises(ValidationError, match="renamed_from"):
+            PropertyChanged(
+                label="Vehicle.Speed",
+                parent_label="Vehicle",
+                change_type=ChangeType.MODIFIED,
+                aspects={"name": "NewSpeed"},
+            )
 
 
 # ── DiffReport ────────────────────────────────────────────────────────────────
@@ -440,7 +469,7 @@ class TestValidateStructure:
 
 class TestValidateReportAspects:
     def test_all_configured_no_warnings(self) -> None:
-        """All aspect keys declared in config → no warnings."""
+        """All aspect keys declared in config → no warnings (no section-level, no per-key)."""
         report = DiffReport.from_json(
             json.dumps(
                 {
@@ -456,31 +485,11 @@ class TestValidateReportAspects:
                 }
             )
         )
-        cfg = _config(property_={"unit": True})
+        cfg = _config(property_={"unit": True, "output_type": True})
         assert validate_report_aspects(report, cfg) == []
 
-    def test_canonical_keys_always_known(self) -> None:
-        """Canonical keys (output_type, is_list, is_required) never produce warnings."""
-        report = DiffReport.from_json(
-            json.dumps(
-                {
-                    "changes": [
-                        {
-                            "label": "Vehicle.Speed",
-                            "parent_label": "Vehicle",
-                            "kind": "PROPERTY",
-                            "change_type": "MODIFIED",
-                            "aspects": {"output_type": "Float", "is_list": False, "is_required": True},
-                        }
-                    ]
-                }
-            )
-        )
-        cfg = _config()  # no aspects configured
-        assert validate_report_aspects(report, cfg) == []
-
-    def test_unknown_key_produces_warning(self) -> None:
-        """An aspect key not in config and not canonical produces a warning."""
+    def test_section_level_warning_when_config_empty(self) -> None:
+        """Empty config section for a kind produces exactly one section-level warning."""
         report = DiffReport.from_json(
             json.dumps(
                 {
@@ -496,14 +505,66 @@ class TestValidateReportAspects:
                 }
             )
         )
-        cfg = _config()  # unit not configured
+        cfg = _config()  # no aspects configured
+        warnings = validate_report_aspects(report, cfg)
+        # Exactly one section-level warning, no per-key warning
+        assert len(warnings) == 1
+        assert "property" in warnings[0].lower()
+
+    def test_section_level_warning_emitted_once_per_kind(self) -> None:
+        """Two MODIFIED events for the same kind produce only one section-level warning."""
+        report = DiffReport.from_json(
+            json.dumps(
+                {
+                    "changes": [
+                        {
+                            "label": "Vehicle.Speed",
+                            "parent_label": "Vehicle",
+                            "kind": "PROPERTY",
+                            "change_type": "MODIFIED",
+                            "aspects": {"unit": "mph"},
+                        },
+                        {
+                            "label": "Vehicle.Mass",
+                            "parent_label": "Vehicle",
+                            "kind": "PROPERTY",
+                            "change_type": "MODIFIED",
+                            "aspects": {"unit": "kg"},
+                        },
+                    ]
+                }
+            )
+        )
+        cfg = _config()  # no property aspects configured
+        warnings = validate_report_aspects(report, cfg)
+        section_warnings = [w for w in warnings if "property" in w.lower() and "non-breaking" in w]
+        assert len(section_warnings) == 1
+
+    def test_unknown_key_produces_warning(self) -> None:
+        """An aspect key not in config produces a per-key warning (plus section-level if section empty)."""
+        report = DiffReport.from_json(
+            json.dumps(
+                {
+                    "changes": [
+                        {
+                            "label": "Vehicle.Speed",
+                            "parent_label": "Vehicle",
+                            "kind": "PROPERTY",
+                            "change_type": "MODIFIED",
+                            "aspects": {"unit": "mph"},
+                        }
+                    ]
+                }
+            )
+        )
+        cfg = _config(property_={"output_type": True})  # unit not configured; section is non-empty
         warnings = validate_report_aspects(report, cfg)
         assert len(warnings) == 1
         assert "unit" in warnings[0]
         assert "Vehicle.Speed" in warnings[0]
 
     def test_strict_mode_raises_on_unknown_key(self) -> None:
-        """strict=True turns unknown-key warnings into DiffReportValidationError."""
+        """strict=True turns warnings into DiffReportValidationError."""
         report = DiffReport.from_json(
             json.dumps(
                 {
@@ -519,14 +580,14 @@ class TestValidateReportAspects:
                 }
             )
         )
-        cfg = _config()
+        cfg = _config(property_={"output_type": True})  # unit not configured; section non-empty so per-key warning
         with pytest.raises(DiffReportValidationError):
             validate_report_aspects(report, cfg, strict=True)
 
     def test_added_events_skipped(self) -> None:
         """ADDED events are not subject to aspect-key validation."""
         report = DiffReport.from_json(json.dumps(VALID_REPORT_DICT))
-        cfg = _config()  # no aspects configured
+        cfg = _config(entity={"type": True}, property_={"output_type": True, "unit": True})
         assert validate_report_aspects(report, cfg) == []
 
     def test_removed_events_skipped(self) -> None:
@@ -544,7 +605,7 @@ class TestValidateReportAspects:
         assert validate_report_aspects(report, cfg) == []
 
     def test_multiple_unknown_keys_multiple_warnings(self) -> None:
-        """Each unknown key produces its own warning entry."""
+        """Each unknown key produces its own warning entry (when section is non-empty)."""
         report = DiffReport.from_json(
             json.dumps(
                 {
@@ -560,30 +621,141 @@ class TestValidateReportAspects:
                 }
             )
         )
-        cfg = _config()
+        cfg = _config(property_={"output_type": True})  # section non-empty; unit/min/accuracy undeclared
         warnings = validate_report_aspects(report, cfg)
         assert len(warnings) == 3
 
 
-# ── CANONICAL_ASPECT_KEYS ─────────────────────────────────────────────────────
+# ── extract_op ───────────────────────────────────────────────────────────────
 
 
-class TestCanonicalAspectKeys:
-    def test_canonical_set_contents(self) -> None:
-        """Canonical aspect key set contains exactly the expected keys."""
-        assert frozenset({"output_type", "is_list", "is_required"}) == CANONICAL_ASPECT_KEYS
+class TestExtractOp:
+    def test_plain_value_defaults_to_modified(self) -> None:
+        """Plain (non-annotated) value returns op 'modified'."""
+        assert extract_op("mph") == ("modified", "mph")
+        assert extract_op(42) == ("modified", 42)
+        assert extract_op(None) == ("modified", None)
+
+    def test_annotated_added(self) -> None:
+        """Dict with _op='added' and _value returns that op and value."""
+        assert extract_op({"_op": "added", "_value": "mph"}) == ("added", "mph")
+
+    def test_annotated_removed_no_value(self) -> None:
+        """Dict with _op='removed' (no _value) returns ('removed', None)."""
+        assert extract_op({"_op": "removed"}) == ("removed", None)
+
+    def test_annotated_modified_with_value(self) -> None:
+        """Dict with _op='modified' and _value returns that op and value."""
+        assert extract_op({"_op": "modified", "_value": "new text"}) == ("modified", "new text")
+
+    def test_dict_without_op_treated_as_plain(self) -> None:
+        """Dict lacking '_op' key is treated as a plain value (op='modified')."""
+        d = {"key": "value"}
+        assert extract_op(d) == ("modified", d)
 
 
-# ── CANONICAL_ENTITY_ASPECT_KEYS ───────────────────────────────────────────────────────────────────
+# ── extract_aspect_ops ────────────────────────────────────────────────────────
 
 
-class TestCanonicalEntityAspectKeys:
-    def test_canonical_entity_set_contents(self) -> None:
-        """Entity canonical aspect key set contains only instances."""
-        assert frozenset({"instances"}) == CANONICAL_ENTITY_ASPECT_KEYS
+class TestExtractAspectOps:
+    def test_plain_values_all_modified(self) -> None:
+        """Plain values in aspects dict all map to 'modified'."""
+        ops = extract_aspect_ops({"unit": "mph", "description": "text"})
+        assert ops == {"unit": "modified", "description": "modified"}
 
-    def test_instances_key_on_entity_modified_no_warning(self) -> None:
-        """The canonical 'instances' key on an entity MODIFIED event never produces a warning."""
+    def test_annotated_values_use_declared_op(self) -> None:
+        """Annotated values use the declared op from _op."""
+        ops = extract_aspect_ops(
+            {
+                "unit": {"_op": "added", "_value": "mph"},
+                "accuracy": {"_op": "removed"},
+            }
+        )
+        assert ops["unit"] == "added"
+        assert ops["accuracy"] == "removed"
+
+    def test_empty_dict(self) -> None:
+        """Empty aspects dict produces empty ops dict."""
+        assert extract_aspect_ops({}) == {}
+
+
+# ── _aspect_ops_for_event ─────────────────────────────────────────────────────
+
+
+class TestAspectOpsForEvent:
+    def test_entity_instances_added_mapped_to_structural(self) -> None:
+        """instances_added in entity aspects maps to structural key instances with op 'added'."""
+        event = EntityChanged(
+            label="Door",
+            change_type=ChangeType.MODIFIED,
+            aspects={"instances_added": ["Center"]},
+        )
+        ops = _aspect_ops_for_event(event)
+        assert ops.get("instances") == "added"
+        assert "instances_added" not in ops
+
+    def test_entity_instances_removed_mapped_to_structural(self) -> None:
+        """instances_removed in entity aspects maps to structural key instances with op 'removed'."""
+        event = EntityChanged(
+            label="Door",
+            change_type=ChangeType.MODIFIED,
+            aspects={"instances_removed": ["Front"]},
+        )
+        ops = _aspect_ops_for_event(event)
+        assert ops.get("instances") == "removed"
+        assert "instances_removed" not in ops
+
+    def test_non_instance_keys_passed_through(self) -> None:
+        """Non-instance aspect keys are passed through with their extracted op."""
+        event = EntityChanged(
+            label="Vehicle",
+            change_type=ChangeType.MODIFIED,
+            aspects={"type": "branch"},
+        )
+        ops = _aspect_ops_for_event(event)
+        assert ops["type"] == "modified"
+
+    def test_property_event_plain_passthrough(self) -> None:
+        """PropertyChanged aspects are returned unchanged with extracted ops."""
+        event = PropertyChanged(
+            label="Vehicle.Speed",
+            parent_label="Vehicle",
+            change_type=ChangeType.MODIFIED,
+            aspects={"unit": "mph", "description": {"_op": "modified", "_value": "text"}},
+        )
+        ops = _aspect_ops_for_event(event)
+        assert ops["unit"] == "modified"
+        assert ops["description"] == "modified"
+
+
+# ── CANONICAL_ASPECT_KEYS (removed — now structural_keys in config) ────────────────────────────
+
+
+class TestStructuralKeys:
+    def test_property_canonical_keys_no_warning(self) -> None:
+        """output_type, is_list, is_required are not structural; absent from config → per-key warning."""
+        report = DiffReport.from_json(
+            json.dumps(
+                {
+                    "changes": [
+                        {
+                            "label": "Vehicle.Speed",
+                            "parent_label": "Vehicle",
+                            "kind": "PROPERTY",
+                            "change_type": "MODIFIED",
+                            "aspects": {"output_type": "Float"},
+                        }
+                    ]
+                }
+            )
+        )
+        # output_type not in config; section is non-empty so per-key warning is produced
+        cfg = _config(property_={"unit": True})
+        warnings = validate_report_aspects(report, cfg)
+        assert any("output_type" in w for w in warnings)
+
+    def test_entity_instances_added_no_warning(self) -> None:
+        """instances_added / instances_removed are structural → no unknown-key warning."""
         report = DiffReport.from_json(
             json.dumps(
                 {
@@ -592,7 +764,7 @@ class TestCanonicalEntityAspectKeys:
                             "label": "Vehicle.Door",
                             "kind": "ENTITY",
                             "change_type": "MODIFIED",
-                            "aspects": {"instances": ["Left", "Right"]},
+                            "aspects": {"instances_added": ["Center"]},
                             "content": [],
                         }
                     ]
@@ -600,7 +772,9 @@ class TestCanonicalEntityAspectKeys:
             )
         )
         cfg = _config()  # no entity aspects configured
-        assert validate_report_aspects(report, cfg) == []
+        warnings = validate_report_aspects(report, cfg)
+        # Section-level warning (no rules configured) but no per-key warning for instances
+        assert not any("instances" in w and "not declared" in w for w in warnings)
 
 
 # ── Vocabulary kinds (ENUMERATION_SET / ENUM_VALUE) ──────────────────────────────────────────────
@@ -647,8 +821,8 @@ class TestVocabularyKinds:
                 change_type=ChangeType.ADDED,
             )
 
-    def test_enumeration_set_event_uses_entity_config(self) -> None:
-        """ENUMERATION_SET MODIFIED events are checked against the entity config."""
+    def test_enumeration_set_event_uses_enumeration_set_config(self) -> None:
+        """ENUMERATION_SET MODIFIED events are checked against the enumeration_set config section."""
         report = DiffReport.from_json(
             json.dumps(
                 {
@@ -663,11 +837,11 @@ class TestVocabularyKinds:
                 }
             )
         )
-        cfg = _config(entity={"definition": False})  # declared in entity config
+        cfg = _config(enumeration_set={"definition": False})  # declared in enumeration_set config
         assert validate_report_aspects(report, cfg) == []
 
-    def test_enum_value_event_uses_property_config(self) -> None:
-        """ENUM_VALUE MODIFIED events are checked against the property config."""
+    def test_enum_value_event_uses_enum_value_config(self) -> None:
+        """ENUM_VALUE MODIFIED events are checked against the enum_value config section."""
         report = DiffReport.from_json(
             json.dumps(
                 {
@@ -683,5 +857,5 @@ class TestVocabularyKinds:
                 }
             )
         )
-        cfg = _config(property_={"symbol": False})  # declared in property config
+        cfg = _config(enum_value={"symbol": False})  # declared in enum_value config
         assert validate_report_aspects(report, cfg) == []

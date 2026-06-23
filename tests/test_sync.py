@@ -21,12 +21,22 @@ def _meta() -> ModelMetadata:
     return ModelMetadata(name="Test", id=NS)
 
 
-def _cfg(*, entity: dict | None = None, property: dict | None = None) -> BreakingChangeConfig:
+def _cfg(
+    *,
+    entity: dict | None = None,
+    property: dict | None = None,
+    enumeration_set: dict | None = None,
+    enum_value: dict | None = None,
+) -> BreakingChangeConfig:
     raw: dict = {}
     if entity is not None:
         raw["entity"] = entity
     if property is not None:
         raw["property"] = property
+    if enumeration_set is not None:
+        raw["enumeration_set"] = enumeration_set
+    if enum_value is not None:
+        raw["enum_value"] = enum_value
     return BreakingChangeConfig.model_validate(raw)
 
 
@@ -154,13 +164,13 @@ class TestEntityAdded:
             sync(empty_ledger(), _report(bad_event), _meta(), _cfg())
 
     def test_nested_list_instances_raises_on_modified(self) -> None:
-        """Nested-list instances raise SyncError on MODIFIED as well."""
+        """Nested-list instances_added raise SyncError on MODIFIED as well."""
         setup = _report(_entity_added("Door", instances=["Front", "Rear"]))
         tables = sync(empty_ledger(), setup, _meta(), _cfg())
         bad_event = EntityChanged(
             label="Door",
             change_type=ChangeType.MODIFIED,
-            aspects={"instances": [["Front", "Rear"], ["Left", "Right"]]},
+            aspects={"instances_added": [["Front", "Rear"], ["Left", "Right"]]},
         )
         with pytest.raises(SyncError, match="flat list of strings"):
             sync(tables, _report(bad_event), _meta(), _cfg())
@@ -315,7 +325,7 @@ class TestEntityModifiedInstanceNonBreaking:
         report = _report(
             _entity_added("Door", instances=["Left", "Right"]),
             _prop_added("Door.IsOpen", parent="Door"),
-            _entity_modified("Door", instances=["Left", "Right", "Center"]),
+            _entity_modified("Door", instances_added=["Center"]),
         )
         tables = sync(empty_ledger(), report, _meta(), cfg)
         # 2 original bindings (Left, Right) + 1 new (Center) = 3
@@ -329,36 +339,36 @@ class TestEntityModifiedInstanceNonBreaking:
         report = _report(
             _entity_added("Door", instances=["Left", "Right"]),
             _prop_added("Door.IsOpen", parent="Door"),
-            _entity_modified("Door", instances=["Left", "Right", "Center"]),
+            _entity_modified("Door", instances_added=["Center"]),
         )
         tables = sync(empty_ledger(), report, _meta(), cfg)
         assert (tables["bindings"]["status"] == ElementStatus.ACTIVE).all()
 
     def test_no_new_child_property_variant(self) -> None:
-        """Non-breaking instance addition does not create new child property variants."""
+        """Non-breaking instance addition does not create new child property contracts."""
         cfg = _cfg(entity={"instances": False})
         report = _report(
             _entity_added("Door", instances=["Left", "Right"]),
             _prop_added("Door.IsOpen", parent="Door"),
-            _entity_modified("Door", instances=["Left", "Right", "Center"]),
+            _entity_modified("Door", instances_added=["Center"]),
         )
         tables = sync(empty_ledger(), report, _meta(), cfg)
         prop_uri = tables["concepts"][tables["concepts"]["current_label"] == "Door.IsOpen"].iloc[0]["concept_uri"]
         prop_variants = tables["contracts"][tables["contracts"]["concept_uri"] == prop_uri]
-        assert len(prop_variants) == 1  # only the initial variant
+        assert len(prop_variants) == 1  # only the initial contract
 
-    def test_child_property_gets_new_revision(self) -> None:
-        """Each child property gets a new revision when instances change (non-breaking)."""
+    def test_removed_instance_binding_marked_removed(self) -> None:
+        """Non-breaking instance removal marks the corresponding child binding as REMOVED."""
         cfg = _cfg(entity={"instances": False})
         report = _report(
             _entity_added("Door", instances=["Left", "Right"]),
             _prop_added("Door.IsOpen", parent="Door"),
-            _entity_modified("Door", instances=["Left", "Right", "Center"]),
+            _entity_modified("Door", instances_removed=["Right"]),
         )
         tables = sync(empty_ledger(), report, _meta(), cfg)
-        prop_uri = tables["concepts"][tables["concepts"]["current_label"] == "Door.IsOpen"].iloc[0]["concept_uri"]
-        prop_revs = tables["revisions"][tables["revisions"]["concept_uri"] == prop_uri]
-        assert len(prop_revs) == 2  # initial + one from cascade
+        removed = tables["bindings"][tables["bindings"]["status"] == ElementStatus.REMOVED]
+        assert len(removed) == 1
+        assert removed.iloc[0]["instance_label"] == "Right"
 
     def test_entity_instances_column_updated(self) -> None:
         """Entity concept row reflects updated instance list after non-breaking change."""
@@ -366,7 +376,7 @@ class TestEntityModifiedInstanceNonBreaking:
         report = _report(
             _entity_added("Door", instances=["Left", "Right"]),
             _prop_added("Door.IsOpen", parent="Door"),
-            _entity_modified("Door", instances=["Left", "Right", "Center"]),
+            _entity_modified("Door", instances_added=["Center"]),
         )
         tables = sync(empty_ledger(), report, _meta(), cfg)
         entity_row = tables["concepts"][tables["concepts"]["current_label"] == "Door"].iloc[0]
@@ -377,60 +387,58 @@ class TestEntityModifiedInstanceNonBreaking:
 
 
 class TestEntityModifiedInstanceBreaking:
-    def test_old_bindings_superseded(self) -> None:
-        """Breaking instance change supersedes all old bindings."""
+    def test_removed_instance_binding_marked_removed(self) -> None:
+        """Breaking instance removal marks the corresponding child binding as REMOVED."""
         cfg = _cfg(entity={"instances": True})
         report = _report(
             _entity_added("Door", instances=["Left", "Right"]),
             _prop_added("Door.IsOpen", parent="Door"),
-            _entity_modified("Door", instances=["Left", "Right", "Center"]),
+            _entity_modified("Door", instances_removed=["Right"]),
         )
         tables = sync(empty_ledger(), report, _meta(), cfg)
-        superseded = tables["bindings"][tables["bindings"]["status"] == ElementStatus.SUPERSEDED]
-        assert len(superseded) == 2  # Left + Right originally
+        removed = tables["bindings"][tables["bindings"]["status"] == ElementStatus.REMOVED]
+        assert len(removed) == 1
+        assert removed.iloc[0]["instance_label"] == "Right"
 
-    def test_new_bindings_for_all_instances(self) -> None:
-        """Breaking instance change mints new bindings for ALL instances (incl. existing) under new variant."""
+    def test_new_binding_for_added_instance(self) -> None:
+        """Breaking instance addition mints a new binding for the added instance."""
         cfg = _cfg(entity={"instances": True})
         report = _report(
             _entity_added("Door", instances=["Left", "Right"]),
             _prop_added("Door.IsOpen", parent="Door"),
-            _entity_modified("Door", instances=["Left", "Right", "Center"]),
+            _entity_modified("Door", instances_added=["Center"]),
         )
         tables = sync(empty_ledger(), report, _meta(), cfg)
         active_bindings = tables["bindings"][tables["bindings"]["status"] == ElementStatus.ACTIVE]
         assert len(active_bindings) == 3  # Left, Right, Center
 
-    def test_new_child_property_variant(self) -> None:
-        """Breaking instance change creates new variants for all child properties."""
+    def test_child_property_contract_never_changes(self) -> None:
+        """Breaking instance change does NOT create new contracts for child properties."""
         cfg = _cfg(entity={"instances": True})
         report = _report(
             _entity_added("Door", instances=["Left", "Right"]),
             _prop_added("Door.IsOpen", parent="Door"),
-            _entity_modified("Door", instances=["Left", "Right", "Center"]),
+            _entity_modified("Door", instances_added=["Center"]),
         )
         tables = sync(empty_ledger(), report, _meta(), cfg)
         prop_uri = tables["concepts"][tables["concepts"]["current_label"] == "Door.IsOpen"].iloc[0]["concept_uri"]
-        prop_variants = tables["contracts"][tables["contracts"]["concept_uri"] == prop_uri]
-        assert len(prop_variants) == 2
-        assert (prop_variants["status"] == ElementStatus.SUPERSEDED).sum() == 1
-        assert (prop_variants["status"] == ElementStatus.ACTIVE).sum() == 1
+        prop_contracts = tables["contracts"][tables["contracts"]["concept_uri"] == prop_uri]
+        assert len(prop_contracts) == 1
+        assert prop_contracts.iloc[0]["status"] == ElementStatus.ACTIVE
 
-    def test_new_bindings_anchored_to_new_variant(self) -> None:
-        """Active bindings after breaking instance change point to the new variant."""
+    def test_new_binding_anchored_to_existing_contract(self) -> None:
+        """Active bindings after breaking instance change still point to the original contract."""
         cfg = _cfg(entity={"instances": True})
         report = _report(
             _entity_added("Door", instances=["Left", "Right"]),
             _prop_added("Door.IsOpen", parent="Door"),
-            _entity_modified("Door", instances=["Left", "Right", "Center"]),
+            _entity_modified("Door", instances_added=["Center"]),
         )
         tables = sync(empty_ledger(), report, _meta(), cfg)
         prop_uri = tables["concepts"][tables["concepts"]["current_label"] == "Door.IsOpen"].iloc[0]["concept_uri"]
-        new_contract_uri = tables["contracts"][
-            (tables["contracts"]["concept_uri"] == prop_uri) & (tables["contracts"]["status"] == ElementStatus.ACTIVE)
-        ].iloc[0]["contract_uri"]
+        contract_uri = tables["contracts"][tables["contracts"]["concept_uri"] == prop_uri].iloc[0]["contract_uri"]
         active_bindings = tables["bindings"][tables["bindings"]["status"] == ElementStatus.ACTIVE]
-        assert set(active_bindings["contract_uri"].tolist()) == {new_contract_uri}
+        assert set(active_bindings["contract_uri"].tolist()) == {contract_uri}
 
     def test_ledger_validates_after_breaking_instance_change(self) -> None:
         """Full ledger validation passes after breaking instance change."""
@@ -438,7 +446,7 @@ class TestEntityModifiedInstanceBreaking:
         report = _report(
             _entity_added("Door", instances=["Left", "Right"]),
             _prop_added("Door.IsOpen", parent="Door"),
-            _entity_modified("Door", instances=["Left", "Right", "Center"]),
+            _entity_modified("Door", instances_added=["Center"]),
         )
         validate_ledger(sync(empty_ledger(), report, _meta(), cfg))
 
@@ -822,15 +830,15 @@ class TestPropertyModifiedRenameAndNonBreaking:
 
 class TestEntityModifiedInstanceShrinks:
     def test_shrink_mints_no_new_bindings(self) -> None:
-        """Non-breaking instance shrink does not create new bindings."""
+        """Non-breaking instance removal does not create new bindings."""
         cfg = _cfg(entity={"instances": False})
         report = _report(
             _entity_added("Door", instances=["Left", "Right", "Rear"]),
             _prop_added("Door.IsOpen", parent="Door"),
-            _entity_modified("Door", instances=["Left", "Right"]),
+            _entity_modified("Door", instances_removed=["Rear"]),
         )
         tables = sync(empty_ledger(), report, _meta(), cfg)
-        # 3 original bindings; no new ones minted because no instances were added
+        # 3 original bindings; Rear is now REMOVED; no new ones minted
         assert len(tables["bindings"]) == 3
 
     def test_shrink_updates_entity_instances_column(self) -> None:
@@ -839,46 +847,59 @@ class TestEntityModifiedInstanceShrinks:
         report = _report(
             _entity_added("Door", instances=["Left", "Right", "Rear"]),
             _prop_added("Door.IsOpen", parent="Door"),
-            _entity_modified("Door", instances=["Left", "Right"]),
+            _entity_modified("Door", instances_removed=["Rear"]),
         )
         tables = sync(empty_ledger(), report, _meta(), cfg)
         row = tables["concepts"][tables["concepts"]["current_label"] == "Door"].iloc[0]
         assert json.loads(row["instances"]) == ["Left", "Right"]
 
-    def test_shrink_child_gets_new_revision(self) -> None:
-        """Child property still gets a new revision even when the instance list shrinks."""
+    def test_shrink_removed_binding_marked_removed(self) -> None:
+        """Child binding for the removed instance is marked REMOVED after a shrink."""
         cfg = _cfg(entity={"instances": False})
         report = _report(
             _entity_added("Door", instances=["Left", "Right", "Rear"]),
             _prop_added("Door.IsOpen", parent="Door"),
-            _entity_modified("Door", instances=["Left", "Right"]),
+            _entity_modified("Door", instances_removed=["Rear"]),
         )
         tables = sync(empty_ledger(), report, _meta(), cfg)
-        prop_uri = tables["concepts"][tables["concepts"]["current_label"] == "Door.IsOpen"].iloc[0]["concept_uri"]
-        prop_revs = tables["revisions"][tables["revisions"]["concept_uri"] == prop_uri]
-        assert len(prop_revs) == 2
+        removed_bindings = tables["bindings"][tables["bindings"]["status"] == ElementStatus.REMOVED]
+        assert len(removed_bindings) == 1
+        assert removed_bindings.iloc[0]["instance_label"] == "Rear"
 
 
 # ── Multiple child properties — cascade coverage ──────────────────────────────
 
 
 class TestMultipleChildPropertiesCascade:
-    def test_breaking_instance_cascades_to_all_children(self) -> None:
-        """Breaking instance change mints new variants for every child property."""
+    def test_breaking_instance_cascades_new_binding_to_all_children(self) -> None:
+        """Breaking instance addition appends new bindings for every child property."""
         cfg = _cfg(entity={"instances": True})
         report = _report(
             _entity_added("Door", instances=["Left", "Right"]),
             _prop_added("Door.IsOpen", parent="Door"),
             _prop_added("Door.IsLocked", parent="Door"),
-            _entity_modified("Door", instances=["Left", "Right", "Center"]),
+            _entity_modified("Door", instances_added=["Center"]),
+        )
+        tables = sync(empty_ledger(), report, _meta(), cfg)
+        # 2 properties × (2 original + 1 new) = 6 total bindings; all ACTIVE
+        assert len(tables["bindings"]) == 6
+        assert (tables["bindings"]["status"] == ElementStatus.ACTIVE).all()
+
+    def test_breaking_instance_contracts_unchanged_for_all_children(self) -> None:
+        """Breaking instance change never creates new contracts for any child property."""
+        cfg = _cfg(entity={"instances": True})
+        report = _report(
+            _entity_added("Door", instances=["Left", "Right"]),
+            _prop_added("Door.IsOpen", parent="Door"),
+            _prop_added("Door.IsLocked", parent="Door"),
+            _entity_modified("Door", instances_added=["Center"]),
         )
         tables = sync(empty_ledger(), report, _meta(), cfg)
         for label in ("Door.IsOpen", "Door.IsLocked"):
             prop_uri = tables["concepts"][tables["concepts"]["current_label"] == label].iloc[0]["concept_uri"]
-            prop_variants = tables["contracts"][tables["contracts"]["concept_uri"] == prop_uri]
-            assert len(prop_variants) == 2, f"Expected 2 variants for {label}"
-            assert (prop_variants["status"] == ElementStatus.SUPERSEDED).sum() == 1
-            assert (prop_variants["status"] == ElementStatus.ACTIVE).sum() == 1
+            prop_contracts = tables["contracts"][tables["contracts"]["concept_uri"] == prop_uri]
+            assert len(prop_contracts) == 1, f"Expected 1 contract for {label}, got {len(prop_contracts)}"
+            assert prop_contracts.iloc[0]["status"] == ElementStatus.ACTIVE
 
     def test_nonbreaking_instance_cascades_new_bindings_to_all_children(self) -> None:
         """Non-breaking instance addition appends new bindings for every child property."""
@@ -887,29 +908,12 @@ class TestMultipleChildPropertiesCascade:
             _entity_added("Door", instances=["Left", "Right"]),
             _prop_added("Door.IsOpen", parent="Door"),
             _prop_added("Door.IsLocked", parent="Door"),
-            _entity_modified("Door", instances=["Left", "Right", "Center"]),
+            _entity_modified("Door", instances_added=["Center"]),
         )
         tables = sync(empty_ledger(), report, _meta(), cfg)
         # 2 properties × (2 original + 1 new) = 6 total bindings, all ACTIVE
         assert len(tables["bindings"]) == 6
         assert (tables["bindings"]["status"] == ElementStatus.ACTIVE).all()
-
-    def test_breaking_instance_new_bindings_all_point_to_new_variants(self) -> None:
-        """After breaking cascade, every active binding points to the new variant of its property."""
-        cfg = _cfg(entity={"instances": True})
-        report = _report(
-            _entity_added("Door", instances=["Left", "Right"]),
-            _prop_added("Door.IsOpen", parent="Door"),
-            _prop_added("Door.IsLocked", parent="Door"),
-            _entity_modified("Door", instances=["Left", "Right", "Center"]),
-        )
-        tables = sync(empty_ledger(), report, _meta(), cfg)
-        active_bindings = tables["bindings"][tables["bindings"]["status"] == ElementStatus.ACTIVE]
-        # Collect all new (ACTIVE) contract URIs
-        new_contract_uris = set(
-            tables["contracts"][tables["contracts"]["status"] == ElementStatus.ACTIVE]["contract_uri"].tolist()
-        )
-        assert set(active_bindings["contract_uri"].tolist()) <= new_contract_uris
 
 
 # ── Three successive syncs — serial continuity ────────────────────────────────

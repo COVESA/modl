@@ -68,13 +68,15 @@ The `changes` array is an ordered list of change events. Order does not affect c
 | `change_type` | always | `ADDED`, `REMOVED`, or `MODIFIED`. |
 | `renamed_from` | `MODIFIED` only | Previous label. Signals the ledger to record a rename rather than a separate removal and addition. Must be `null` or absent on `ADDED` and `REMOVED`. |
 | `aspects` | `ADDED` | Full initial-state snapshot of all entity-level attributes. Empty on `REMOVED`. Delta (changed keys only) on `MODIFIED`. |
-| `content` | `MODIFIED` only | Summary of which child properties changed. Each item carries `label` and `change_type`. Absent on `ADDED` and `REMOVED`. The sync engine uses this summary to record which properties were affected by an entity-level change (e.g., a breaking instance-list change that forces new contracts on all children). |
+| `content` | `MODIFIED` only | Summary of which child properties changed. Each item carries `label` and `change_type`. Absent on `ADDED` and `REMOVED`. |
 
 ### Rules
 
-- **ADDED**: `aspects` carries the full snapshot. `content` must be absent. `renamed_from` must be absent.
-- **MODIFIED**: `aspects` carries only the keys that actually changed. `content` lists affected children. `renamed_from` is set only when a rename occurred.
+- **ADDED**: `aspects` carries the full snapshot. Use `instances` to carry the full list of instance labels. `content` must be absent. `renamed_from` must be absent.
+- **MODIFIED**: `aspects` carries only the keys that actually changed. For instance-list changes use `instances_added` and `instances_removed` (the directional delta — not the full list). `renamed_from` is set only when a rename occurred. `content` lists affected children.
 - **REMOVED**: `aspects` must be empty. `content` must be absent. `renamed_from` must be absent.
+
+> **Reserved keys on entity events:** `"name"` is forbidden in `aspects` — signal renames via `renamed_from`. On `MODIFIED` events, `"instances"` is also forbidden — use `"instances_added"` / `"instances_removed"` to report the directional delta. `"instances"` is only valid on `ADDED` events (full initial snapshot).
 
 ---
 
@@ -106,13 +108,15 @@ The `changes` array is an ordered list of change events. Order does not affect c
 - **MODIFIED**: `aspects` carries only the keys that changed. `renamed_from` is set only when a rename occurred.
 - **REMOVED**: `aspects` must be empty. `renamed_from` must be absent.
 
+> **Reserved key:** `"name"` is forbidden in `aspects` on property events — signal renames via `renamed_from`.
+
 ---
 
 ## Aspect keys
 
-`aspects` is a flat `string → any` dictionary.
+`aspects` is a flat `string → any` dictionary. Keys and their semantics are **adapter-defined** — `modl` stores them verbatim and compares them on future syncs to detect changes. The breaking-change config references them by their exact key name.
 
-**Property canonical keys** — understood by `modl` for all property events, regardless of configuration:
+Widely-used conventions for typed modeling languages:
 
 | Key | Type | Meaning |
 |---|---|---|
@@ -120,15 +124,40 @@ The `changes` array is an ordered list of change events. Order does not affect c
 | `is_list` | `boolean` | `true` when the property resolves to a list of `output_type`. |
 | `is_required` | `boolean` | `true` when the value is guaranteed non-null / mandatory. |
 
-**Entity canonical keys** — understood by `modl` for all entity events, regardless of configuration:
+For entity `ADDED` events:
 
 | Key | Type | Meaning |
 |---|---|---|
-| `instances` | `string[]` | List of instance labels. Each label expands every child property into a separate runtime-addressable binding. |
+| `instances` | `string[]` | Full list of instance labels (initial snapshot). Each label expands every child property into a separate runtime-addressable binding. **Only valid on `ADDED` events.** |
 
-All other keys are **adapter-defined**. The adapter chooses their names. Examples: `unit`, `min`, `max`, `accuracy`, `description`. The breaking-change config references them by their exact key name.
+For entity `MODIFIED` events — use directional delta keys instead of `instances`:
+
+| Key | Type | Meaning |
+|---|---|---|
+| `instances_added` | `string[]` | Instance labels that appeared since the last sync. |
+| `instances_removed` | `string[]` | Instance labels that disappeared since the last sync. |
+
+All other keys are **adapter-defined**. Examples: `unit`, `min`, `max`, `accuracy`, `description`.
 
 > Adapter-defined keys in `MODIFIED` events that are not declared in the breaking-change config are treated as **non-breaking by default** and produce a warning. Pass `--strict` to `modl sync` to treat them as errors.
+
+---
+
+## Operation annotation (MODIFIED events)
+
+By default, a key present in a `MODIFIED` event's `aspects` dict is treated as having the operation `"modified"` (the value changed). Adapters that can determine the exact operation may wrap the value to be more specific:
+
+```json
+"aspects": {
+    "unit":        { "_op": "added",    "_value": "mph"      },
+    "accuracy":    { "_op": "removed"                       },
+    "description": { "_op": "modified", "_value": "new text" }
+}
+```
+
+Plain values (not wrapped) remain valid and default to op `"modified"`. This is an opt-in extension — adapters that cannot distinguish "appeared" from "changed" emit plain values; the engine evaluates them against the `modified` rule only.
+
+This matters when the breaking-change config uses **per-op granular keys** (e.g., `unit.added: true`, `unit.removed: false`). Without the `_op` annotation, the engine can only match against the generic `modified` rule.
 
 ---
 
@@ -289,7 +318,7 @@ The following diff report covers a range of typical changes:
       "label":       "Vehicle.Door",
       "kind":        "ENTITY",
       "change_type": "MODIFIED",
-      "aspects": { "instances": ["Left", "Right", "Center"] },
+      "aspects": { "instances_added": ["Center"] },
       "content": [
         { "label": "Vehicle.Door.IsLocked", "change_type": "ADDED" }
       ]
@@ -339,6 +368,7 @@ Use this checklist when building an adapter for a new modeling language:
   - [ ] Detect renames via explicit model annotations → emit `MODIFIED` with `renamed_from`
   - [ ] If the element was also modified in the same release, include both `renamed_from` and the changed keys in `aspects` within the same event
   - [ ] Detect changes to entity-level attributes → emit `MODIFIED` with changed keys in `aspects`
+  - [ ] Detect added/removed instances → emit `MODIFIED` with `instances_added` and/or `instances_removed` (the directional delta — **not** the full list)
   - [ ] Detect added/removed/modified child properties → emit `MODIFIED` entity event with `content` summary **and** individual property events
 - [ ] For each vocabulary entity (enum type, unit group, code list): set `kind` to `ENUMERATION_SET` in the entity `ADDED` event
 - [ ] For each vocabulary property (enum value, unit entry): set `kind` to `ENUM_VALUE` in the property `ADDED` event
@@ -370,21 +400,36 @@ id: "https://myproject.org/model/"   # must end with '/' or '#'
 preferred_prefix: "mp"               # optional display alias
 ```
 
-**`breaking-aspects.yaml`** — declares which aspect keys are breaking:
+**`breaking-aspects.yaml`** — declares which aspect keys are breaking. The config has four sections — one per element kind:
 
 ```yaml
 entity:
-  instances: true   # breaking — triggers a new contract
-  type: true        # breaking — triggers a new contract
-  name: false       # renames are non-breaking; suppresses --strict warnings
+  name.modified: false      # renames are non-breaking; suppresses --strict warnings
+  properties.added: false   # adding a child property is non-breaking
+  properties.removed: true  # removing a child property is breaking
+  instances.added: false    # adding an instance is non-breaking
+  instances.removed: true   # removing an instance is breaking
+  type: true                # any change to 'type' aspect is breaking
 
 property:
-  output_type: true  # breaking — triggers a new contract
-  unit: true         # breaking — triggers a new contract
-  is_required: true  # breaking — triggers a new contract
-  accuracy: true     # user-defined domain attribute; breaking
-  description: false # known, non-breaking; suppresses --strict warnings
+  name.modified: false
+  output_type: true         # breaking — triggers a new contract
+  unit: true                # breaking — triggers a new contract
+  unit.removed: false       # override: dropping a unit annotation is non-breaking
+  accuracy: true            # user-defined domain attribute; breaking
+  description: false        # known, non-breaking; suppresses --strict warnings
+
+enumeration_set:
+  name.modified: false
+  values.added: false       # adding a new enum value is non-breaking
+  values.removed: true      # removing an enum value is breaking
+
+enum_value:
+  name.modified: true       # renaming a value is breaking (consumers match on string)
+  symbol: true
 ```
+
+All four sections default to empty dicts when omitted — all changes for that kind are treated as non-breaking.
 
 Each key maps to a boolean with three distinct states:
 
@@ -394,4 +439,29 @@ Each key maps to a boolean with three distinct states:
 | `false` | Aspect is **known but non-breaking** — changes are accepted silently; no warning even with `--strict`. |
 | *(absent)* | Aspect is **unknown** — treated as non-breaking but produces a warning (error with `--strict`). |
 
-The reserved key `name` governs rename events (`renamed_from` non-null on a `MODIFIED` event). It never appears in `aspects` — it controls only rename classification. Canonical property keys (`output_type`, `is_list`, `is_required`) and the entity canonical key (`instances`) are always treated as known regardless of the config.
+### Key format
+
+Keys use a flat dotted form to express per-operation classification:
+
+```yaml
+unit: true               # shorthand — any op (added/removed/modified) is breaking
+unit.added: true         # only gaining a unit for the first time is breaking
+unit.modified: true      # changing the unit value is breaking
+unit.removed: false      # dropping a unit annotation is non-breaking
+```
+
+A plain key (no dot) is shorthand for all three operations having the same classification. The granular dotted form takes precedence over the shorthand when both are present.
+
+**Structural keys** are derived by the engine from event fields, not from the `aspects` dict. They are always recognised (never produce an unknown-key warning), but their breaking classification must still be declared explicitly:
+
+| Key | Kind | Meaning |
+|---|---|---|
+| `name.modified` | all | Rename (`renamed_from` set on the event) |
+| `properties.added` | `entity` | Child property added |
+| `properties.removed` | `entity` | Child property removed |
+| `instances.added` | `entity` | Instance label added |
+| `instances.removed` | `entity` | Instance label removed |
+| `values.added` | `enumeration_set` | `ENUM_VALUE` child added |
+| `values.removed` | `enumeration_set` | `ENUM_VALUE` child removed |
+
+`name.added` and `name.removed` are forbidden (an element always has exactly one label). The plain key `name` is also forbidden — use `name.modified`.

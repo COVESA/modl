@@ -15,6 +15,8 @@ VALID_METADATA = {
 VALID_CONFIG = {
     "entity": {"instances": True, "type": True},
     "property": {"datatype": True, "unit": True, "accuracy": True},
+    "enumeration_set": {},
+    "enum_value": {},
 }
 
 
@@ -99,35 +101,37 @@ class TestBreakingChangeConfig:
         assert cfg.entity["instances"] is True
 
     def test_defaults_empty_dicts(self) -> None:
-        """entity and property default to empty dicts when omitted."""
+        """All four sections default to empty dicts when omitted."""
         cfg = BreakingChangeConfig()
         assert cfg.entity == {}
         assert cfg.property == {}
+        assert cfg.enumeration_set == {}
+        assert cfg.enum_value == {}
 
     def test_is_breaking_entity_true(self) -> None:
         """Aspect mapped to true is breaking for that entity kind."""
         cfg = BreakingChangeConfig.model_validate(VALID_CONFIG)
-        assert cfg.is_breaking(ElementKind.ENTITY, {"instances": ["Left", "Right", "Center"]}) is True
+        assert cfg.is_breaking(ElementKind.ENTITY, {"instances": "added"}) is True
 
     def test_is_breaking_entity_false_value(self) -> None:
         """Aspect mapped to false is explicitly non-breaking (not absent — suppresses warnings)."""
         cfg = BreakingChangeConfig.model_validate({"entity": {"description": False}})
-        assert cfg.is_breaking(ElementKind.ENTITY, {"description": "updated"}) is False
+        assert cfg.is_breaking(ElementKind.ENTITY, {"description": "modified"}) is False
 
     def test_is_breaking_entity_absent(self) -> None:
         """Aspect absent from the config is non-breaking (though it may warn)."""
         cfg = BreakingChangeConfig.model_validate(VALID_CONFIG)
-        assert cfg.is_breaking(ElementKind.ENTITY, {"description": "updated"}) is False
+        assert cfg.is_breaking(ElementKind.ENTITY, {"description": "modified"}) is False
 
     def test_is_breaking_property_true(self) -> None:
         """Aspect mapped to true is breaking for that property kind."""
         cfg = BreakingChangeConfig.model_validate(VALID_CONFIG)
-        assert cfg.is_breaking(ElementKind.PROPERTY, {"datatype": "Float"}) is True
+        assert cfg.is_breaking(ElementKind.PROPERTY, {"datatype": "modified"}) is True
 
     def test_is_breaking_property_absent(self) -> None:
         """Aspect absent from the config is non-breaking (though it may warn)."""
         cfg = BreakingChangeConfig.model_validate(VALID_CONFIG)
-        assert cfg.is_breaking(ElementKind.PROPERTY, {"description": "updated"}) is False
+        assert cfg.is_breaking(ElementKind.PROPERTY, {"description": "modified"}) is False
 
     def test_is_breaking_empty_aspects(self) -> None:
         """Empty aspects dict is never a breaking change."""
@@ -137,16 +141,16 @@ class TestBreakingChangeConfig:
     def test_is_breaking_user_defined_aspect(self) -> None:
         """User-defined breaking aspects (e.g. accuracy) are recognised."""
         cfg = BreakingChangeConfig.model_validate(VALID_CONFIG)
-        assert cfg.is_breaking(ElementKind.PROPERTY, {"accuracy": "0.01"}) is True
+        assert cfg.is_breaking(ElementKind.PROPERTY, {"accuracy": "modified"}) is True
 
     def test_is_breaking_rename_name_true(self) -> None:
-        """renamed_from with name: true makes the rename breaking."""
-        cfg = BreakingChangeConfig.model_validate({"entity": {"name": True}})
+        """renamed_from with name.modified: true makes the rename breaking."""
+        cfg = BreakingChangeConfig.model_validate({"entity": {"name.modified": True}})
         assert cfg.is_breaking(ElementKind.ENTITY, {}, renamed_from="OldVehicle") is True
 
     def test_is_breaking_rename_name_false(self) -> None:
-        """renamed_from with name: false is explicitly non-breaking."""
-        cfg = BreakingChangeConfig.model_validate({"entity": {"name": False}})
+        """renamed_from with name.modified: false is explicitly non-breaking."""
+        cfg = BreakingChangeConfig.model_validate({"entity": {"name.modified": False}})
         assert cfg.is_breaking(ElementKind.ENTITY, {}, renamed_from="OldVehicle") is False
 
     def test_is_breaking_rename_name_absent(self) -> None:
@@ -157,7 +161,7 @@ class TestBreakingChangeConfig:
     def test_is_breaking_absent_aspect_key_is_false(self) -> None:
         """An aspect key absent from config is non-breaking (returns False, not None)."""
         cfg = BreakingChangeConfig.model_validate(VALID_CONFIG)
-        result = cfg.is_breaking(ElementKind.PROPERTY, {"unknown_key": "value"})
+        result = cfg.is_breaking(ElementKind.PROPERTY, {"unknown_key": "modified"})
         assert result is False
         assert type(result) is bool
 
@@ -167,18 +171,18 @@ class TestBreakingChangeConfig:
         assert cfg.is_breaking(ElementKind.PROPERTY, {}, renamed_from="OldName") is False
 
     def test_is_breaking_rename_false_not_breaking(self) -> None:
-        """Rename is non-breaking (and silent) when 'name' maps to false."""
-        cfg = BreakingChangeConfig.model_validate({"property": {"name": False}})
+        """Rename is non-breaking (and silent) when 'name.modified' maps to false."""
+        cfg = BreakingChangeConfig.model_validate({"property": {"name.modified": False}})
         assert cfg.is_breaking(ElementKind.PROPERTY, {}, renamed_from="OldName") is False
 
     def test_is_breaking_rename_true_breaking(self) -> None:
-        """Rename is breaking when 'name' maps to true."""
-        cfg = BreakingChangeConfig.model_validate({"property": {"name": True}})
+        """Rename is breaking when 'name.modified' maps to true."""
+        cfg = BreakingChangeConfig.model_validate({"property": {"name.modified": True}})
         assert cfg.is_breaking(ElementKind.PROPERTY, {}, renamed_from="OldName") is True
 
     def test_is_breaking_entity_rename_true_breaking(self) -> None:
-        """Entity rename is breaking when 'name' maps to true under entity."""
-        cfg = BreakingChangeConfig.model_validate({"entity": {"name": True}})
+        """Entity rename is breaking when 'name.modified' maps to true under entity."""
+        cfg = BreakingChangeConfig.model_validate({"entity": {"name.modified": True}})
         assert cfg.is_breaking(ElementKind.ENTITY, {}, renamed_from="OldEntity") is True
 
     def test_load_from_yaml(self, tmp_path: Path) -> None:
@@ -194,3 +198,120 @@ class TestBreakingChangeConfig:
         """Non-existent YAML path raises FileNotFoundError."""
         with pytest.raises(FileNotFoundError):
             BreakingChangeConfig.from_yaml(tmp_path / "nonexistent.yaml")
+
+    def test_from_yaml_empty_file_returns_defaults(self, tmp_path: Path) -> None:
+        """Empty/null YAML file returns default empty config without error."""
+        config_file = tmp_path / "empty.yaml"
+        config_file.write_text("")  # produces None from yaml.safe_load
+        cfg = BreakingChangeConfig.from_yaml(config_file)
+        assert cfg.entity == {}
+        assert cfg.property == {}
+        assert cfg.enumeration_set == {}
+        assert cfg.enum_value == {}
+
+    def test_enumeration_set_section_accepted(self) -> None:
+        """enumeration_set section with valid keys round-trips correctly."""
+        cfg = BreakingChangeConfig.model_validate(
+            {
+                "enumeration_set": {"values.added": False, "values.removed": True},
+            }
+        )
+        assert cfg.enumeration_set["values.removed"] is True
+        assert cfg.enumeration_set["values.added"] is False
+
+    def test_enum_value_section_accepted(self) -> None:
+        """enum_value section with valid keys round-trips correctly."""
+        cfg = BreakingChangeConfig.model_validate(
+            {
+                "enum_value": {"name.modified": True, "symbol": True},
+            }
+        )
+        assert cfg.enum_value["name.modified"] is True
+        assert cfg.enum_value["symbol"] is True
+
+    def test_is_breaking_enumeration_set(self) -> None:
+        """is_breaking dispatches to the enumeration_set section."""
+        cfg = BreakingChangeConfig.model_validate({"enumeration_set": {"values.removed": True}})
+        assert cfg.is_breaking(ElementKind.ENUMERATION_SET, {"values": "removed"}) is True
+        assert cfg.is_breaking(ElementKind.ENUMERATION_SET, {"values": "added"}) is False
+
+    def test_is_breaking_enum_value(self) -> None:
+        """is_breaking dispatches to the enum_value section."""
+        cfg = BreakingChangeConfig.model_validate({"enum_value": {"symbol": True}})
+        assert cfg.is_breaking(ElementKind.ENUM_VALUE, {"symbol": "modified"}) is True
+        assert cfg.is_breaking(ElementKind.ENUM_VALUE, {"description": "modified"}) is False
+
+    def test_invalid_op_suffix_rejected(self) -> None:
+        """Dotted key with an unrecognised op suffix is rejected."""
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="Invalid op suffix"):
+            BreakingChangeConfig.model_validate({"property": {"unit.replaced": True}})
+
+    def test_name_added_rejected(self) -> None:
+        """'name.added' is rejected — the operation is structurally impossible."""
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="name.added"):
+            BreakingChangeConfig.model_validate({"entity": {"name.added": False}})
+
+    def test_name_removed_rejected(self) -> None:
+        """'name.removed' is rejected — the operation is structurally impossible."""
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="name.removed"):
+            BreakingChangeConfig.model_validate({"property": {"name.removed": True}})
+
+    def test_plain_name_key_rejected(self) -> None:
+        """Plain 'name' key (without op suffix) is forbidden; must use 'name.modified'."""
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="name.modified"):
+            BreakingChangeConfig.model_validate({"entity": {"name": True}})
+
+    def test_granular_takes_precedence_over_shorthand(self) -> None:
+        """Granular key (unit.added) takes precedence over shorthand (unit) for the same op."""
+        cfg = BreakingChangeConfig.model_validate({"property": {"unit": True, "unit.added": False}})
+        # shorthand says True; granular for 'added' says False → granular wins
+        assert cfg.is_breaking(ElementKind.PROPERTY, {"unit": "added"}) is False
+        # 'modified' op has no granular override → shorthand applies
+        assert cfg.is_breaking(ElementKind.PROPERTY, {"unit": "modified"}) is True
+
+    def test_unknown_keys_returns_undeclared_keys(self) -> None:
+        """unknown_keys returns keys absent from both config and structural set."""
+        cfg = BreakingChangeConfig.model_validate({"property": {"unit": True}})
+        unknown = cfg.unknown_keys(ElementKind.PROPERTY, {"unit": "modified", "accuracy": "modified"})
+        assert "accuracy.modified" in unknown
+        assert "unit.modified" not in unknown
+
+    def test_unknown_keys_structural_keys_excluded(self) -> None:
+        """Structural keys (e.g. name.modified, instances.added) never appear in unknown_keys."""
+        cfg = BreakingChangeConfig.model_validate({})
+        unknown = cfg.unknown_keys(
+            ElementKind.ENTITY,
+            {"instances": "added", "properties": "removed"},
+        )
+        assert unknown == []
+
+    def test_unknown_keys_rename_not_declared(self) -> None:
+        """Rename (renamed_from set) is reported as unknown when name.modified is absent."""
+        cfg = BreakingChangeConfig.model_validate({})
+        unknown = cfg.unknown_keys(ElementKind.ENTITY, {}, renamed_from="OldLabel")
+        # name.modified is a structural key → should NOT appear in unknown
+        assert "name.modified" not in unknown
+
+    def test_instances_directional_shorthand_breaking(self) -> None:
+        """Shorthand 'instances: true' catches both instances.added and instances.removed."""
+        cfg = BreakingChangeConfig.model_validate({"entity": {"instances": True}})
+        assert cfg.is_breaking(ElementKind.ENTITY, {"instances": "added"}) is True
+        assert cfg.is_breaking(ElementKind.ENTITY, {"instances": "removed"}) is True
+
+    def test_instances_directional_granular_asymmetric(self) -> None:
+        """Granular ops allow asymmetric breaking classification for instances."""
+        cfg = BreakingChangeConfig.model_validate(
+            {
+                "entity": {"instances.added": False, "instances.removed": True},
+            }
+        )
+        assert cfg.is_breaking(ElementKind.ENTITY, {"instances": "added"}) is False
+        assert cfg.is_breaking(ElementKind.ENTITY, {"instances": "removed"}) is True

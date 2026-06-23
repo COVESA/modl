@@ -172,14 +172,14 @@ For a property whose parent entity has no instances (e.g., `Battery.StateOfCharg
 
 #### Instance expansion behavior
 
-When a new instance is added (e.g., `Center`), the behavior depends on the breaking change configuration:
+When instances change (e.g., `Center` is added), the behavior depends on the breaking change configuration for the entity:
 
-| Config | Entity revision | Entity contract | Field revision | Field contract | New binding |
-|---|---|---|---|---|---|
-| **Breaking** | yes | yes | yes | yes (new) | yes, anchored to new contract |
-| **Non-breaking** | yes | no | yes | no (unchanged) | yes, appended to existing contract |
+| Config | Entity revision | Entity contract | Child property contracts | New binding |
+|---|---|---|---|---|
+| **Breaking** | yes | yes (new) | unchanged | yes, added instance → new binding on existing contract; removed instance → binding marked REMOVED |
+| **Non-breaking** | yes | no (unchanged) | unchanged | yes, added instance → new binding on existing contract; removed instance → binding marked REMOVED |
 
-In the non-breaking case, existing binding IDs remain stable and consumers are unaffected. Binding sets under a contract are **append-only**.
+In both cases, child property **contracts are never changed** by an instance-list delta — only bindings are affected. Existing binding IDs remain stable for continuing instances.
 
 ### What each event writes to the ledger
 
@@ -189,9 +189,9 @@ The table below shows which rows `modl sync` creates or updates for each type of
 |---|---|---|---|---|
 | ENTITY `ADDED` | new row | new row | new row (initial contract) | — |
 | ENTITY `MODIFIED`, non-breaking (no instance change) | update `current_label` if renamed | new row | — (unchanged) | — |
-| ENTITY `MODIFIED`, non-breaking (instances added) | update `current_label` if renamed | new row; new child revisions | — (unchanged) | new bindings for added instances on child properties |
+| ENTITY `MODIFIED`, non-breaking (instances changed) | update `current_label` if renamed | new row | — (unchanged) | added instances → new bindings on existing child contracts; removed instances → bindings marked REMOVED |
 | ENTITY `MODIFIED`, breaking (non-instance) | update `current_label` if renamed | new row | new row | — |
-| ENTITY `MODIFIED`, breaking (instances changed) | update `current_label` if renamed | new row; new child revisions | new row; new child contracts | new bindings for all child properties (old bindings superseded) |
+| ENTITY `MODIFIED`, breaking (instances changed) | update `current_label` if renamed | new row | new row (entity only) | added instances → new bindings on existing child contracts; removed instances → bindings marked REMOVED |
 | ENTITY `REMOVED` | status → REMOVED | new row | status → REMOVED | status → REMOVED for child property bindings (via child REMOVED events) |
 | Property `ADDED` | new row | new row | new row (initial contract) | new binding per instance; one singleton if no instances |
 | Property `MODIFIED`, non-breaking | update `current_label` if renamed | new row | — (unchanged) | — |
@@ -206,7 +206,8 @@ The table below shows which rows `modl sync` creates or updates for each type of
 
 Key observations:
 - Every event produces a revision — the revision log is unconditional and unfiltered.
-- A contract is only created or superseded when a change is classified as breaking by the config. Non-breaking changes leave the active contract untouched, so any system holding a contract URI or binding URI is unaffected.
+- A contract is only created or superseded when a change is classified as breaking by the config. Non-breaking changes leave the active contract untouched.
+- An instance-list change on an entity **never** creates or supersedes child property contracts — only bindings are affected. Added instances gain new bindings on the existing child contract; removed instances have their bindings marked REMOVED.
 - A rename never changes the concept URI. It updates `current_label` and appends the old label to `previous_labels` in the concept row.
 - `ENUMERATION_SET` and `ENUM_VALUE` events follow the same revision and contract rules as `ENTITY` and `PROPERTY` respectively, but **never produce bindings** regardless of configuration.
 
@@ -341,18 +342,41 @@ All three fields are required except `preferred_prefix`. `id` is used as the nam
 
 ```yaml
 entity:
-  instances: true   # breaking — triggers a new contract
-  type: true        # breaking — triggers a new contract
-  name: false       # renames are non-breaking; suppresses --strict warnings
+  name.modified: false      # renames are non-breaking; suppresses --strict warnings
+  properties.added: false   # adding a child property is non-breaking
+  properties.removed: true  # removing a child property is breaking
+  instances.added: false    # adding an instance is non-breaking
+  instances.removed: true   # removing an instance is breaking
+  type: true                # any change to 'type' aspect is breaking
 
 property:
-  output_type: true  # breaking — triggers a new contract
-  unit: true         # breaking — triggers a new contract
-  accuracy: true     # user-defined domain-specific attribute
-  description: false # known, non-breaking; suppresses --strict warnings
+  name.modified: false
+  output_type: true         # breaking — triggers a new contract
+  unit: true                # breaking — triggers a new contract
+  accuracy: true            # user-defined domain-specific attribute
+  description: false        # known, non-breaking; suppresses --strict warnings
+
+enumeration_set:
+  name.modified: false
+  values.added: false
+  values.removed: true
+
+enum_value:
+  name.modified: true
 ```
 
-The `entity` and `property` sections default to empty — all changes are treated as non-breaking if omitted.
+All four sections (`entity`, `property`, `enumeration_set`, `enum_value`) default to empty — all changes are treated as non-breaking if omitted.
+
+Keys use a flat dotted form to express per-operation classification:
+
+```yaml
+unit: true           # shorthand — any op (added/removed/modified) is breaking
+unit.added: true     # only gaining a unit for the first time is breaking
+unit.modified: true  # changing the unit value is breaking
+unit.removed: false  # dropping a unit annotation is non-breaking
+```
+
+A plain key is shorthand for all three operations. The granular dotted form takes precedence when both are present.
 
 Each key maps to a boolean with three distinct states:
 
@@ -362,7 +386,7 @@ Each key maps to a boolean with three distinct states:
 | `false` | Aspect is **known but non-breaking** — changes are silently accepted; no warning even with `--strict`. |
 | *(absent)* | Aspect is **unknown** — treated as non-breaking but produces a warning (error with `--strict`). |
 
-The reserved key `name` governs rename events (`renamed_from` set on a diff event). It never appears in `aspects` — it is checked separately via `renamed_from`.
+The reserved key `name.modified` governs rename events (`renamed_from` set on a diff event). It never appears in `aspects` — it is checked separately via `renamed_from`. Plain `name` and directional forms `name.added`/`name.removed` are forbidden.
 
 #### Diff report format
 
@@ -425,13 +449,14 @@ Create a `breaking-aspects.yaml` that lists which aspect keys constitute a break
 
 ```yaml
 entity:
-  instances: true
+  instances.added: false
+  instances.removed: true
 property:
   output_type: true
   unit: true
 ```
 
-Use `true` for breaking aspects, `false` to explicitly mark a key as known-but-non-breaking (silences `--strict` warnings).
+Use `true` for breaking aspects, `false` to explicitly mark a key as known-but-non-breaking (silences `--strict` warnings). Keys use a flat dotted form for per-op control (`unit.added`, `unit.modified`, `unit.removed`); a plain key is shorthand for all three.
 
 ### 5. Validate with a dry run
 
