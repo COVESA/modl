@@ -152,7 +152,12 @@ def _entity_added(
     )
     _mint_contract(tables, metadata, concept_uri=concept_uri, revision_uri=revision_uri)
 
-    log.info("Entity ADDED: concept=%s revision=%s", concept_uri, revision_uri)
+    log.info(
+        "Entity ADDED:\n  label=%s\n  concept_URI=%s\n  revision_URI=%s",
+        event.label,
+        concept_uri,
+        revision_uri,
+    )
 
 
 def _entity_modified(
@@ -237,7 +242,9 @@ def _entity_modified(
         # else: non-instance breaking — entity contract updated; no child cascade
 
         log.info(
-            "Entity MODIFIED (breaking): concept=%s new_revision=%s new_contract=%s prev_contract=%s",
+            "Entity MODIFIED (breaking):\n  label=%s\n  concept_URI=%s"
+            "\n  new_revision_URI=%s\n  new_contract_URI=%s\n  prev_contract_URI=%s",
+            event.label,
             concept_uri,
             revision_uri,
             contract_uri,
@@ -257,7 +264,12 @@ def _entity_modified(
                 instances_removed=instances_removed,
             )
 
-        log.info("Entity MODIFIED (non-breaking): concept=%s new_revision=%s", concept_uri, revision_uri)
+        log.info(
+            "Entity MODIFIED (non-breaking):\n  label=%s\n  concept_URI=%s\n  new_revision_URI=%s",
+            event.label,
+            concept_uri,
+            revision_uri,
+        )
 
 
 def _entity_removed(
@@ -292,7 +304,11 @@ def _entity_removed(
     # Concept → REMOVED
     tables["concepts"].at[concept_row_idx, "status"] = ElementStatus.REMOVED
 
-    log.info("Entity REMOVED: concept=%s", concept_uri)
+    log.info(
+        "Entity REMOVED:\n  label=%s\n  concept_URI=%s",
+        event.label,
+        concept_uri,
+    )
 
 
 # ── Property handlers ─────────────────────────────────────────────────────────
@@ -326,7 +342,13 @@ def _property_added(
     if event.kind == ElementKind.PROPERTY:
         _mint_bindings_for_instances(tables, metadata, contract_uri=contract_uri, instances=parent_instances)
 
-    log.info("Property ADDED: concept=%s revision=%s contract=%s", concept_uri, revision_uri, contract_uri)
+    log.info(
+        "Property ADDED:\n  label=%s\n  concept_URI=%s\n  revision_URI=%s\n  contract_URI=%s",
+        event.label,
+        concept_uri,
+        revision_uri,
+        contract_uri,
+    )
 
 
 def _property_modified(
@@ -361,13 +383,19 @@ def _property_modified(
             _mint_bindings_for_instances(tables, metadata, contract_uri=contract_uri, instances=instances)
 
         log.info(
-            "Property MODIFIED (breaking): concept=%s new_revision=%s new_contract=%s",
+            "Property MODIFIED (breaking):\n  label=%s\n  concept_URI=%s\n  new_revision_URI=%s\n  new_contract_URI=%s",
+            event.label,
             concept_uri,
             revision_uri,
             contract_uri,
         )
     else:
-        log.info("Property MODIFIED (non-breaking): concept=%s new_revision=%s", concept_uri, revision_uri)
+        log.info(
+            "Property MODIFIED (non-breaking):\n  label=%s\n  concept_URI=%s\n  new_revision_URI=%s",
+            event.label,
+            concept_uri,
+            revision_uri,
+        )
 
 
 def _property_removed(
@@ -393,7 +421,11 @@ def _property_removed(
 
     tables["concepts"].at[concept_row_idx, "status"] = ElementStatus.REMOVED
 
-    log.info("Property REMOVED: concept=%s", concept_uri)
+    log.info(
+        "Property REMOVED:\n  label=%s\n  concept_URI=%s",
+        event.label,
+        concept_uri,
+    )
 
 
 # ── Instance cascade helpers ──────────────────────────────────────────────────
@@ -612,7 +644,10 @@ def _apply_rename(
     existing: list[str] = _parse_previous_labels(raw)
     if old_label not in existing:
         existing.insert(0, old_label)
-    tables["concepts"].at[concept_idx, "previous_labels"] = json.dumps(existing)
+    col = "previous_labels"
+    if tables["concepts"][col].dtype != object:
+        tables["concepts"][col] = tables["concepts"][col].astype(object)
+    tables["concepts"].at[concept_idx, col] = json.dumps(existing)
     tables["concepts"].at[concept_idx, "current_label"] = new_label
 
 
