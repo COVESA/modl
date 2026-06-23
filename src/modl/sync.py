@@ -227,6 +227,16 @@ def _entity_modified(
         _supersede_contract(tables, concept_uri)
         contract_uri = _mint_contract(tables, metadata, concept_uri=concept_uri, revision_uri=revision_uri)
 
+        log.info(
+            "Entity MODIFIED (breaking):\n  label=%s\n  concept_URI=%s"
+            "\n  new_revision_URI=%s\n  new_contract_URI=%s\n  prev_contract_URI=%s",
+            event.label,
+            concept_uri,
+            revision_uri,
+            contract_uri,
+            prev_contract_uri,
+        )
+
         if instances_changed:
             _set_instances(tables, concept_row_idx, new_instances or None)
             # Instance cascade: update bindings only — child property contracts are NOT changed.
@@ -240,17 +250,14 @@ def _entity_modified(
                 instances_removed=instances_removed,
             )
         # else: non-instance breaking — entity contract updated; no child cascade
-
+    else:
         log.info(
-            "Entity MODIFIED (breaking):\n  label=%s\n  concept_URI=%s"
-            "\n  new_revision_URI=%s\n  new_contract_URI=%s\n  prev_contract_URI=%s",
+            "Entity MODIFIED (non-breaking):\n  label=%s\n  concept_URI=%s\n  new_revision_URI=%s",
             event.label,
             concept_uri,
             revision_uri,
-            contract_uri,
-            prev_contract_uri,
         )
-    else:
+
         # Non-breaking
         if instances_changed:
             _set_instances(tables, concept_row_idx, new_instances or None)
@@ -263,13 +270,6 @@ def _entity_modified(
                 instances_added=instances_added,
                 instances_removed=instances_removed,
             )
-
-        log.info(
-            "Entity MODIFIED (non-breaking):\n  label=%s\n  concept_URI=%s\n  new_revision_URI=%s",
-            event.label,
-            concept_uri,
-            revision_uri,
-        )
 
 
 def _entity_removed(
@@ -475,6 +475,12 @@ def _cascade_instance_bindings(
                 & (tables["bindings"]["status"] == ElementStatus.ACTIVE)
             )
             tables["bindings"].loc[mask, "status"] = ElementStatus.REMOVED
+            child_label: str = tables["concepts"].at[child_idx, "current_label"]
+            log.info(
+                "  Bindings REMOVED (instance cascade):\n    child=%s\n    instances=%s",
+                child_label,
+                sorted(removed_set),
+            )
 
         # Append bindings for added instances to the existing active contract
         if instances_added:
@@ -482,6 +488,13 @@ def _cascade_instance_bindings(
             if active_contract:
                 for instance in instances_added:
                     _mint_binding(tables, metadata, contract_uri=active_contract, instance_label=instance)
+                child_label = tables["concepts"].at[child_idx, "current_label"]
+                log.info(
+                    "  Bindings ADDED (instance cascade):\n    child=%s\n    contract_URI=%s\n    instances=%s",
+                    child_label,
+                    active_contract,
+                    instances_added,
+                )
 
         # Keep child concept instances column in sync with the updated parent list
         old_child_instances = _parse_instances(tables["concepts"].at[child_idx, "instances"]) or []
