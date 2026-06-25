@@ -48,8 +48,8 @@ class RevisionRow(BaseModel):
     """One row of revisions.csv — assigned to every detected change regardless of whether it is breaking."""
 
     serial: int = Field(ge=0)
-    concept_uri: str
     revision_uri: str
+    concept_uri: str
     previous_revision_uri: str | None = None
     status: ElementStatus
 
@@ -64,8 +64,8 @@ class ContractRow(BaseModel):
     """
 
     serial: int = Field(ge=0)
-    concept_uri: str
     contract_uri: str
+    concept_uri: str
     revision_uri: str
     status: ElementStatus
 
@@ -74,7 +74,7 @@ class BindingRow(BaseModel):
     """One row of bindings.csv — maps a property contract to a concrete runtime path via an instance label."""
 
     serial: int = Field(ge=0)
-    contract_uri: str
     binding_uri: str
+    contract_uri: str
     instance_label: str | None = None
     status: ElementStatus

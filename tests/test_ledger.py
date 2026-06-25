@@ -42,13 +42,13 @@ class TestEmptyLedger:
         ]
         assert list(ledger["revisions"].columns) == [
             "serial",
-            "concept_uri",
             "revision_uri",
+            "concept_uri",
             "previous_revision_uri",
             "status",
         ]
-        assert list(ledger["contracts"].columns) == ["serial", "concept_uri", "contract_uri", "revision_uri", "status"]
-        assert list(ledger["bindings"].columns) == ["serial", "contract_uri", "binding_uri", "instance_label", "status"]
+        assert list(ledger["contracts"].columns) == ["serial", "contract_uri", "concept_uri", "revision_uri", "status"]
+        assert list(ledger["bindings"].columns) == ["serial", "binding_uri", "contract_uri", "instance_label", "status"]
 
     def test_empty_ledger_passes_validation(self) -> None:
         """Empty ledger satisfies all schema constraints."""

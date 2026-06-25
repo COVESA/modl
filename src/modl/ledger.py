@@ -26,9 +26,9 @@ EXPECTED_COLUMNS: dict[str, list[str]] = {
         "parent_uri",
         "instances",
     ],
-    "revisions": ["serial", "concept_uri", "revision_uri", "previous_revision_uri", "status"],
-    "contracts": ["serial", "concept_uri", "contract_uri", "revision_uri", "status"],
-    "bindings": ["serial", "contract_uri", "binding_uri", "instance_label", "status"],
+    "revisions": ["serial", "revision_uri", "concept_uri", "previous_revision_uri", "status"],
+    "contracts": ["serial", "contract_uri", "concept_uri", "revision_uri", "status"],
+    "bindings": ["serial", "binding_uri", "contract_uri", "instance_label", "status"],
 }
 
 UNIQUE_COLUMNS: dict[str, list[str]] = {

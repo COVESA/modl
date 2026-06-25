@@ -242,25 +242,25 @@ The `kind` column records the structural kind of the concept permanently. Only `
 
 ### `revisions.csv`
 
-| serial | concept_uri | revision_uri | previous_revision_uri | status |
+| serial | revision_uri | concept_uri | previous_revision_uri | status |
 |---|---|---|---|---|
-| 56 | `http://namespace.example/concepts/0` | `http://namespace.example/revisions/1k` | — | ACTIVE |
-| 57 | `http://namespace.example/concepts/8` | `http://namespace.example/revisions/1l` | — | SUPERSEDED |
-| 103 | `http://namespace.example/concepts/8` | `http://namespace.example/revisions/2v` | `http://namespace.example/revisions/1l` | ACTIVE |
+| 56 | `http://namespace.example/revisions/1k` | `http://namespace.example/concepts/0` | — | ACTIVE |
+| 57 | `http://namespace.example/revisions/1l` | `http://namespace.example/concepts/8` | — | SUPERSEDED |
+| 103 | `http://namespace.example/revisions/2v` | `http://namespace.example/concepts/8` | `http://namespace.example/revisions/1l` | ACTIVE |
 
 ### `contracts.csv`
 
-| serial | concept_uri | contract_uri | revision_uri | status |
+| serial | contract_uri | concept_uri | revision_uri | status |
 |---|---|---|---|---|
-| 40 | `http://namespace.example/concepts/8` | `http://namespace.example/contracts/14` | `http://namespace.example/revisions/2v` | ACTIVE |
+| 40 | `http://namespace.example/contracts/14` | `http://namespace.example/concepts/8` | `http://namespace.example/revisions/2v` | ACTIVE |
 
 ### `bindings.csv`
 
-| serial | contract_uri | binding_uri | instance_label | status |
+| serial | binding_uri | contract_uri | instance_label | status |
 |---|---|---|---|---|
-| 24 | `http://namespace.example/contracts/14` | `http://namespace.example/bindings/o` | Left | ACTIVE |
-| 25 | `http://namespace.example/contracts/14` | `http://namespace.example/bindings/p` | Right | ACTIVE |
-| 42 | `http://namespace.example/contracts/1e` | `http://namespace.example/bindings/16` | *(null)* | ACTIVE |
+| 24 | `http://namespace.example/bindings/o` | `http://namespace.example/contracts/14` | Left | ACTIVE |
+| 25 | `http://namespace.example/bindings/p` | `http://namespace.example/contracts/14` | Right | ACTIVE |
+| 42 | `http://namespace.example/bindings/16` | `http://namespace.example/contracts/1e` | *(null)* | ACTIVE |
 
 The third row is a **singleton binding** — `Battery.StateOfCharge` whose parent has no instances. `instance_label` is null; the binding still provides a stable, versioned identity for the runtime path.
 
@@ -283,22 +283,22 @@ erDiagram
     }
     revisions {
         int serial PK
-        string concept_uri FK
         string revision_uri UK
+        string concept_uri FK
         string previous_revision_uri FK
         string status
     }
     contracts {
         int serial PK
-        string concept_uri FK
         string contract_uri UK
+        string concept_uri FK
         string revision_uri FK
         string status
     }
     bindings {
         int serial PK
-        string contract_uri FK
         string binding_uri UK
+        string contract_uri FK
         string instance_label
         string status
     }
