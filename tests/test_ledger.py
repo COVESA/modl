@@ -12,6 +12,7 @@ from modl.ledger import (
     read_ledger,
     validate_ledger,
     validate_ledger_dir,
+    validate_model_labels,
     write_ledger,
 )
 
@@ -726,3 +727,201 @@ class TestAtomicWrite:
 
         # Original concepts.csv must be untouched
         assert (ledger_dir / "concepts.csv").read_text() == original_concepts
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+
+def _make_concepts(*rows: tuple[int, str, str, str, str]) -> pd.DataFrame:
+    """Build a concepts DataFrame from (serial, concept_uri, label, kind, status) tuples."""
+    serials, uris, labels, kinds, statuses = zip(*rows, strict=True) if rows else ([], [], [], [], [])
+    return pd.DataFrame(
+        {
+            "serial": list(serials),
+            "concept_uri": list(uris),
+            "current_label": list(labels),
+            "previous_labels": [None] * len(serials),
+            "kind": list(kinds),
+            "status": list(statuses),
+            "parent_uri": [None] * len(serials),
+            "instances": [None] * len(serials),
+        }
+    )
+
+
+def _ledger_with_concepts(*rows: tuple[int, str, str, str, str]) -> dict:
+    """Return an otherwise-empty ledger whose concepts table contains ``rows``."""
+    ledger = empty_ledger()
+    ledger["concepts"] = _make_concepts(*rows)
+    return ledger
+
+
+# ── Tests ─────────────────────────────────────────────────────────────────────
+
+
+class TestValidateModelLabels:
+    # ── happy path ────────────────────────────────────────────────────────────
+
+    def test_exact_match_passes(self, tmp_path: Path) -> None:
+        """Matching pairs for all active concepts pass without error."""
+        ledger = _ledger_with_concepts(
+            (0, "http://ns.example/concepts/0", "Vehicle", "ENTITY", "ACTIVE"),
+            (1, "http://ns.example/concepts/1", "Vehicle.Speed", "PROPERTY", "ACTIVE"),
+        )
+        write_ledger(ledger, tmp_path)
+        elements = [
+            ("Vehicle", "ENTITY"),
+            ("Vehicle.Speed", "PROPERTY"),
+        ]
+        validate_model_labels(elements, tmp_path)  # must not raise
+
+    def test_empty_input_and_empty_ledger_passes(self, tmp_path: Path) -> None:
+        """Empty input against an empty concepts table is a valid match."""
+        write_ledger(empty_ledger(), tmp_path)
+        validate_model_labels([], tmp_path)  # must not raise
+
+    def test_removed_concepts_ignored(self, tmp_path: Path) -> None:
+        """REMOVED concepts are excluded from the census; they must not appear in input."""
+        ledger = _ledger_with_concepts(
+            (0, "http://ns.example/concepts/0", "Vehicle", "ENTITY", "ACTIVE"),
+            (1, "http://ns.example/concepts/1", "Vehicle.OldFeature", "ENTITY", "REMOVED"),
+        )
+        write_ledger(ledger, tmp_path)
+        # Supplying only the ACTIVE concept is correct — REMOVED one must not be present
+        elements = [("Vehicle", "ENTITY")]
+        validate_model_labels(elements, tmp_path)  # must not raise
+
+    def test_order_independent(self, tmp_path: Path) -> None:
+        """Input order does not affect the result."""
+        ledger = _ledger_with_concepts(
+            (0, "http://ns.example/concepts/0", "A", "ENTITY", "ACTIVE"),
+            (1, "http://ns.example/concepts/1", "B", "PROPERTY", "ACTIVE"),
+            (2, "http://ns.example/concepts/2", "C", "ENUMERATION_SET", "ACTIVE"),
+        )
+        write_ledger(ledger, tmp_path)
+        elements = [
+            ("C", "ENUMERATION_SET"),
+            ("A", "ENTITY"),
+            ("B", "PROPERTY"),
+        ]
+        validate_model_labels(elements, tmp_path)  # must not raise
+
+    # ── duplicate labels in input ──────────────────────────────────────────────
+
+    def test_duplicate_label_in_input_raises(self, tmp_path: Path) -> None:
+        """Duplicate label in the input list signals a corrupt snapshot."""
+        ledger = _ledger_with_concepts(
+            (0, "http://ns.example/concepts/0", "Vehicle", "ENTITY", "ACTIVE"),
+        )
+        write_ledger(ledger, tmp_path)
+        elements = [
+            ("Vehicle", "ENTITY"),
+            ("Vehicle", "ENTITY"),  # duplicate
+        ]
+        with pytest.raises(LedgerValidationError, match="Duplicate labels"):
+            validate_model_labels(elements, tmp_path)
+
+    def test_duplicate_label_error_lists_the_duplicated_label(self, tmp_path: Path) -> None:
+        """The duplicate-label error message names the offending label."""
+        ledger = _ledger_with_concepts(
+            (0, "http://ns.example/concepts/0", "Vehicle", "ENTITY", "ACTIVE"),
+        )
+        write_ledger(ledger, tmp_path)
+        elements = [
+            ("Vehicle", "ENTITY"),
+            ("Vehicle", "ENTITY"),
+        ]
+        with pytest.raises(LedgerValidationError, match="Vehicle"):
+            validate_model_labels(elements, tmp_path)
+
+    # ── label census mismatches ────────────────────────────────────────────────
+
+    def test_label_absent_from_ledger_raises(self, tmp_path: Path) -> None:
+        """A label in the input that has no active concept in the ledger is rejected."""
+        ledger = _ledger_with_concepts(
+            (0, "http://ns.example/concepts/0", "Vehicle", "ENTITY", "ACTIVE"),
+        )
+        write_ledger(ledger, tmp_path)
+        elements = [
+            ("Vehicle", "ENTITY"),
+            ("Vehicle.Speed", "PROPERTY"),  # not in ledger
+        ]
+        with pytest.raises(LedgerValidationError, match="labels not in ledger"):
+            validate_model_labels(elements, tmp_path)
+
+    def test_active_ledger_label_absent_from_input_raises(self, tmp_path: Path) -> None:
+        """An active ledger concept missing from the input is rejected."""
+        ledger = _ledger_with_concepts(
+            (0, "http://ns.example/concepts/0", "Vehicle", "ENTITY", "ACTIVE"),
+            (1, "http://ns.example/concepts/1", "Vehicle.Speed", "PROPERTY", "ACTIVE"),
+        )
+        write_ledger(ledger, tmp_path)
+        elements = [
+            ("Vehicle", "ENTITY"),
+            # Vehicle.Speed is missing
+        ]
+        with pytest.raises(LedgerValidationError, match="active ledger labels not in input"):
+            validate_model_labels(elements, tmp_path)
+
+    def test_both_directions_reported_in_one_error(self, tmp_path: Path) -> None:
+        """Both surplus and missing labels are reported together in a single error."""
+        ledger = _ledger_with_concepts(
+            (0, "http://ns.example/concepts/0", "Vehicle", "ENTITY", "ACTIVE"),
+            (1, "http://ns.example/concepts/1", "Vehicle.Speed", "PROPERTY", "ACTIVE"),
+        )
+        write_ledger(ledger, tmp_path)
+        elements = [
+            ("Vehicle", "ENTITY"),
+            ("Vehicle.Door", "ENTITY"),  # not in ledger
+            # Vehicle.Speed is missing
+        ]
+        with pytest.raises(LedgerValidationError) as exc_info:
+            validate_model_labels(elements, tmp_path)
+        msg = str(exc_info.value)
+        assert "labels not in ledger" in msg
+        assert "active ledger labels not in input" in msg
+
+    # ── kind mismatches ────────────────────────────────────────────────────────
+
+    def test_wrong_kind_raises(self, tmp_path: Path) -> None:
+        """A matching label with a mismatched kind is rejected."""
+        ledger = _ledger_with_concepts(
+            (0, "http://ns.example/concepts/0", "Vehicle", "ENTITY", "ACTIVE"),
+        )
+        write_ledger(ledger, tmp_path)
+        elements = [
+            ("Vehicle", "PROPERTY"),  # wrong kind
+        ]
+        with pytest.raises(LedgerValidationError, match="kind"):
+            validate_model_labels(elements, tmp_path)
+
+    def test_multiple_kind_mismatches_reported_together(self, tmp_path: Path) -> None:
+        """All kind mismatches across all elements are collected into one error."""
+        ledger = _ledger_with_concepts(
+            (0, "http://ns.example/concepts/0", "Vehicle", "ENTITY", "ACTIVE"),
+            (1, "http://ns.example/concepts/1", "Vehicle.Speed", "PROPERTY", "ACTIVE"),
+        )
+        write_ledger(ledger, tmp_path)
+        elements = [
+            ("Vehicle", "PROPERTY"),  # wrong kind
+            ("Vehicle.Speed", "ENTITY"),  # wrong kind
+        ]
+        with pytest.raises(LedgerValidationError) as exc_info:
+            validate_model_labels(elements, tmp_path)
+        msg = str(exc_info.value)
+        assert "Vehicle'" in msg
+        assert "Vehicle.Speed'" in msg
+
+    def test_removed_concept_in_input_raises(self, tmp_path: Path) -> None:
+        """Supplying a REMOVED concept's label is caught as a label-not-in-ledger error."""
+        ledger = _ledger_with_concepts(
+            (0, "http://ns.example/concepts/0", "Vehicle", "ENTITY", "ACTIVE"),
+            (1, "http://ns.example/concepts/1", "Vehicle.OldFeature", "ENTITY", "REMOVED"),
+        )
+        write_ledger(ledger, tmp_path)
+        elements = [
+            ("Vehicle", "ENTITY"),
+            ("Vehicle.OldFeature", "ENTITY"),  # REMOVED
+        ]
+        with pytest.raises(LedgerValidationError, match="labels not in ledger"):
+            validate_model_labels(elements, tmp_path)

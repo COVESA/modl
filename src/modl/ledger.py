@@ -298,3 +298,58 @@ def write_ledger(tables: dict[str, pd.DataFrame], ledger_dir: Path) -> None:
             tables[name].to_csv(tmp_path / f"{name}.csv", index=False)
         for name in TABLES:
             os.replace(tmp_path / f"{name}.csv", ledger_dir / f"{name}.csv")
+
+
+def validate_model_labels(
+    elements: list[tuple[str, str]],
+    ledger_dir: Path,
+) -> None:
+    """Check that ``elements`` exactly matches the active concepts in the ledger at ``ledger_dir``.
+
+    Reads and fully validates the four CSV files from ``ledger_dir`` before checking.
+    Each element is a ``(label, kind)`` pair drawn from the composed model.
+    Raises LedgerValidationError if:
+
+    - ``elements`` contains duplicate labels (indicates a corrupt or mismatched snapshot).
+    - Any label is absent from the active ledger concepts.
+    - Any active ledger concept is absent from ``elements``.
+    - Any ``kind`` does not match the ledger record for that label.
+    """
+    tables = read_ledger(ledger_dir)
+
+    # --- 1. Reject duplicate labels in input ---
+    seen: set[str] = set()
+    dupes: list[str] = []
+    for label, _ in elements:
+        if label in seen:
+            dupes.append(label)
+        seen.add(label)
+    if dupes:
+        raise LedgerValidationError(f"Duplicate labels in input (expected unique model elements): {sorted(set(dupes))}")
+
+    # --- 2. One-to-one label census ---
+    concepts = tables["concepts"]
+    active = concepts[concepts["status"] == ElementStatus.ACTIVE]
+    active_labels: set[str] = set(active["current_label"])
+    input_labels: set[str] = {label for label, _ in elements}
+
+    only_in_input = input_labels - active_labels
+    only_in_ledger = active_labels - input_labels
+
+    if only_in_input or only_in_ledger:
+        parts: list[str] = []
+        if only_in_input:
+            parts.append(f"labels not in ledger: {sorted(only_in_input)}")
+        if only_in_ledger:
+            parts.append(f"active ledger labels not in input: {sorted(only_in_ledger)}")
+        raise LedgerValidationError("Model/ledger label mismatch — " + "; ".join(parts))
+
+    # --- 3. Kind attestation for every matched label ---
+    ledger_index = active.set_index("current_label")
+    mismatches: list[str] = []
+    for label, kind in elements:
+        row = ledger_index.loc[label]
+        if kind != row["kind"]:
+            mismatches.append(f"'{label}': kind {kind!r} != ledger {row['kind']!r}")
+    if mismatches:
+        raise LedgerValidationError("Model/ledger kind mismatch:\n" + "\n".join(f"  {m}" for m in mismatches))
