@@ -125,6 +125,26 @@ def extract_op(value: Any) -> tuple[str, Any]:
     return "modified", value
 
 
+def extract_op_full(value: Any) -> tuple[str, Any, Any]:
+    """Return ``(op, new_value, prev_value)`` from an aspect value.
+
+    Extends :func:`extract_op` by also extracting the optional ``"_previous"`` key
+    that language adapters may include on ``MODIFIED`` events to carry the old value::
+
+        "unit": {"_op": "modified", "_value": "minute", "_previous": "second"}
+
+    Plain (non-annotated) values return ``("modified", value, None)``.
+    ``"_previous"`` is ``None`` when absent — adapters that cannot determine the old
+    value simply omit it and the compatibility engine degrades gracefully.
+    """
+    if isinstance(value, dict) and "_op" in value:
+        op: str = value["_op"]
+        new_val = value.get("_value")
+        prev_val = value.get("_previous")
+        return op, new_val, prev_val
+    return "modified", value, None
+
+
 def extract_aspect_ops(aspects: dict[str, Any]) -> dict[str, str]:
     """Return a mapping of aspect key → operation derived from an aspects dict.
 
@@ -160,11 +180,14 @@ class EntityChanged(BaseModel):
     renamed_from: str | None = None
     aspects: dict[str, Any] = {}
     content: list[ContentItem] = []
+    previous_aspects: dict[str, Any] = {}
 
     @model_validator(mode="after")
     def _validate_constraints(self) -> EntityChanged:
         if self.kind not in {ElementKind.ENTITY, ElementKind.ENUMERATION_SET}:
             raise ValueError(f"EntityChanged.kind must be ENTITY or ENUMERATION_SET, got {self.kind!r}")
+        if self.change_type == ChangeType.ADDED and self.previous_aspects:
+            raise ValueError("ADDED events must not carry previous_aspects — there is no prior state")
         if self.change_type == ChangeType.REMOVED and (self.aspects or self.content):
             raise ValueError("REMOVED events must not carry aspects or content")
         if self.change_type == ChangeType.ADDED and self.content:
@@ -205,11 +228,14 @@ class PropertyChanged(BaseModel):
     change_type: ChangeType
     renamed_from: str | None = None
     aspects: dict[str, Any] = {}
+    previous_aspects: dict[str, Any] = {}
 
     @model_validator(mode="after")
     def _validate_constraints(self) -> PropertyChanged:
         if self.kind not in {ElementKind.PROPERTY, ElementKind.ENUM_VALUE}:
             raise ValueError(f"PropertyChanged.kind must be PROPERTY or ENUM_VALUE, got {self.kind!r}")
+        if self.change_type == ChangeType.ADDED and self.previous_aspects:
+            raise ValueError("ADDED events must not carry previous_aspects — there is no prior state")
         if self.change_type == ChangeType.REMOVED and self.aspects:
             raise ValueError("REMOVED events must not carry aspects")
         if self.renamed_from is not None and self.change_type != ChangeType.MODIFIED:

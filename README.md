@@ -405,6 +405,320 @@ Each change event covers either an **entity** (container, object type, branch) o
 
 See [diff_report_template.md](diff_report_template.md) for the full field reference, rename semantics, examples, and an adapter implementation checklist.
 
+### `modl adapt`
+
+#### The problem it solves
+
+Your model released at v11 has a `Vehicle.Speed` property with `unit: mph`. An older system was built against v8, where the same property had `unit: km/h`. When it now receives v11 data it gets the wrong numbers — silently.
+
+`modl adapt` answers two questions for every breaking change between two releases:
+
+1. **Is there a way to automatically bridge the gap?** — Or does it require a human decision?
+2. **If yes, what exactly needs to happen?** — A concrete, machine-readable step recipe.
+
+The output is a **YAML adaptation plan**: a self-contained list of transformation rules that a downstream exporter (a data pipeline, a MongoDB aggregation generator, a migration script) can execute at runtime to serve old consumers from new data.
+
+`modl adapt` never mutates the ledger — it is a read-only analysis tool.
+
+#### Three levels of information in every rule
+
+Each rule in the adaptation plan encodes three explicit levels of information:
+
+| Level | Name | What it captures | Source |
+|---|---|---|---|
+| 1 | **change** | The observed fact from the diff — what changed and how | Derived automatically from the diff event |
+| 2 | **adaptation** | Which transformation class addresses this change (e.g. `scale`, `lookup`) | Declared in your adaptation config |
+| 3 | **recipe** | Execution parameters for the transformation (e.g. the conversion factor) | Declared in your adaptation config; may be `incomplete` initially |
+
+This separation means you can start by declaring the *strategy* (`adaptation`) and fill in the *parameters* (`recipe`) later, without losing the structural analysis.
+
+#### How it works
+
+```
+newer ledger (v11)   ─┐
+older ledger (v8)    ─┤──► modl adapt ──► compatibility report
+diff (v8 → v11)      ─┤                   ├── JSON (per-entry detail)
+breaking-change cfg  ─┤                   ├── Markdown (human summary)
+adaptation cfg       ─┘                   └── YAML plan (transformation recipe)
+```
+
+- **Newer release** = the current platform contract (v11).
+- **Older release** = the consumer or client that needs to be bridged (v8).
+- **Diff** = the same `diff.json` you pass to `modl sync`, describing what changed from v8 to v11.
+
+`modl adapt` runs in one or both of two **directions**, controlled by `--direction`:
+
+| Direction | Who holds the data | Who consumes it | ADDED fields | REMOVED fields |
+|---|---|---|---|---|
+| `newer-to-older` (**reading**, default) | Platform / newer release (v11) | Old consumer still on v8 contract | Non-breaking — old consumer ignores extra fields | Breaking — old consumer expected them |
+| `older-to-newer` (**writing**) | Old client / older release (v8) | Platform / newer release (v11) | Breaking — platform expects them, old client can't provide | Non-breaking — platform ignores extra fields |
+
+With `--direction both` (the default) the engine runs both passes and emits two separate reports.
+
+For each changed element the engine assigns a **compatibility category** and, where possible, emits a step pipeline.
+
+#### Walkthrough: a unit change
+
+Suppose the diff reports that `Vehicle.Speed.unit` changed from `km/h` (v8) to `mph` (v11), and you have declared this in your breaking-aspects config and adaptation config:
+
+**`breaking-aspects.yaml`:**
+```yaml
+property:
+  unit.modified: true     # unit changes are breaking
+```
+
+**`adaptation.yaml`** — declares the strategy (Level 2) and the recipe (Level 3):
+```yaml
+property:
+  unit.modified:
+    steps:
+      - adaptation:
+          kind: scale
+        recipe:
+          - source: mph     # what the newer release carries
+            target: km/h   # what the older release consumers expect
+            factor: 1.60934
+```
+
+`modl adapt` reads the diff, sees `unit` changed from `km/h` to `mph`, and emits:
+
+```yaml
+rules:
+  - rule_id: rule-0001
+    concept_uri: https://myproject.org/model/concepts/1
+    lossiness: none
+    requires_policy: false
+
+    change:                        # Level 1 — observed fact from diff
+      kind: aspect_changed
+      aspects:
+        - key: unit
+          newer_value: mph         # what the newer release carries (direction-neutral)
+          older_value: km/h        # what the older release consumers expect (direction-neutral)
+
+    steps:
+      - adaptation:                # Level 2 — transformation class
+          kind: scale
+        recipe:                    # Level 3 — execution parameters
+          status: complete
+          source_value: mph        # what you have (direction-relative)
+          target_value: km/h       # what you produce (direction-relative)
+          factor: 1.60934
+```
+
+`source_value` / `target_value` inside the recipe are direction-relative: in `newer_to_older` mode source = newer value (what you have), target = older value (what you produce). `change.aspects` always records `newer_value` / `older_value` as direction-neutral facts about the model at each release.
+
+When a recipe row has not yet been declared for a specific `{source, target}` pair, the step is emitted with `recipe.status: incomplete` and the entry is classified as `adaptation_strategy` rather than `deterministic_transform`. You can run the analysis before you have all conversion factors, then fill in the recipe rows incrementally.
+
+#### What you need to configure
+
+Two separate config files feed into `modl adapt`:
+
+**1. Breaking-change config** (`--config`) — the same file you use for `modl sync --breaking-aspects`. It declares which aspect changes are consumer-breaking. No new file needed if you already have one.
+
+**2. Adaptation config** (`--adaptation-config`, optional) — declares the transformation step pipeline for each breaking aspect key. Every key declared here **must** resolve to a breaking aspect in the breaking-change config — `modl adapt` validates this at startup and exits with an error otherwise.
+
+| What | Config needed? |
+|---|---|
+| Field renames (`rename` step) | No — auto-detected from `renamed_from` in the diff event |
+| Removed fields | No — REMOVED fields are always `unsupported`; declare a `default` step only if you want to classify them differently |
+| ADDED fields | No — not breaking for old consumers in `newer_to_older` |
+| Aspect changes (unit, type, symbol, ...) | Yes — declare the step kind and recipe in `adaptation.yaml` |
+
+**In short: only declare adaptation steps for breaking aspect keys whose values need a semantic transformation.**
+
+#### Running the command
+
+```shell
+modl adapt \
+  --diff PATH \
+  --config PATH \
+  [--newer-ledger PATH] \
+  [--older-ledger PATH] \
+  [--adaptation-config PATH] \
+  [--newer-release LABEL] \
+  [--older-release LABEL] \
+  [--direction {both,newer-to-older,older-to-newer}] \
+  [--output-dir DIR]
+```
+
+| Option | Description |
+|---|---|
+| `--newer-ledger` | Directory containing the newer release ledger snapshot. Optional — used to resolve stable concept URIs; omit if unavailable. |
+| `--older-ledger` | Directory containing the older release ledger snapshot. Optional — same as above. |
+| `-d`, `--diff` | Path to the diff report JSON — the same IR used by `modl sync`, describing changes **from** the older **to** the newer release. |
+| `--config` | Path to the breaking-change rules YAML (same format as `modl sync --breaking-aspects`). |
+| `--adaptation-config` | Path to the adaptation-rules YAML. All declared keys must match breaking aspects in `--config`. |
+| `--newer-release` | Human-readable label for the newer release. Defaults to the ledger parent directory name, or `newer`. |
+| `--older-release` | Human-readable label for the older release. Defaults to the ledger parent directory name, or `older`. |
+| `--direction` | `both` (default): run both directions and produce two reports. `newer-to-older`: reading analysis only. `older-to-newer`: writing analysis only. |
+| `--output-dir` | Write the JSON report, Markdown summary, and YAML adaptation plan into this directory (created if absent). Omit to print a compact summary to stdout. |
+
+**Exit codes:** `0` — all breaking changes are bridgeable (no manual intervention required). `1` — at least one entry is `manual_mapping_required` or `unsupported`, or the adaptation config fails the consistency check.
+
+#### Adaptation config file format
+
+Each entry maps a breaking aspect key to an ordered list of steps. Keys follow the same dotted form as the breaking-change config (`unit.modified`, `datatype.modified`, or a plain `unit` as shorthand for all ops). Every key declared here must resolve to a breaking aspect in `breaking-aspects.yaml` — mismatches are caught at startup.
+
+Each step has two sub-blocks:
+
+- **`adaptation`** — declares the transformation class (`kind`). Required.
+- **`recipe`** — carries execution parameters. Optional for some kinds; see table below.
+
+**Recipe shapes by kind:**
+
+| `kind` | Recipe type | Required? | Example |
+|---|---|---|---|
+| `rename` | None | Never (auto-emitted) | — |
+| `cast`, `nest`, `extract`, `map` | Optional dict passthrough | No | `{to: int}` |
+| `scale` | List of `{source, target, ...}` rows, matched at runtime | Yes (for `complete` status) | `[{source: mph, target: km/h, factor: 1.60934}]` |
+| `lookup` | List of `{source, target}` rows, matched at runtime | Yes | `[{source: KMH, target: KILOMETRES_PER_HOUR}]` |
+| `round` | Dict `{policy: floor\|ceil\|round\|trunc}` | Yes | `{policy: floor}` |
+| `default` | Dict `{default_value: <value>}` | Yes | `{default_value: 0}` |
+
+**Full example:**
+
+```yaml
+# adaptation.yaml
+
+property:
+  unit.modified:
+    steps:
+      - adaptation:
+          kind: scale
+        recipe:
+          - source: mph
+            target: km/h
+            factor: 1.60934
+
+  datatype.modified:
+    steps:
+      - adaptation:
+          kind: cast              # coerce source type → target type
+      - adaptation:
+          kind: round             # needed when the target type is narrower (e.g. Float → Int)
+        recipe:
+          policy: floor           # "floor" | "ceil" | "round" | "trunc"
+
+enum_value:
+  symbol.modified:
+    steps:
+      - adaptation:
+          kind: lookup            # map the old symbol to its new equivalent
+        recipe:
+          - source: KMH
+            target: KILOMETRES_PER_HOUR
+```
+
+Any extra fields you add to a recipe (e.g. `operator`, `tolerance`, your own keys) are passed through verbatim — `modl` never validates or interprets them. They are hints for your downstream exporter.
+
+The step kinds are the fixed vocabulary understood by downstream exporters. `kind` is validated against this list at config load time — unknown values are rejected.
+
+| Step `kind` | Also known as | What it does | Example scenario | Example implementation → MongoDB |
+|---|---|---|---|---|
+| `rename` | `project` (relational algebra, MongoDB), `alias` (SQL `AS`), `move` | Rename or move a field path — no value change. Always auto-emitted for renames; no config needed. | `Vehicle.Velocity` renamed to `Vehicle.Speed` → read from `Vehicle.Velocity`, write to `Vehicle.Speed` | `$project: { "Vehicle.Speed": "$Vehicle.Velocity" }` |
+| `scale` | `multiply` / `divide`, `factor`, `linear_transform` | Multiply or divide the value by a factor. | Speed in `mph` → `km/h`: multiply by 1.60934 | `$project: { speed_kmh: { $multiply: ["$speed_mph", 1.60934] } }` |
+| `round` | `floor` / `ceil` / `trunc` (IEEE 754), `quantize` | Apply a rounding policy (`floor` / `ceil` / `round` / `trunc`). Declaring this step marks the rule as *possibly lossy*. | `Float` value 3.7 → `Int`: apply `floor` to get 3 | `$project: { value: { $floor: "$value" } }` |
+| `cast` | `convert` (SQL / MongoDB `$convert`), `coerce`, `type_cast` | Coerce from one type to another. | `"42"` (string) → `42` (integer); `1` (int) → `true` (boolean) | `$project: { value: { $convert: { input: "$value", to: "int" } } }` |
+| `lookup` | `remap`, `translate`, `substitute`, `map_value` | Map a discrete value to its equivalent via a lookup table. | Enum symbol `KMH` renamed to `KILOMETRES_PER_HOUR` → look up old symbol, emit new one | `$project: { unit: { $switch: { branches: [{ case: { $eq: ["$unit", "KILOMETRES_PER_HOUR"] }, then: "KMH" }], default: "$unit" } } }` |
+| `default` | `coalesce` (SQL `COALESCE`), `fallback`, `ifnull` | Inject a constant when the source field is absent. | Field `accuracy` removed in source → inject last-known value `0.01` for target consumers | `$project: { accuracy: { $ifNull: ["$accuracy", 0.01] } }` |
+| `nest` | `wrap`, `embed`, `encapsulate` | Nest value in a sub-object. | Scalar `"red"` → `{ "color": "red" }` | `$project: { color: { color: "$color" } }` |
+| `extract` | `unwrap`, `pluck`, `pick` | Extract value from a nested object or array element. | `{ "speed": { "value": 42 } }` → `42` | `$project: { speed: "$speed.value" }` |
+| `map` | `foreach`, `apply`, `transform_each` | Apply a sub-pipeline to each element of an array. | Convert every element of `readings[]` from `mph` to `km/h` | `$project: { readings: { $map: { input: "$readings", as: "r", in: { $multiply: ["$$r", 1.60934] } } } }` |
+
+#### Compatibility categories
+
+Each changed element is assigned a category that tells you how actionable the change is:
+
+| Category | Meaning | Adapter candidate? |
+|---|---|---|
+| `projection_compatible` | Field path changed but value is identical — a `rename` step suffices (e.g. field rename). | Yes |
+| `deterministic_transform` | Value changed, a lossless rule exists, and the recipe is fully declared (all parameters provided). | Yes |
+| `adaptation_strategy` | Step kind declared but recipe parameters are incomplete — the strategy is known, parameters still needed. | Yes |
+| `policy_required` | A transform is declared but may lose precision (a `round` step is present) — a human must confirm the rounding policy. | Yes |
+| `manual_mapping_required` | The aspect changed but no step pipeline was declared for it — a human must supply the mapping. | No |
+| `unsupported` | Field was removed in the newer release — no automatic bridging possible without a `default` injection. | No |
+| `non_breaking` | Change does not affect target consumers in this direction (e.g. a new field added in source). | No |
+
+Only entries classified as `projection_compatible`, `deterministic_transform`, `adaptation_strategy`, or `policy_required` appear in the YAML adaptation plan.
+
+#### Output formats
+
+**Without `--output-dir`** — a compact plain-text summary is printed to stdout:
+
+```
+Compatibility: v11 → v8  (3 changes)
+
+  breaking — no adapter (1):
+    - Vehicle.power  [field_removed]
+
+  adapter candidates (2):
+    - Vehicle.speed  [aspect_changed]  deterministic_transform
+    - Vehicle.odometer  [field_renamed]  projection_compatible
+
+  non-breaking: 0
+```
+
+**With `--output-dir DIR`** — three files are written into `DIR` (created if absent), named after the report ID (`compat-{newer}-to-{older}`):
+
+**`compat-v11-to-v8.json`** — machine-readable per-entry detail plus an aggregated summary:
+
+```json
+{
+  "report_id": "compat-v11-to-v8",
+  "newer_release": "v11",
+  "older_release": "v8",
+  "direction": "newer_to_older",
+  "summary": {
+    "total": 3,
+    "projection_compatible": 1,
+    "deterministic_transform": 1,
+    "adaptation_strategy": 0,
+    "policy_required": 0,
+    "manual_mapping_required": 0,
+    "unsupported": 0,
+    "non_breaking": 1,
+    "adapter_candidates": 2
+  },
+  "entries": [...]
+}
+```
+
+**`compat-v11-to-v8.md`** — human-readable report listing adapter recipes for all actionable entries and a separate list of non-adaptable breaking changes that need manual attention.
+
+**`compat-v11-to-v8.yaml`** — the machine-readable transformation recipe consumed by downstream exporters. Only adapter-candidate entries appear here. Each rule has a `change` section (Level 1) and a `steps` list where each step carries `adaptation` (Level 2) and `recipe` (Level 3) sub-blocks:
+
+```yaml
+adapter_id: compat-v11-to-v8
+newer_release: v11
+older_release: v8
+direction: newer_to_older
+rules:
+  - rule_id: rule-0001
+    concept_uri: https://myproject.org/model/concepts/1
+    lossiness: none
+    requires_policy: false
+
+    change:
+      kind: aspect_changed
+      aspects:
+        - key: unit
+          newer_value: mph
+          older_value: km/h
+
+    steps:
+      - adaptation:
+          kind: scale
+        recipe:
+          status: complete
+          source_value: mph
+          target_value: km/h
+          factor: 1.60934
+```
+
+`recipe.status` is `complete` when all required parameters are available (the recipe row matched the actual diff values) and `incomplete` when the strategy is known but recipe parameters are still missing. The `adaptation_strategy` category is used for `incomplete` entries — they still appear in the plan so you can fill in the parameters incrementally.
+
+
 ## Adoption Guide
 
 ### 1. Define your model and take a snapshot

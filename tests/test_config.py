@@ -315,3 +315,298 @@ class TestBreakingChangeConfig:
         )
         assert cfg.is_breaking(ElementKind.ENTITY, {"instances": "added"}) is False
         assert cfg.is_breaking(ElementKind.ENTITY, {"instances": "removed"}) is True
+
+
+# ── AdaptationConfig ──────────────────────────────────────────────────────────
+
+
+class TestAdaptationConfig:
+    def test_empty_config_valid(self) -> None:
+        """Empty adaptation config is valid."""
+        from modl.config import AdaptationConfig
+
+        cfg = AdaptationConfig.model_validate({})
+        assert cfg.property == {}
+        assert cfg.enum_value == {}
+
+    def test_valid_step_pipeline(self) -> None:
+        """Step pipeline with known kind is accepted and stored."""
+        from modl.config import AdaptationConfig
+
+        cfg = AdaptationConfig.model_validate(
+            {
+                "property": {
+                    "unit.modified": {
+                        "steps": [
+                            {
+                                "adaptation": {"kind": "scale"},
+                                "recipe": [{"source": "km/h", "target": "mph", "factor": 1.60934}],
+                            }
+                        ]
+                    },
+                    "datatype.modified": {
+                        "steps": [
+                            {"adaptation": {"kind": "cast"}},
+                            {"adaptation": {"kind": "round"}, "recipe": {"policy": "floor"}},
+                        ]
+                    },
+                },
+                "enum_value": {
+                    "symbol.modified": {
+                        "steps": [
+                            {
+                                "adaptation": {"kind": "lookup"},
+                                "recipe": [{"source": "KMH", "target": "KILOMETRES_PER_HOUR"}],
+                            }
+                        ]
+                    },
+                },
+            }
+        )
+        unit_steps = cfg.property["unit.modified"].steps
+        assert len(unit_steps) == 1
+        assert unit_steps[0].adaptation.kind == "scale"
+        assert unit_steps[0].recipe == [{"source": "km/h", "target": "mph", "factor": 1.60934}]
+
+        dt_steps = cfg.property["datatype.modified"].steps
+        assert len(dt_steps) == 2
+        assert dt_steps[0].adaptation.kind == "cast"
+        assert dt_steps[1].adaptation.kind == "round"
+        assert dt_steps[1].recipe == {"policy": "floor"}
+
+        sym_steps = cfg.enum_value["symbol.modified"].steps
+        assert sym_steps[0].adaptation.kind == "lookup"
+
+    def test_steps_for_plain_key(self) -> None:
+        """steps_for returns the declared pipeline for a plain aspect key."""
+        from modl.config import AdaptationConfig
+
+        cfg = AdaptationConfig.model_validate({"property": {"unit": {"steps": [{"adaptation": {"kind": "scale"}}]}}})
+        specs = cfg.steps_for(ElementKind.PROPERTY, "unit")
+        assert len(specs) == 1
+        assert specs[0].adaptation.kind == "scale"
+
+    def test_steps_for_dotted_key(self) -> None:
+        """steps_for returns the declared pipeline for a dotted aspect key."""
+        from modl.config import AdaptationConfig
+
+        cfg = AdaptationConfig.model_validate(
+            {"property": {"unit.modified": {"steps": [{"adaptation": {"kind": "scale"}}]}}}
+        )
+        specs = cfg.steps_for(ElementKind.PROPERTY, "unit.modified")
+        assert len(specs) == 1
+        assert specs[0].adaptation.kind == "scale"
+
+    def test_steps_for_undeclared_returns_empty(self) -> None:
+        """steps_for returns [] for an undeclared aspect key (no built-ins)."""
+        from modl.config import AdaptationConfig
+
+        cfg = AdaptationConfig.model_validate({})
+        assert cfg.steps_for(ElementKind.PROPERTY, "unit") == []
+        assert cfg.steps_for(ElementKind.PROPERTY, "unit.modified") == []
+        assert cfg.steps_for(ElementKind.ENUM_VALUE, "symbol") == []
+        assert cfg.steps_for(ElementKind.PROPERTY, "description") == []
+
+    def test_from_yaml(self, tmp_path: Path) -> None:
+        """AdaptationConfig.from_yaml loads and validates a YAML file."""
+        from modl.config import AdaptationConfig
+
+        p = tmp_path / "adaptation.yaml"
+        p.write_text(
+            "property:\n"
+            "  unit.modified:\n"
+            "    steps:\n"
+            "      - adaptation:\n"
+            "          kind: scale\n"
+            "        recipe:\n"
+            "          - source: km/h\n"
+            "            target: mph\n"
+            "            factor: 1.60934\n"
+        )
+        cfg = AdaptationConfig.from_yaml(p)
+        specs = cfg.steps_for(ElementKind.PROPERTY, "unit.modified")
+        assert specs[0].adaptation.kind == "scale"
+        assert isinstance(specs[0].recipe, list)
+        assert specs[0].recipe[0]["factor"] == 1.60934
+
+    def test_from_yaml_empty_file(self, tmp_path: Path) -> None:
+        """Empty YAML file produces a valid empty AdaptationConfig."""
+        from modl.config import AdaptationConfig
+
+        p = tmp_path / "empty.yaml"
+        p.write_text("")
+        cfg = AdaptationConfig.from_yaml(p)
+        assert cfg.property == {}
+
+    def test_extra_keys_rejected(self) -> None:
+        """Unknown top-level keys in the adaptation config are rejected."""
+        from pydantic import ValidationError
+
+        from modl.config import AdaptationConfig
+
+        with pytest.raises(ValidationError):
+            AdaptationConfig.model_validate({"unknown_section": {"unit": "unit_conversion"}})
+
+    def test_invalid_step_kind_rejected(self) -> None:
+        """Unrecognised step kind string is rejected at config load time."""
+        from pydantic import ValidationError
+
+        from modl.config import AdaptationConfig
+
+        with pytest.raises(ValidationError):
+            AdaptationConfig.model_validate(
+                {"property": {"unit.modified": {"steps": [{"adaptation": {"kind": "foobar"}}]}}}
+            )
+
+    def test_round_recipe_must_be_dict(self) -> None:
+        """'round' recipe must be a dict, not a list."""
+        from pydantic import ValidationError
+
+        from modl.config import AdaptationConfig
+
+        with pytest.raises(ValidationError, match="dict"):
+            AdaptationConfig.model_validate(
+                {
+                    "property": {
+                        "unit.modified": {"steps": [{"adaptation": {"kind": "round"}, "recipe": [{"policy": "floor"}]}]}
+                    }
+                }
+            )
+
+    def test_round_recipe_invalid_policy(self) -> None:
+        """'round' recipe with an invalid policy value is rejected."""
+        from pydantic import ValidationError
+
+        from modl.config import AdaptationConfig
+
+        with pytest.raises(ValidationError, match="floor"):
+            AdaptationConfig.model_validate(
+                {
+                    "property": {
+                        "unit.modified": {"steps": [{"adaptation": {"kind": "round"}, "recipe": {"policy": "halfway"}}]}
+                    }
+                }
+            )
+
+    def test_scale_recipe_must_be_list(self) -> None:
+        """'scale' recipe must be a list, not a dict."""
+        from pydantic import ValidationError
+
+        from modl.config import AdaptationConfig
+
+        with pytest.raises(ValidationError, match="list"):
+            AdaptationConfig.model_validate(
+                {
+                    "property": {
+                        "unit.modified": {"steps": [{"adaptation": {"kind": "scale"}, "recipe": {"factor": 1.0}}]}
+                    }
+                }
+            )
+
+    def test_lookup_recipe_must_be_list(self) -> None:
+        """'lookup' recipe must be a list, not a dict."""
+        from pydantic import ValidationError
+
+        from modl.config import AdaptationConfig
+
+        with pytest.raises(ValidationError, match="list"):
+            AdaptationConfig.model_validate(
+                {
+                    "enum_value": {
+                        "symbol.modified": {"steps": [{"adaptation": {"kind": "lookup"}, "recipe": {"key": "val"}}]}
+                    }
+                }
+            )
+
+    def test_default_recipe_must_be_dict(self) -> None:
+        """'default' recipe must be a dict, not a list."""
+        from pydantic import ValidationError
+
+        from modl.config import AdaptationConfig
+
+        with pytest.raises(ValidationError, match="dict"):
+            AdaptationConfig.model_validate(
+                {
+                    "property": {
+                        "field.removed": {
+                            "steps": [{"adaptation": {"kind": "default"}, "recipe": [{"default_value": 0}]}]
+                        }
+                    }
+                }
+            )
+
+    def test_cast_recipe_none_accepted(self) -> None:
+        """'cast' step with no recipe is valid (recipe not required)."""
+        from modl.config import AdaptationConfig
+
+        cfg = AdaptationConfig.model_validate(
+            {"property": {"datatype.modified": {"steps": [{"adaptation": {"kind": "cast"}}]}}}
+        )
+        spec = cfg.property["datatype.modified"].steps[0]
+        assert spec.adaptation.kind == "cast"
+        assert spec.recipe is None
+
+    def test_validate_against_breaking_config_passes(self) -> None:
+        """Adaptation key matching a breaking aspect produces no errors."""
+        from modl.config import AdaptationConfig
+
+        breaking = BreakingChangeConfig.model_validate({"property": {"unit.modified": True}})
+        adapt = AdaptationConfig.model_validate(
+            {"property": {"unit.modified": {"steps": [{"adaptation": {"kind": "scale"}}]}}}
+        )
+        errors = adapt.validate_against_breaking_config(breaking)
+        assert errors == []
+
+    def test_validate_against_breaking_config_plain_key_all_breaking(self) -> None:
+        """Plain adaptation key 'unit' passes when shorthand 'unit: true' covers all ops."""
+        from modl.config import AdaptationConfig
+
+        breaking = BreakingChangeConfig.model_validate({"property": {"unit": True}})
+        adapt = AdaptationConfig.model_validate({"property": {"unit": {"steps": [{"adaptation": {"kind": "scale"}}]}}})
+        errors = adapt.validate_against_breaking_config(breaking)
+        assert errors == []
+
+    def test_validate_against_breaking_config_non_breaking_key_fails(self) -> None:
+        """Adaptation key for a non-breaking aspect is an error."""
+        from modl.config import AdaptationConfig
+
+        breaking = BreakingChangeConfig.model_validate({"property": {"unit.modified": False}})
+        adapt = AdaptationConfig.model_validate(
+            {"property": {"unit.modified": {"steps": [{"adaptation": {"kind": "scale"}}]}}}
+        )
+        errors = adapt.validate_against_breaking_config(breaking)
+        assert len(errors) == 1
+        assert "non-breaking" in errors[0]
+        assert "unit.modified" in errors[0]
+
+    def test_validate_against_breaking_config_undeclared_key_fails(self) -> None:
+        """Adaptation key for an undeclared (absent) aspect is an error."""
+        from modl.config import AdaptationConfig
+
+        breaking = BreakingChangeConfig.model_validate({})
+        adapt = AdaptationConfig.model_validate(
+            {"property": {"unit.modified": {"steps": [{"adaptation": {"kind": "scale"}}]}}}
+        )
+        errors = adapt.validate_against_breaking_config(breaking)
+        assert len(errors) == 1
+        assert "undeclared" in errors[0]
+
+    def test_validate_against_breaking_config_plain_key_partial_breaking_fails(self) -> None:
+        """Plain adaptation key 'unit' fails when only 'unit.modified: true', leaving added/removed undeclared."""
+        from modl.config import AdaptationConfig
+
+        breaking = BreakingChangeConfig.model_validate({"property": {"unit.modified": True}})
+        adapt = AdaptationConfig.model_validate({"property": {"unit": {"steps": [{"adaptation": {"kind": "scale"}}]}}})
+        errors = adapt.validate_against_breaking_config(breaking)
+        # 'unit' covers added, modified, removed — added and removed are undeclared
+        assert len(errors) == 2
+
+    def test_no_builtin_for_any_key(self) -> None:
+        """Empty adapt config returns [] for all keys — no built-in defaults."""
+        from modl.config import AdaptationConfig
+
+        cfg = AdaptationConfig.model_validate({})
+        assert cfg.steps_for(ElementKind.PROPERTY, "unit") == []
+        assert cfg.steps_for(ElementKind.PROPERTY, "datatype") == []
+        assert cfg.steps_for(ElementKind.PROPERTY, "output_type") == []
+        assert cfg.steps_for(ElementKind.ENUM_VALUE, "symbol") == []

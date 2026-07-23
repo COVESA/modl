@@ -1016,3 +1016,111 @@ class TestValidateStructureContent:
         )
         # No Vehicle MODIFIED event in this report — no expectation to check
         assert report.validate_structure() == []
+
+
+# ── previous_aspects field ────────────────────────────────────────────────────
+
+
+class TestPreviousAspects:
+    def test_previous_aspects_allowed_on_removed_property(self) -> None:
+        """previous_aspects is valid on a REMOVED PropertyChanged event."""
+        event = PropertyChanged(
+            label="Vehicle.Speed",
+            parent_label="Vehicle",
+            change_type=ChangeType.REMOVED,
+            previous_aspects={"output_type": "Float", "unit": "km/h"},
+        )
+        assert event.previous_aspects == {"output_type": "Float", "unit": "km/h"}
+
+    def test_previous_aspects_allowed_on_removed_entity(self) -> None:
+        """previous_aspects is valid on a REMOVED EntityChanged event."""
+        event = EntityChanged(
+            label="Vehicle",
+            change_type=ChangeType.REMOVED,
+            previous_aspects={"type": "branch"},
+        )
+        assert event.previous_aspects == {"type": "branch"}
+
+    def test_previous_aspects_forbidden_on_added_property(self) -> None:
+        """previous_aspects on an ADDED PropertyChanged event raises ValidationError."""
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="previous_aspects"):
+            PropertyChanged(
+                label="Vehicle.Speed",
+                parent_label="Vehicle",
+                change_type=ChangeType.ADDED,
+                previous_aspects={"output_type": "Float"},
+            )
+
+    def test_previous_aspects_forbidden_on_added_entity(self) -> None:
+        """previous_aspects on an ADDED EntityChanged event raises ValidationError."""
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="previous_aspects"):
+            EntityChanged(
+                label="Vehicle",
+                change_type=ChangeType.ADDED,
+                previous_aspects={"type": "branch"},
+            )
+
+    def test_previous_aspects_allowed_on_modified_property(self) -> None:
+        """previous_aspects is valid on a MODIFIED PropertyChanged event."""
+        event = PropertyChanged(
+            label="Vehicle.Speed",
+            parent_label="Vehicle",
+            change_type=ChangeType.MODIFIED,
+            aspects={"unit": {"_op": "modified", "_value": "mph", "_previous": "km/h"}},
+            previous_aspects={},
+        )
+        assert event.previous_aspects == {}
+
+    def test_previous_aspects_default_empty(self) -> None:
+        """previous_aspects defaults to an empty dict when not supplied."""
+        event = PropertyChanged(
+            label="Vehicle.Speed",
+            parent_label="Vehicle",
+            change_type=ChangeType.REMOVED,
+        )
+        assert event.previous_aspects == {}
+
+
+# ── extract_op_full ───────────────────────────────────────────────────────────
+
+
+class TestExtractOpFull:
+    def test_plain_value_returns_modified_with_none_prev(self) -> None:
+        """Plain (non-annotated) value returns (modified, value, None)."""
+        from modl.ir import extract_op_full
+
+        op, new, prev = extract_op_full("km/h")
+        assert op == "modified"
+        assert new == "km/h"
+        assert prev is None
+
+    def test_annotated_with_previous(self) -> None:
+        """Annotated value with _previous returns all three components."""
+        from modl.ir import extract_op_full
+
+        op, new, prev = extract_op_full({"_op": "modified", "_value": "minute", "_previous": "second"})
+        assert op == "modified"
+        assert new == "minute"
+        assert prev == "second"
+
+    def test_annotated_without_previous(self) -> None:
+        """Annotated value without _previous returns None for prev."""
+        from modl.ir import extract_op_full
+
+        op, new, prev = extract_op_full({"_op": "modified", "_value": "mph"})
+        assert op == "modified"
+        assert new == "mph"
+        assert prev is None
+
+    def test_removed_op_no_value(self) -> None:
+        """Removed annotation returns (removed, None, prev)."""
+        from modl.ir import extract_op_full
+
+        op, new, prev = extract_op_full({"_op": "removed", "_previous": "km/h"})
+        assert op == "removed"
+        assert new is None
+        assert prev == "km/h"

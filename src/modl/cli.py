@@ -6,7 +6,16 @@ from pydantic import ValidationError as PydanticValidationError
 from rich.traceback import install
 
 from . import __version__, log
-from .config import BreakingChangeConfig, ModelMetadata
+from .adapt import (
+    AdaptDirection,
+    CompatibilityCategory,
+    analyze,
+    report_to_adaptation_plan,
+    report_to_compact_summary,
+    report_to_json,
+    report_to_markdown,
+)
+from .config import AdaptationConfig, BreakingChangeConfig, ModelMetadata
 from .ir import DiffReport, validate_report_aspects
 from .ledger import LedgerValidationError, empty_ledger, read_ledger, validate_ledger_dir, write_ledger
 from .sync import SyncError
@@ -180,3 +189,194 @@ def sync(
 
     write_ledger(tables, ledger_dir)
     log.info("Ledger written to %s", ledger_dir)
+
+
+@cli.command()
+@click.option(
+    "--newer-ledger",
+    default=None,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Directory containing the newer release ledger snapshot (optional; used to resolve concept URIs)",
+)
+@click.option(
+    "--older-ledger",
+    default=None,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Directory containing the older release ledger snapshot (optional; used to resolve concept URIs)",
+)
+@click.option(
+    "-d",
+    "--diff",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Path to the diff report JSON file (changes from the older release to the newer release)",
+)
+@click.option(
+    "--config",
+    "breaking_config",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Path to the breaking-change rules YAML file",
+)
+@click.option(
+    "--adaptation-config",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Path to the adaptation-rules YAML file. Omit to use built-in defaults only.",
+)
+@click.option(
+    "--newer-release",
+    default=None,
+    help="Newer release label (default: newer ledger parent directory name, or 'newer')",
+)
+@click.option(
+    "--older-release",
+    default=None,
+    help="Older release label (default: older ledger parent directory name, or 'older')",
+)
+@click.option(
+    "--direction",
+    type=click.Choice(["both", "newer-to-older", "older-to-newer"]),
+    default="both",
+    show_default=True,
+    help=(
+        "Direction(s) to analyse. "
+        "'newer-to-older': reading — transform platform data for older consumers. "
+        "'older-to-newer': writing — transform older client data for the platform. "
+        "'both': run both directions."
+    ),
+)
+@click.option(
+    "--output-dir",
+    default=None,
+    type=click.Path(file_okay=False, writable=True, path_type=Path),
+    help="Write JSON report, Markdown summary, and YAML adaptation plan to this directory. Omit for compact stdout.",
+)
+def adapt(
+    newer_ledger: Path | None,
+    older_ledger: Path | None,
+    diff: Path,
+    breaking_config: Path,
+    adaptation_config: Path | None,
+    newer_release: str | None,
+    older_release: str | None,
+    direction: str,
+    output_dir: Path | None,
+) -> None:
+    """Analyse contract compatibility between two release ledger snapshots."""
+    # Resolve release labels
+    if newer_release:
+        newer_label = newer_release
+    elif newer_ledger is not None:
+        newer_label = newer_ledger.parent.name
+    else:
+        newer_label = "newer"
+
+    if older_release:
+        older_label = older_release
+    elif older_ledger is not None:
+        older_label = older_ledger.parent.name
+    else:
+        older_label = "older"
+
+    # Load breaking-change config
+    try:
+        cfg = BreakingChangeConfig.from_yaml(breaking_config)
+    except PydanticValidationError as exc:
+        for error in exc.errors():
+            loc = " → ".join(str(p) for p in error["loc"])
+            prefix = f"[{loc}] " if loc else ""
+            log.error("Invalid breaking-change config — %s%s", prefix, error["msg"])
+        raise SystemExit(1) from exc
+
+    # Load adaptation config (optional — built-in defaults apply when absent)
+    if adaptation_config is not None:
+        try:
+            adapt_cfg = AdaptationConfig.from_yaml(adaptation_config)
+        except PydanticValidationError as exc:
+            for error in exc.errors():
+                loc = " → ".join(str(p) for p in error["loc"])
+                prefix = f"[{loc}] " if loc else ""
+                log.error("Invalid adaptation config — %s%s", prefix, error["msg"])
+            raise SystemExit(1) from exc
+    else:
+        adapt_cfg = AdaptationConfig.model_validate({})
+
+    # Validate adaptation config consistency against breaking-change config
+    if adaptation_config is not None:
+        consistency_errors = adapt_cfg.validate_against_breaking_config(cfg)
+        if consistency_errors:
+            for err in consistency_errors:
+                log.error("Adaptation config consistency error — %s", err)
+            raise SystemExit(1) from None
+
+    # Load ledger snapshots (optional — concept URIs will be None when absent)
+    newer_tables: dict | None = None
+    if newer_ledger is not None:
+        try:
+            newer_tables = read_ledger(newer_ledger)
+        except LedgerValidationError as exc:
+            log.error("Newer-release ledger error — %s", exc)
+            raise SystemExit(1) from None
+
+    older_tables: dict | None = None
+    if older_ledger is not None:
+        try:
+            older_tables = read_ledger(older_ledger)
+        except LedgerValidationError as exc:
+            log.error("Older-release ledger error — %s", exc)
+            raise SystemExit(1) from None
+
+    # Parse diff report
+    try:
+        report = DiffReport.from_json(diff.read_text())
+    except PydanticValidationError as exc:
+        for error in exc.errors():
+            log.error("Invalid diff report — %s: %s", " → ".join(str(loc) for loc in error["loc"]), error["msg"])
+        raise SystemExit(1) from exc
+
+    # Determine which directions to run
+    dirs_to_run: list[AdaptDirection] = []
+    if direction == "both":
+        dirs_to_run = [AdaptDirection.NEWER_TO_OLDER, AdaptDirection.OLDER_TO_NEWER]
+    elif direction == "newer-to-older":
+        dirs_to_run = [AdaptDirection.NEWER_TO_OLDER]
+    else:
+        dirs_to_run = [AdaptDirection.OLDER_TO_NEWER]
+
+    # Run compatibility analysis for each direction
+    compat_reports = []
+    for d in dirs_to_run:
+        compat_report = analyze(
+            report,
+            cfg,
+            adapt_cfg,
+            newer_label,
+            older_label,
+            direction=d,
+            newer_tables=newer_tables,
+            older_tables=older_tables,
+        )
+        compat_reports.append(compat_report)
+
+        if output_dir:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            base = compat_report.report_id
+            (output_dir / f"{base}.json").write_text(report_to_json(compat_report))
+            (output_dir / f"{base}.md").write_text(report_to_markdown(compat_report))
+            (output_dir / f"{base}.yaml").write_text(report_to_adaptation_plan(compat_report))
+        else:
+            click.echo(report_to_compact_summary(compat_report))
+
+    if output_dir:
+        log.info("Compatibility report(s) written to %s/", output_dir)
+
+    # Exit with code 1 if any breaking change requires manual intervention
+    needs_manual = any(
+        e.category in (CompatibilityCategory.MANUAL_MAPPING_REQUIRED, CompatibilityCategory.UNSUPPORTED)
+        for r in compat_reports
+        for e in r.entries
+        if e.consumer_impact == "breaking"
+    )
+    if needs_manual:
+        raise SystemExit(1)
