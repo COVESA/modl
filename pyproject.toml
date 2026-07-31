@@ -1,9 +1,9 @@
 
 
 [project]
-name = "modl"
+name = "ddmodl"
 dynamic = ["version"]
-description = "A tool for managing the identity registry of a data model"
+description = "A tool for managing the identity ledger of a domain data model"
 authors = [{name = "jdacoello", email="8550265+jdacoello@users.noreply.github.com"}]
 license-files = ["LICENSE"]
 readme = "README.md"
@@ -34,6 +34,9 @@ build-backend = "hatchling.build"
 [tool.hatch.version]
 path = "src/modl/__init__.py"
 
+[tool.hatch.build.targets.wheel]
+packages = ["src/modl"]
+
 [dependency-groups]
 dev = [
     "ruff",
@@ -42,7 +45,8 @@ dev = [
     "pytest",
     "nox",
     "bump-my-version",
-    "ty"
+    "ty",
+    "twine>=7.0.0",
 ]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
