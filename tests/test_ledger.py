@@ -1189,8 +1189,10 @@ def _entity_modified(label: str, **aspects) -> EntityChanged:
     return EntityChanged(label=label, change_type=ChangeType.MODIFIED, aspects=wrapped)
 
 
-def _prop_added(label: str, parent: str, **aspects) -> PropertyChanged:
-    return PropertyChanged(label=label, parent_label=parent, change_type=ChangeType.ADDED, aspects=dict(aspects))
+def _prop_added(label: str, parent: str, is_leaf: bool = True, **aspects) -> PropertyChanged:
+    return PropertyChanged(
+        label=label, parent_label=parent, change_type=ChangeType.ADDED, is_leaf=is_leaf, aspects=dict(aspects)
+    )
 
 
 class TestExportBindings:

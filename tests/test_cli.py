@@ -96,7 +96,7 @@ class TestCli:
         meta, aspects = _write_fixtures(tmp_path)
         diff = tmp_path / "diff.json"
         diff.write_text(
-            '{"changes": [{"label": "X.speed", "parent_label": "X", "kind": "PROPERTY",'
+            '{"changes": [{"label": "X.speed", "parent_label": "X", "kind": "PROPERTY", "is_leaf": true,'
             ' "change_type": "MODIFIED", "aspects": {"unit": "mph"}}]}'
         )
         result = CliRunner().invoke(
@@ -288,7 +288,8 @@ class TestExportBindingsCli:
         diff.write_text(
             '{"changes": ['
             '{"label": "Door", "kind": "ENTITY", "change_type": "ADDED", "aspects": {"instances": ["Left", "Right"]}},'
-            '{"label": "Door.IsOpen", "parent_label": "Door", "kind": "PROPERTY", "change_type": "ADDED"}'
+            '{"label": "Door.IsOpen", "parent_label": "Door", "kind": "PROPERTY", "is_leaf": true,'
+            ' "change_type": "ADDED"}'
             "]}"
         )
         result = CliRunner().invoke(cli, ["sync", "--diff-report", str(diff), *_base_flags(ledger_dir, meta, aspects)])

@@ -106,6 +106,7 @@ The `changes` array is an ordered list of change events. Order does not affect c
   "parent_label":      "<string>",
   "kind":              "PROPERTY",
   "change_type":       "ADDED" | "REMOVED" | "MODIFIED",
+  "is_leaf":           true | false,
   "renamed_from":      "<string>" | null,
   "aspects":           { "<key>": <value>, ... },
   "previous_aspects":  { "<key>": <value>, ... }
@@ -118,23 +119,28 @@ The `changes` array is an ordered list of change events. Order does not affect c
 | `parent_label` | always | The label of the immediate parent entity. |
 | `kind` | always | Must be `"PROPERTY"`. |
 | `change_type` | always | `ADDED`, `REMOVED`, or `MODIFIED`. |
+| `is_leaf` | always, `PROPERTY` only | `true` when `output_type` resolves to a primitive/scalar (the property is a leaf, and thus binding-eligible); `false` when `output_type` names another entity (a reference — no bindings are ever minted for it). Required on every `PROPERTY` event, all `change_type`s. A change in `is_leaf` between snapshots always forces a new contract and a binding-lifecycle transition, independent of the breaking-change config. Not an aspect — see [Aspect keys](#aspect-keys). |
 | `renamed_from` | `MODIFIED` only | Previous label. Must be `null` or absent on `ADDED` and `REMOVED`. |
 | `aspects` | `ADDED` | Full initial-state snapshot on `ADDED`. Empty on `REMOVED`. Delta on `MODIFIED` — every value must be wrapped with both `_value` and `_previous` (see [Operation annotation](#operation-annotation-modified-events)). |
 | `previous_aspects` | `REMOVED` | The full aspects snapshot as it existed immediately before removal. **Mandatory and non-empty on `REMOVED` events.** Must be absent on `ADDED`. Accepted but ignored on `MODIFIED` — the sync engine never reads `previous_aspects` for `MODIFIED` events. |
 
 ### Rules
 
-- **ADDED**: `aspects` carries the full snapshot; `output_type` is expected to be present for typed properties (signals, fields). Omit it for vocabulary elements such as enum values or unit definitions where no type resolution is involved. `renamed_from` and `previous_aspects` must be absent.
-- **MODIFIED**: `aspects` carries only the keys that changed, each wrapped as `{"_op": "modified", "_value": <new>, "_previous": <old>}` — plain (unwrapped) values are no longer accepted. `renamed_from` is set only when a rename occurred.
-- **REMOVED**: `aspects` must be empty. `previous_aspects` is **mandatory and must be non-empty** — it carries the full prior-state snapshot being removed. `renamed_from` must be absent.
+- **ADDED**: `aspects` carries the full snapshot; `output_type` is expected to be present for typed properties (signals, fields). Omit it for vocabulary elements such as enum values or unit definitions where no type resolution is involved. `is_leaf` is mandatory and must reflect whether `output_type` is primitive (`true`) or another entity (`false`). `renamed_from` and `previous_aspects` must be absent.
+- **MODIFIED**: `aspects` carries only the keys that changed, each wrapped as `{"_op": "modified", "_value": <new>, "_previous": <old>}` — plain (unwrapped) values are no longer accepted. `is_leaf` is still mandatory and must reflect the property's current state, even when it hasn't changed. `renamed_from` is set only when a rename occurred.
+- **REMOVED**: `aspects` must be empty. `previous_aspects` is **mandatory and must be non-empty** — it carries the full prior-state snapshot being removed. `is_leaf` is still mandatory (reflects the state being removed). `renamed_from` must be absent.
 
 > **Reserved key:** `"name"` is forbidden in `aspects` on property events — signal renames via `renamed_from`.
+
+> **`is_leaf` is forbidden on `ENUM_VALUE` events.** Vocabulary member properties (`kind: "ENUM_VALUE"`) never receive bindings regardless of shape, so `is_leaf` must be omitted (or `null`) on those events — see [Vocabulary and governed elements](#vocabulary-and-governed-elements).
 
 ---
 
 ## Aspect keys
 
 `aspects` is a flat `string → any` dictionary. Keys and their semantics are **adapter-defined** — `modl` stores them verbatim and compares them on future syncs to detect changes. The breaking-change config references them by their exact key name.
+
+> `is_leaf` is **not** an aspect — it is a first-class field on property events (see [Property event](#property-event)). It is never subject to the breaking-change config in the usual sense (there is no `is_leaf` config key), though a change in its value always forces `breaking = True` unconditionally. It is also not persisted as its own column anywhere in the ledger — `modl` derives the equivalent fact from whether any binding row was ever minted for the property's contract.
 
 Widely-used conventions for typed modeling languages:
 
@@ -199,6 +205,7 @@ A rename is represented as a `MODIFIED` event with `renamed_from` set to the pre
   "parent_label": "Vehicle",
   "kind":         "PROPERTY",
   "change_type":  "MODIFIED",
+  "is_leaf":      true,
   "renamed_from": "Vehicle.Speed",
   "aspects":      {}
 }
@@ -218,6 +225,7 @@ A single `MODIFIED` event can carry both `renamed_from` and a non-empty `aspects
   "parent_label": "Vehicle",
   "kind":         "PROPERTY",
   "change_type":  "MODIFIED",
+  "is_leaf":      true,
   "renamed_from": "Vehicle.Speed",
   "aspects":      { "unit": { "_op": "modified", "_value": "m/s", "_previous": "km/h" } }
 }
@@ -229,7 +237,7 @@ The sync engine evaluates the rename and the aspect delta independently against 
 
 ## Vocabulary and governed elements
 
-Models often include shared vocabulary that properties reference — units of measurement, quantity kinds, code lists, enum types. These are first-class model elements with their own identity and change history. ModL treats them exactly like any other ENTITY or PROPERTY: they receive concept URIs, revisions, and contracts, but **no bindings** (vocabulary elements are not runtime-addressable paths — and neither are ENTITY concepts; only PROPERTY concepts receive bindings).
+Models often include shared vocabulary that properties reference — units of measurement, quantity kinds, code lists, enum types. These are first-class model elements with their own identity and change history. ModL treats them exactly like any other ENTITY or PROPERTY: they receive concept URIs, revisions, and contracts, but **no bindings** (vocabulary elements are not runtime-addressable paths — and neither are ENTITY concepts; only leaf `PROPERTY` concepts — those with `is_leaf: true` — receive bindings).
 
 ### Mapping vocabulary to the IR
 
@@ -258,6 +266,7 @@ The link lives in the property's `aspects` snapshot. Emit the unit as the value 
   "parent_label": "Vehicle",
   "kind":         "PROPERTY",
   "change_type":  "ADDED",
+  "is_leaf":      true,
   "aspects": {
     "output_type": "Float",
     "unit":        "https://myproject.org/model/concepts/5"
@@ -274,12 +283,13 @@ The `unit` aspect value is treated as an opaque string by `modl`. Use a plain la
 | Element kind | concepts | revisions | contracts | bindings |
 |---|---|---|---|---|
 | Model entity (`ENTITY`, e.g. `Vehicle.Door`) | ✅ | ✅ | ✅ | ❌ |
-| Model property (`PROPERTY`, parent has instances) | ✅ | ✅ | ✅ | ✅ one per instance |
-| Model property (`PROPERTY`, no instances) | ✅ | ✅ | ✅ | ✅ one singleton |
+| Model property (`PROPERTY`, `is_leaf: true`, parent has instances) | ✅ | ✅ | ✅ | ✅ one per instance |
+| Model property (`PROPERTY`, `is_leaf: true`, no instances) | ✅ | ✅ | ✅ | ✅ one singleton |
+| Model property (`PROPERTY`, `is_leaf: false`, reference to another entity) | ✅ | ✅ | ✅ | ❌ |
 | Vocabulary entity (`ENUMERATION_SET`, e.g. `SpeedUnit`) | ✅ | ✅ | ✅ | ❌ |
 | Vocabulary property (`ENUM_VALUE`, e.g. `SpeedUnit.KMH`) | ✅ | ✅ | ✅ | ❌ |
 
-The `kind` column in `concepts.csv` records the structural kind permanently. Only `PROPERTY` concepts receive bindings. `ENTITY`, `ENUMERATION_SET`, and `ENUM_VALUE` concepts never do — the ledger validator enforces this as a hard constraint.
+The `kind` column in `concepts.csv` records the structural kind permanently. Only `PROPERTY` concepts ever receive bindings, and only when the property is a leaf (`is_leaf: true` on its most recent event — see [Property event](#property-event)). `ENTITY`, `ENUMERATION_SET`, and `ENUM_VALUE` concepts never receive bindings — the ledger validator enforces this as a hard constraint. Reference properties (`is_leaf: false`) are a `PROPERTY`-kind exception that also never receive bindings, but this is controlled by the sync engine's binding-minting logic, not by a ledger schema constraint.
 
 ---
 
@@ -327,6 +337,7 @@ Emit **two** events: one `MODIFIED` on the parent entity (content changed) and o
       "parent_label": "Vehicle.Door",
       "kind":         "PROPERTY",
       "change_type":  "ADDED",
+      "is_leaf":      true,
       "aspects": {
         "output_type": "Boolean",
         "is_list":     false,
@@ -357,6 +368,7 @@ The following diff report covers a range of typical changes:
       "parent_label": "Vehicle.Window",
       "kind":         "PROPERTY",
       "change_type":  "ADDED",
+      "is_leaf":      true,
       "aspects": {
         "output_type": "Float",
         "is_list":     false,
@@ -380,6 +392,7 @@ The following diff report covers a range of typical changes:
       "parent_label": "Vehicle.Door",
       "kind":         "PROPERTY",
       "change_type":  "ADDED",
+      "is_leaf":      true,
       "aspects": { "output_type": "Boolean" }
     },
     {
@@ -387,6 +400,7 @@ The following diff report covers a range of typical changes:
       "parent_label": "Vehicle",
       "kind":         "PROPERTY",
       "change_type":  "MODIFIED",
+      "is_leaf":      true,
       "aspects": { "output_type": { "_op": "modified", "_value": "Float", "_previous": "Int" } }
     },
     {
@@ -394,6 +408,7 @@ The following diff report covers a range of typical changes:
       "parent_label": "Vehicle",
       "kind":         "PROPERTY",
       "change_type":  "MODIFIED",
+      "is_leaf":      true,
       "renamed_from": "Vehicle.OldSpeed",
       "aspects":      {}
     },
@@ -402,6 +417,7 @@ The following diff report covers a range of typical changes:
       "parent_label":      "Vehicle",
       "kind":              "PROPERTY",
       "change_type":       "REMOVED",
+      "is_leaf":           true,
       "previous_aspects":  { "output_type": "Boolean" }
     }
   ]
@@ -426,11 +442,13 @@ Use this checklist when building an adapter for a new modeling language:
 - [ ] For each vocabulary entity (enum type, unit group, code list): set `kind` to `ENUMERATION_SET` in the entity `ADDED` event
 - [ ] For each vocabulary property (enum value, unit entry): set `kind` to `ENUM_VALUE` in the property `ADDED` event
 - [ ] For each property that exists in current but not previous: emit `ADDED` property event with full `aspects`; include `output_type` for typed properties (signals, fields) — omit for vocabulary elements (enum values, unit definitions) where no type resolution is involved
+- [ ] Set `is_leaf` on every `PROPERTY`-kind event (ADDED/MODIFIED/REMOVED): `true` when `output_type` is primitive/scalar, `false` when it names another entity (a reference). Omit `is_leaf` on `ENUM_VALUE` events.
 - [ ] For each property that exists in previous but not current: emit `REMOVED` property event with `previous_aspects` set to the full prior-state snapshot (**mandatory and non-empty**)
 - [ ] For each property that exists in both and has changed:
   - [ ] Detect renames → emit `MODIFIED` with `renamed_from`
   - [ ] If the element was also modified in the same release, include both `renamed_from` and the changed keys in `aspects` within the same event
   - [ ] Compute delta of changed aspect keys → emit `MODIFIED` with only changed keys in `aspects`, each value wrapped as `{"_op": "modified", "_value": <new>, "_previous": <old>}`
+  - [ ] Recompute `is_leaf` from the property's current `output_type` even when unchanged — a leaf/reference transition always triggers a new contract, independent of the breaking-change config
 - [ ] Map language-specific attribute names to consistent aspect key names (e.g., vspec `datatype` → `output_type`)
 - [ ] Ensure `output_type` carries the base type name only (no list brackets, no `!` suffix)
 - [ ] Set `is_list` and `is_required` separately for languages that express them (e.g., GraphQL `[Type]!`)

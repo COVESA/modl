@@ -99,6 +99,7 @@ class TestAnalyzeFieldRename:
     def test_rename_classified_projection_compatible(self) -> None:
         """Field rename produces a projection_compatible entry."""
         event = PropertyChanged(
+            is_leaf=True,
             label="ChargingSession.duration",
             parent_label="ChargingSession",
             change_type=ChangeType.MODIFIED,
@@ -114,6 +115,7 @@ class TestAnalyzeFieldRename:
     def test_rename_produces_rename_step(self) -> None:
         """Field rename produces a rename step with correct source and target paths."""
         event = PropertyChanged(
+            is_leaf=True,
             label="ChargingSession.duration",
             parent_label="ChargingSession",
             change_type=ChangeType.MODIFIED,
@@ -130,6 +132,7 @@ class TestAnalyzeFieldRename:
     def test_rename_change_kind(self) -> None:
         """Field rename is reported as change_kind 'field_renamed'."""
         event = PropertyChanged(
+            is_leaf=True,
             label="ChargingSession.duration",
             parent_label="ChargingSession",
             change_type=ChangeType.MODIFIED,
@@ -142,6 +145,7 @@ class TestAnalyzeFieldRename:
 class TestAnalyzeUnitChange:
     def _unit_event(self) -> PropertyChanged:
         return PropertyChanged(
+            is_leaf=True,
             label="ChargingSession.duration",
             parent_label="ChargingSession",
             change_type=ChangeType.MODIFIED,
@@ -202,6 +206,7 @@ class TestAnalyzeUnitChange:
 class TestAnalyzeUnitChangeWithTypeNarrowing:
     def _event(self) -> PropertyChanged:
         return PropertyChanged(
+            is_leaf=True,
             label="ChargingSession.duration",
             parent_label="ChargingSession",
             change_type=ChangeType.MODIFIED,
@@ -257,6 +262,7 @@ class TestAnalyzeFieldAdded:
     def test_added_field_non_breaking_newer_to_older(self) -> None:
         """ADDED property event is non-breaking in newer_to_older — older consumers ignore extra fields."""
         event = PropertyChanged(
+            is_leaf=True,
             label="ChargingSession.newField",
             parent_label="ChargingSession",
             change_type=ChangeType.ADDED,
@@ -270,6 +276,7 @@ class TestAnalyzeFieldAdded:
     def test_added_field_not_adapter_candidate(self) -> None:
         """ADDED field is non-breaking in newer_to_older; adapter_candidate must be False."""
         event = PropertyChanged(
+            is_leaf=True,
             label="ChargingSession.newField",
             parent_label="ChargingSession",
             change_type=ChangeType.ADDED,
@@ -283,6 +290,7 @@ class TestAnalyzeFieldRemoved:
         """REMOVED PropertyChanged event without previous_aspects fails validation."""
         with pytest.raises(ValidationError, match="previous_aspects"):
             PropertyChanged(
+                is_leaf=True,
                 label="ChargingSession.duration",
                 parent_label="ChargingSession",
                 change_type=ChangeType.REMOVED,
@@ -291,6 +299,7 @@ class TestAnalyzeFieldRemoved:
     def test_removed_field_always_unsupported_newer_to_older(self) -> None:
         """REMOVED field in newer_to_older is always UNSUPPORTED — no auto-emission of default steps."""
         event = PropertyChanged(
+            is_leaf=True,
             label="ChargingSession.duration",
             parent_label="ChargingSession",
             change_type=ChangeType.REMOVED,
@@ -308,6 +317,7 @@ class TestAnalyzeNonBreakingChange:
     def test_non_breaking_not_adapter_candidate(self) -> None:
         """Non-breaking change has consumer_impact non_breaking and adapter_candidate False."""
         event = PropertyChanged(
+            is_leaf=True,
             label="ChargingSession.duration",
             parent_label="ChargingSession",
             change_type=ChangeType.MODIFIED,
@@ -326,6 +336,7 @@ class TestAnalyzeConceptAbsentInTarget:
     def test_absent_concept_has_no_concept_uri_when_no_ledger(self) -> None:
         """concept_uri is None when no ledger snapshots are provided."""
         event = PropertyChanged(
+            is_leaf=True,
             label="ChargingSession.unknownField",
             parent_label="ChargingSession",
             change_type=ChangeType.REMOVED,
@@ -337,6 +348,7 @@ class TestAnalyzeConceptAbsentInTarget:
     def test_absent_concept_has_no_concept_uri_from_empty_ledger(self) -> None:
         """concept_uri is None when the concept is absent from the provided ledger."""
         event = PropertyChanged(
+            is_leaf=True,
             label="ChargingSession.unknownField",
             parent_label="ChargingSession",
             change_type=ChangeType.REMOVED,
@@ -388,6 +400,7 @@ class TestAnalyzeSiblingScopedLabelCollision:
         """A property event resolves to the concept_uri under its own parent, not the sibling's."""
         ledger = self._ledger_with_colliding_property_labels()
         event = PropertyChanged(
+            is_leaf=True,
             label="isOpen",
             parent_label="Left",
             change_type=ChangeType.MODIFIED,
@@ -400,6 +413,7 @@ class TestAnalyzeSiblingScopedLabelCollision:
         """The same label under a different parent resolves to the sibling's own concept_uri."""
         ledger = self._ledger_with_colliding_property_labels()
         event = PropertyChanged(
+            is_leaf=True,
             label="isOpen",
             parent_label="Right",
             change_type=ChangeType.MODIFIED,
@@ -414,12 +428,14 @@ class TestSummary:
         """Summary aggregation counts match per-entry categories."""
         events = [
             PropertyChanged(
+                is_leaf=True,
                 label="ChargingSession.duration",
                 parent_label="ChargingSession",
                 change_type=ChangeType.MODIFIED,
                 renamed_from="ChargingSession.oldDuration",
             ),
             PropertyChanged(
+                is_leaf=True,
                 label="ChargingSession.newField",
                 parent_label="ChargingSession",
                 change_type=ChangeType.ADDED,
@@ -437,6 +453,7 @@ class TestSummary:
 class TestReportToJson:
     def _simple_report(self):
         event = PropertyChanged(
+            is_leaf=True,
             label="ChargingSession.duration",
             parent_label="ChargingSession",
             change_type=ChangeType.MODIFIED,
@@ -482,6 +499,7 @@ class TestReportToAdaptationPlan:
     def test_valid_yaml(self) -> None:
         """report_to_adaptation_plan produces parseable YAML."""
         event = PropertyChanged(
+            is_leaf=True,
             label="ChargingSession.duration",
             parent_label="ChargingSession",
             change_type=ChangeType.MODIFIED,
@@ -496,6 +514,7 @@ class TestReportToAdaptationPlan:
     def test_rule_has_steps(self) -> None:
         """Each adaptable rule contains a steps list and a change section."""
         event = PropertyChanged(
+            is_leaf=True,
             label="ChargingSession.duration",
             parent_label="ChargingSession",
             change_type=ChangeType.MODIFIED,
@@ -512,6 +531,7 @@ class TestReportToAdaptationPlan:
     def test_non_candidates_excluded_from_plan(self) -> None:
         """Non-adapter-candidate entries do not appear in the adaptation plan."""
         event = PropertyChanged(
+            is_leaf=True,
             label="ChargingSession.newField",
             parent_label="ChargingSession",
             change_type=ChangeType.ADDED,
@@ -525,6 +545,7 @@ class TestReportToMarkdown:
     def test_contains_adapter_recipe(self) -> None:
         """Markdown report contains adapter recipe section for adaptable entries."""
         event = PropertyChanged(
+            is_leaf=True,
             label="ChargingSession.duration",
             parent_label="ChargingSession",
             change_type=ChangeType.MODIFIED,
@@ -538,6 +559,7 @@ class TestReportToMarkdown:
     def test_summary_section_present(self) -> None:
         """Markdown report contains a Summary section."""
         event = PropertyChanged(
+            is_leaf=True,
             label="ChargingSession.duration",
             parent_label="ChargingSession",
             change_type=ChangeType.MODIFIED,
@@ -557,6 +579,7 @@ class TestAnalyzeOlderToNewer:
     def test_added_field_is_breaking_older_to_newer(self) -> None:
         """ADDED field is breaking in older_to_newer — platform expects it, old client can't provide it."""
         event = PropertyChanged(
+            is_leaf=True,
             label="ChargingSession.newField",
             parent_label="ChargingSession",
             change_type=ChangeType.ADDED,
@@ -571,6 +594,7 @@ class TestAnalyzeOlderToNewer:
     def test_removed_field_is_non_breaking_older_to_newer(self) -> None:
         """REMOVED field is non-breaking in older_to_newer — old client may send it, platform ignores."""
         event = PropertyChanged(
+            is_leaf=True,
             label="ChargingSession.duration",
             parent_label="ChargingSession",
             change_type=ChangeType.REMOVED,
@@ -585,6 +609,7 @@ class TestAnalyzeOlderToNewer:
     def test_rename_step_paths_inverted_older_to_newer(self) -> None:
         """Rename step uses source=older name, target=newer name in older_to_newer."""
         event = PropertyChanged(
+            is_leaf=True,
             label="ChargingSession.duration",
             parent_label="ChargingSession",
             change_type=ChangeType.MODIFIED,
@@ -601,6 +626,7 @@ class TestAnalyzeOlderToNewer:
     def test_report_id_and_direction_older_to_newer(self) -> None:
         """Report ID and direction field reflect the write direction."""
         event = PropertyChanged(
+            is_leaf=True,
             label="ChargingSession.duration",
             parent_label="ChargingSession",
             change_type=ChangeType.MODIFIED,
@@ -613,6 +639,7 @@ class TestAnalyzeOlderToNewer:
     def test_aspect_step_source_target_inverted_older_to_newer(self) -> None:
         """Steps use source_value=older, target_value=newer in older_to_newer direction."""
         event = PropertyChanged(
+            is_leaf=True,
             label="ChargingSession.duration",
             parent_label="ChargingSession",
             change_type=ChangeType.MODIFIED,
@@ -644,6 +671,7 @@ class TestAnalyzeOlderToNewer:
     def test_changed_aspects_are_direction_neutral(self) -> None:
         """changed_aspects always records newer_value/older_value regardless of direction."""
         event = PropertyChanged(
+            is_leaf=True,
             label="ChargingSession.duration",
             parent_label="ChargingSession",
             change_type=ChangeType.MODIFIED,
@@ -964,6 +992,7 @@ class TestAdaptationStrategy:
 
     def _unit_event(self) -> PropertyChanged:
         return PropertyChanged(
+            is_leaf=True,
             label="ChargingSession.duration",
             parent_label="ChargingSession",
             change_type=ChangeType.MODIFIED,
@@ -1021,6 +1050,7 @@ class TestAdaptationStrategy:
     def test_round_step_unconditional_recipe_complete(self) -> None:
         """Round step with dict recipe (unconditional) is always status: complete."""
         event = PropertyChanged(
+            is_leaf=True,
             label="ChargingSession.value",
             parent_label="ChargingSession",
             change_type=ChangeType.MODIFIED,
@@ -1048,6 +1078,7 @@ class TestAdaptationStrategy:
     def test_adaptation_plan_contains_change_section(self) -> None:
         """Adaptation plan rules include a change section with kind and aspects."""
         event = PropertyChanged(
+            is_leaf=True,
             label="ChargingSession.duration",
             parent_label="ChargingSession",
             change_type=ChangeType.MODIFIED,

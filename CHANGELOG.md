@@ -10,6 +10,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 ### Tests
 
+## [0.4.0] - 2026-09-04
+### Added
+- Added mandatory `is_leaf` metadata to `PROPERTY` diff events to distinguish scalar/primitive properties from entity-valued properties.
+- Validation now enforces `is_leaf` for all `PROPERTY` events and rejects it on `ENUM_VALUE` events.
+- Sync logic now uses the `is_leaf` flag to determine binding eligibility and contract/binding behavior.
+
+### Changed
+- Updated documentation and examples to reflect the new `is_leaf` requirement and its implications for binding rules and property transitions.
+
+### Tests
+- Expanded validation and sync tests to cover scenarios involving the new `is_leaf` field across event types.
+
 ## [0.3.0] - 2026-09-03
 ### Added
 - CLI command to export ledger bindings in JSON and vspec formats

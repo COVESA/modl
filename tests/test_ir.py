@@ -47,6 +47,7 @@ VALID_REPORT_DICT = {
             "label": "Vehicle.Speed",
             "parent_label": "Vehicle",
             "kind": "PROPERTY",
+            "is_leaf": True,
             "change_type": "ADDED",
             "aspects": {"output_type": "Float", "unit": "km/h"},
         },
@@ -204,6 +205,7 @@ class TestPropertyChanged:
             label="Vehicle.Speed",
             parent_label="Vehicle",
             change_type=ChangeType.ADDED,
+            is_leaf=True,
             aspects={"output_type": "Float", "unit": "km/h", "is_list": False, "is_required": False},
         )
         assert event.kind == ElementKind.PROPERTY
@@ -218,6 +220,7 @@ class TestPropertyChanged:
             label="Vehicle.Speed",
             parent_label="Vehicle",
             change_type=ChangeType.MODIFIED,
+            is_leaf=True,
             aspects={"output_type": {"_op": "modified", "_value": "Float", "_previous": "Integer"}},
         )
         assert event.aspects == {"output_type": {"_op": "modified", "_value": "Float", "_previous": "Integer"}}
@@ -229,6 +232,7 @@ class TestPropertyChanged:
             parent_label="Vehicle",
             change_type=ChangeType.MODIFIED,
             renamed_from="Vehicle.Speed",
+            is_leaf=True,
         )
         assert event.renamed_from == "Vehicle.Speed"
 
@@ -238,6 +242,7 @@ class TestPropertyChanged:
             label="Vehicle.OldField",
             parent_label="Vehicle",
             change_type=ChangeType.REMOVED,
+            is_leaf=True,
             previous_aspects={"output_type": "Float"},
         )
         assert event.aspects == {}
@@ -249,6 +254,7 @@ class TestPropertyChanged:
                 label="Vehicle.Speed",
                 parent_label="Vehicle",
                 change_type=ChangeType.REMOVED,
+                is_leaf=True,
                 aspects={"output_type": "Float"},
             )
 
@@ -259,6 +265,7 @@ class TestPropertyChanged:
                 label="Vehicle.Speed",
                 parent_label="Vehicle",
                 change_type=ChangeType.ADDED,
+                is_leaf=True,
                 renamed_from="OldLabel",
             )
 
@@ -273,6 +280,7 @@ class TestPropertyChanged:
             label="Vehicle.Temperature",
             parent_label="Vehicle",
             change_type=ChangeType.ADDED,
+            is_leaf=True,
             aspects={"output_type": "Float", "unit": "DEG_C", "min": -40, "max": 125, "accuracy": 0.5},
         )
         assert event.aspects["unit"] == "DEG_C"
@@ -286,8 +294,88 @@ class TestPropertyChanged:
                 label="Vehicle.Speed",
                 parent_label="Vehicle",
                 change_type=ChangeType.MODIFIED,
+                is_leaf=True,
                 aspects={"name": "NewSpeed"},
             )
+
+
+class TestPropertyChangedIsLeaf:
+    """``is_leaf`` is mandatory for PROPERTY events and forbidden for ENUM_VALUE events."""
+
+    def test_is_leaf_required_on_added_property(self) -> None:
+        """Omitting is_leaf on a PROPERTY ADDED event fails validation."""
+        with pytest.raises(ValidationError, match="'is_leaf' is required"):
+            PropertyChanged(
+                label="Vehicle.Speed",
+                parent_label="Vehicle",
+                change_type=ChangeType.ADDED,
+                aspects={"output_type": "Float"},
+            )
+
+    def test_is_leaf_required_on_modified_property(self) -> None:
+        """Omitting is_leaf on a PROPERTY MODIFIED event fails validation."""
+        with pytest.raises(ValidationError, match="'is_leaf' is required"):
+            PropertyChanged(
+                label="Vehicle.Speed",
+                parent_label="Vehicle",
+                change_type=ChangeType.MODIFIED,
+                aspects={"output_type": {"_op": "modified", "_value": "Float", "_previous": "Integer"}},
+            )
+
+    def test_is_leaf_required_on_removed_property(self) -> None:
+        """Omitting is_leaf on a PROPERTY REMOVED event fails validation."""
+        with pytest.raises(ValidationError, match="'is_leaf' is required"):
+            PropertyChanged(
+                label="Vehicle.Speed",
+                parent_label="Vehicle",
+                change_type=ChangeType.REMOVED,
+                previous_aspects={"output_type": "Float"},
+            )
+
+    def test_is_leaf_true_accepted_for_property(self) -> None:
+        """is_leaf=True is accepted on a PROPERTY event (primitive/scalar output type)."""
+        event = PropertyChanged(
+            label="Vehicle.Speed",
+            parent_label="Vehicle",
+            change_type=ChangeType.ADDED,
+            is_leaf=True,
+            aspects={"output_type": "Float"},
+        )
+        assert event.is_leaf is True
+
+    def test_is_leaf_false_accepted_for_property(self) -> None:
+        """is_leaf=False is accepted on a PROPERTY event (output type references another entity)."""
+        event = PropertyChanged(
+            label="Vehicle.Door",
+            parent_label="Vehicle",
+            change_type=ChangeType.ADDED,
+            is_leaf=False,
+            aspects={"output_type": "Door"},
+        )
+        assert event.is_leaf is False
+
+    def test_is_leaf_forbidden_on_enum_value(self) -> None:
+        """Setting is_leaf on an ENUM_VALUE event fails validation."""
+        with pytest.raises(ValidationError, match="must be omitted"):
+            PropertyChanged(
+                label="SpeedUnit.KMH",
+                parent_label="SpeedUnit",
+                kind=ElementKind.ENUM_VALUE,
+                change_type=ChangeType.ADDED,
+                is_leaf=True,
+                aspects={"symbol": "km/h"},
+            )
+
+    def test_is_leaf_omitted_accepted_for_enum_value(self) -> None:
+        """Omitting is_leaf (default None) is valid for an ENUM_VALUE event."""
+        event = PropertyChanged(
+            label="SpeedUnit.KMH",
+            parent_label="SpeedUnit",
+            kind=ElementKind.ENUM_VALUE,
+            change_type=ChangeType.ADDED,
+            aspects={"symbol": "km/h"},
+        )
+        assert event.is_leaf is None
 
 
 # ── DiffReport ────────────────────────────────────────────────────────────────
@@ -348,6 +436,7 @@ class TestDiffReport:
                     "label": "Vehicle.Door.IsLocked",
                     "parent_label": "Vehicle.Door",
                     "kind": "PROPERTY",
+                    "is_leaf": True,
                     "change_type": "ADDED",
                     "aspects": {"output_type": "Boolean"},
                 },
@@ -384,6 +473,7 @@ class TestDiffReport:
                     "label": "Vehicle.Velocity",
                     "parent_label": "Vehicle",
                     "kind": "PROPERTY",
+                    "is_leaf": True,
                     "change_type": "MODIFIED",
                     "renamed_from": "Vehicle.Speed",
                     "aspects": {},
@@ -436,6 +526,7 @@ class TestValidateStructure:
                     "label": "Vehicle.Speed",
                     "parent_label": "Vehicle",
                     "kind": "PROPERTY",
+                    "is_leaf": True,
                     "change_type": "REMOVED",
                     "previous_aspects": {"output_type": "Float"},
                 },
@@ -443,6 +534,7 @@ class TestValidateStructure:
                     "label": "Vehicle.Speed",
                     "parent_label": "Vehicle",
                     "kind": "PROPERTY",
+                    "is_leaf": True,
                     "change_type": "ADDED",
                     "aspects": {"output_type": "Float"},
                 },
@@ -483,6 +575,7 @@ class TestValidateStructure:
                     "label": "IsOpen",
                     "parent_label": "Vehicle.Door",
                     "kind": "PROPERTY",
+                    "is_leaf": True,
                     "change_type": "REMOVED",
                     "previous_aspects": {"output_type": "Boolean"},
                 },
@@ -490,6 +583,7 @@ class TestValidateStructure:
                     "label": "IsOpen",
                     "parent_label": "Vehicle.Window",
                     "kind": "PROPERTY",
+                    "is_leaf": True,
                     "change_type": "REMOVED",
                     "previous_aspects": {"output_type": "Boolean"},
                 },
@@ -513,6 +607,7 @@ class TestValidateReportAspects:
                             "label": "Vehicle.Speed",
                             "parent_label": "Vehicle",
                             "kind": "PROPERTY",
+                            "is_leaf": True,
                             "change_type": "MODIFIED",
                             "aspects": {
                                 "output_type": {"_op": "modified", "_value": "Float", "_previous": "Integer"},
@@ -536,6 +631,7 @@ class TestValidateReportAspects:
                             "label": "Vehicle.Speed",
                             "parent_label": "Vehicle",
                             "kind": "PROPERTY",
+                            "is_leaf": True,
                             "change_type": "MODIFIED",
                             "aspects": {"unit": {"_op": "modified", "_value": "mph", "_previous": "km/h"}},
                         }
@@ -559,6 +655,7 @@ class TestValidateReportAspects:
                             "label": "Vehicle.Speed",
                             "parent_label": "Vehicle",
                             "kind": "PROPERTY",
+                            "is_leaf": True,
                             "change_type": "MODIFIED",
                             "aspects": {"unit": {"_op": "modified", "_value": "mph", "_previous": "km/h"}},
                         },
@@ -566,6 +663,7 @@ class TestValidateReportAspects:
                             "label": "Vehicle.Mass",
                             "parent_label": "Vehicle",
                             "kind": "PROPERTY",
+                            "is_leaf": True,
                             "change_type": "MODIFIED",
                             "aspects": {"unit": {"_op": "modified", "_value": "kg", "_previous": "g"}},
                         },
@@ -588,6 +686,7 @@ class TestValidateReportAspects:
                             "label": "Vehicle.Speed",
                             "parent_label": "Vehicle",
                             "kind": "PROPERTY",
+                            "is_leaf": True,
                             "change_type": "MODIFIED",
                             "aspects": {"unit": {"_op": "modified", "_value": "mph", "_previous": "km/h"}},
                         }
@@ -611,6 +710,7 @@ class TestValidateReportAspects:
                             "label": "Vehicle.Speed",
                             "parent_label": "Vehicle",
                             "kind": "PROPERTY",
+                            "is_leaf": True,
                             "change_type": "MODIFIED",
                             "aspects": {"unit": {"_op": "modified", "_value": "mph", "_previous": "km/h"}},
                         }
@@ -657,6 +757,7 @@ class TestValidateReportAspects:
                             "label": "Vehicle.Temp",
                             "parent_label": "Vehicle",
                             "kind": "PROPERTY",
+                            "is_leaf": True,
                             "change_type": "MODIFIED",
                             "aspects": {
                                 "unit": {"_op": "modified", "_value": "DEG_C", "_previous": "DEG_F"},
@@ -779,6 +880,7 @@ class TestAspectOpsForEvent:
             label="Vehicle.Speed",
             parent_label="Vehicle",
             change_type=ChangeType.MODIFIED,
+            is_leaf=True,
             aspects={
                 "unit": {"_op": "modified", "_value": "mph", "_previous": "km/h"},
                 "description": {"_op": "modified", "_value": "text", "_previous": "old text"},
@@ -803,6 +905,7 @@ class TestStructuralKeys:
                             "label": "Vehicle.Speed",
                             "parent_label": "Vehicle",
                             "kind": "PROPERTY",
+                            "is_leaf": True,
                             "change_type": "MODIFIED",
                             "aspects": {"output_type": {"_op": "modified", "_value": "Float", "_previous": "Int"}},
                         }
@@ -968,6 +1071,7 @@ class TestValidateStructureCrossKind:
                     label="Vehicle.Speed",
                     parent_label="Vehicle",
                     change_type=ChangeType.ADDED,
+                    is_leaf=True,
                     aspects={"output_type": "Float"},
                 ),
             ]
@@ -983,6 +1087,7 @@ class TestValidateStructureCrossKind:
                     label="Vehicle.Speed",
                     parent_label="Vehicle",
                     change_type=ChangeType.ADDED,
+                    is_leaf=True,
                     aspects={"output_type": "Float"},
                 ),
             ]
@@ -997,12 +1102,14 @@ class TestValidateStructureCrossKind:
                     label="IsOpen",
                     parent_label="Left",
                     change_type=ChangeType.ADDED,
+                    is_leaf=True,
                     aspects={"output_type": "Boolean"},
                 ),
                 PropertyChanged(
                     label="IsOpen",
                     parent_label="Right",
                     change_type=ChangeType.ADDED,
+                    is_leaf=True,
                     aspects={"output_type": "Boolean"},
                 ),
             ]
@@ -1051,6 +1158,7 @@ class TestValidateStructureContent:
                     label="Vehicle.Mass",
                     parent_label="Vehicle",
                     change_type=ChangeType.ADDED,
+                    is_leaf=True,
                     aspects={"output_type": "Float"},
                 ),
             ]
@@ -1070,12 +1178,14 @@ class TestValidateStructureContent:
                     label="Vehicle.Mass",
                     parent_label="Vehicle",
                     change_type=ChangeType.ADDED,
+                    is_leaf=True,
                     aspects={},
                 ),
                 PropertyChanged(
                     label="Vehicle.Speed",
                     parent_label="Vehicle",
                     change_type=ChangeType.MODIFIED,
+                    is_leaf=True,
                     aspects={"unit": {"_op": "modified", "_value": "mph", "_previous": "km/h"}},
                 ),
             ]
@@ -1092,6 +1202,7 @@ class TestValidateStructureContent:
                     label="Vehicle.Speed",
                     parent_label="Vehicle",
                     change_type=ChangeType.MODIFIED,
+                    is_leaf=True,
                     aspects={"unit": {"_op": "modified", "_value": "mph", "_previous": "km/h"}},
                 ),
             ]
@@ -1110,6 +1221,7 @@ class TestPreviousAspects:
             label="Vehicle.Speed",
             parent_label="Vehicle",
             change_type=ChangeType.REMOVED,
+            is_leaf=True,
             previous_aspects={"output_type": "Float", "unit": "km/h"},
         )
         assert event.previous_aspects == {"output_type": "Float", "unit": "km/h"}
@@ -1132,6 +1244,7 @@ class TestPreviousAspects:
                 label="Vehicle.Speed",
                 parent_label="Vehicle",
                 change_type=ChangeType.ADDED,
+                is_leaf=True,
                 previous_aspects={"output_type": "Float"},
             )
 
@@ -1152,6 +1265,7 @@ class TestPreviousAspects:
             label="Vehicle.Speed",
             parent_label="Vehicle",
             change_type=ChangeType.MODIFIED,
+            is_leaf=True,
             aspects={"unit": {"_op": "modified", "_value": "mph", "_previous": "km/h"}},
             previous_aspects={},
         )
@@ -1163,6 +1277,7 @@ class TestPreviousAspects:
             label="Vehicle.Speed",
             parent_label="Vehicle",
             change_type=ChangeType.MODIFIED,
+            is_leaf=True,
             aspects={"unit": {"_op": "modified", "_value": "mph", "_previous": "km/h"}},
         )
         assert event.previous_aspects == {}

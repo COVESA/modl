@@ -74,27 +74,40 @@ def _entity_removed(label: str, **previous_aspects) -> EntityChanged:
     )
 
 
-def _prop_added(label: str, parent: str, kind: ElementKind = ElementKind.PROPERTY, **aspects) -> PropertyChanged:
+def _prop_added(
+    label: str, parent: str, kind: ElementKind = ElementKind.PROPERTY, is_leaf: bool | None = None, **aspects
+) -> PropertyChanged:
+    if kind == ElementKind.PROPERTY and is_leaf is None:
+        is_leaf = True
     return PropertyChanged(
-        label=label, parent_label=parent, kind=kind, change_type=ChangeType.ADDED, aspects=dict(aspects)
+        label=label,
+        parent_label=parent,
+        kind=kind,
+        change_type=ChangeType.ADDED,
+        is_leaf=is_leaf,
+        aspects=dict(aspects),
     )
 
 
-def _prop_modified(label: str, parent: str, renamed_from: str | None = None, **aspects) -> PropertyChanged:
+def _prop_modified(
+    label: str, parent: str, renamed_from: str | None = None, is_leaf: bool = True, **aspects
+) -> PropertyChanged:
     return PropertyChanged(
         label=label,
         parent_label=parent,
         change_type=ChangeType.MODIFIED,
         renamed_from=renamed_from,
+        is_leaf=is_leaf,
         aspects=_wrap_modified_aspects(aspects),
     )
 
 
-def _prop_removed(label: str, parent: str, **previous_aspects) -> PropertyChanged:
+def _prop_removed(label: str, parent: str, is_leaf: bool = True, **previous_aspects) -> PropertyChanged:
     return PropertyChanged(
         label=label,
         parent_label=parent,
         change_type=ChangeType.REMOVED,
+        is_leaf=is_leaf,
         previous_aspects=previous_aspects or {"output_type": "Float"},
     )
 

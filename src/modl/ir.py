@@ -263,6 +263,17 @@ class PropertyChanged(BaseModel):
     The ledger records concept URIs, revisions, and contracts for both kinds, but suppresses
     binding minting for ``ENUM_VALUE``.
 
+    ``is_leaf`` (``PROPERTY`` only) indicates whether the property's output type is a
+    primitive/scalar (``True``) as opposed to another entity (``False``).  Only leaf
+    properties are binding-eligible — a property whose output type references another
+    entity never receives a binding, regardless of instance count.  ``is_leaf`` is
+    mandatory whenever ``kind`` is ``PROPERTY`` and forbidden (must be ``None``) when
+    ``kind`` is ``ENUM_VALUE``, since enum values never receive bindings either way.  A
+    change in ``is_leaf`` between snapshots always forces a new contract and a binding
+    lifecycle transition, independent of the breaking-change config.  Note this is
+    distinct from the "vocabulary leaf elements" phrase above, which describes
+    ``ENUM_VALUE`` as a terminal vocabulary node — ``is_leaf`` never applies to that kind.
+
     Payload rules by ``change_type``:
 
     - ``ADDED``: ``aspects`` holds the full initial-state snapshot.  ``renamed_from`` must
@@ -281,6 +292,7 @@ class PropertyChanged(BaseModel):
     kind: ElementKind = ElementKind.PROPERTY
     change_type: ChangeType
     renamed_from: str | None = None
+    is_leaf: bool | None = None
     aspects: dict[str, Any] = {}
     previous_aspects: dict[str, Any] = {}
 
@@ -288,6 +300,10 @@ class PropertyChanged(BaseModel):
     def _validate_constraints(self) -> PropertyChanged:
         if self.kind not in {ElementKind.PROPERTY, ElementKind.ENUM_VALUE}:
             raise ValueError(f"PropertyChanged.kind must be PROPERTY or ENUM_VALUE, got {self.kind!r}")
+        if self.kind == ElementKind.PROPERTY and self.is_leaf is None:
+            raise ValueError(f"PropertyChanged '{self.label}': 'is_leaf' is required when kind is PROPERTY")
+        if self.kind == ElementKind.ENUM_VALUE and self.is_leaf is not None:
+            raise ValueError(f"PropertyChanged '{self.label}': 'is_leaf' must be omitted when kind is ENUM_VALUE")
         if self.change_type == ChangeType.ADDED and self.previous_aspects:
             raise ValueError("ADDED events must not carry previous_aspects — there is no prior state")
         if self.change_type == ChangeType.REMOVED and self.aspects:

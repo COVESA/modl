@@ -26,9 +26,6 @@ from modl.models import ElementKind, ElementStatus
 
 log = logging.getLogger(__name__)
 
-# Kinds whose concepts receive bindings
-_BINDING_KINDS = {ElementKind.PROPERTY}
-
 # Aspect keys for directional instance changes on MODIFIED entity events
 _INSTANCES_ADDED_KEY = "instances_added"
 _INSTANCES_REMOVED_KEY = "instances_removed"
@@ -346,8 +343,9 @@ def _property_added(
     _record_added_aspects(tables, revision_uri, event.aspects)
     contract_uri = _mint_contract(tables, metadata, concept_uri=concept_uri, revision_uri=revision_uri)
 
-    # Mint bindings for PROPERTY kind only
-    if event.kind == ElementKind.PROPERTY:
+    # Mint bindings for leaf PROPERTY concepts only — a property whose output type
+    # references another entity (is_leaf=False) never receives a binding.
+    if event.kind == ElementKind.PROPERTY and event.is_leaf:
         _mint_bindings_for_instances(tables, metadata, contract_uri=contract_uri, instances=parent_instances)
 
     log.info(
@@ -368,7 +366,16 @@ def _property_modified(
     lookup_label = event.renamed_from if event.renamed_from is not None else event.label
     concept_row_idx, concept_uri = _require_concept(tables, lookup_label, parent_label=event.parent_label)
     aspect_ops = _aspect_ops_for_event(event)
-    breaking = cfg.is_breaking(event.kind, aspect_ops, renamed_from=event.renamed_from)
+
+    # A leaf/reference transition is always breaking, regardless of the config — it changes
+    # whether the concept is binding-eligible at all. "Was this concept previously leaf" is
+    # derived from binding-row existence rather than a stored flag, since the ledger is
+    # append-only and never deletes binding rows (see _contract_has_any_bindings).
+    old_contract_uri = _active_contract_uri(tables, concept_uri) if event.kind == ElementKind.PROPERTY else None
+    old_is_leaf = old_contract_uri is not None and _contract_has_any_bindings(tables, old_contract_uri)
+    is_leaf_changed = event.kind == ElementKind.PROPERTY and old_is_leaf != bool(event.is_leaf)
+
+    breaking = cfg.is_breaking(event.kind, aspect_ops, renamed_from=event.renamed_from) or is_leaf_changed
 
     if event.renamed_from is not None:
         _apply_rename(tables, concept_row_idx, event.label, event.renamed_from)
@@ -385,11 +392,13 @@ def _property_modified(
         contract_uri = _mint_contract(tables, metadata, concept_uri=concept_uri, revision_uri=revision_uri)
 
         if event.kind == ElementKind.PROPERTY:
-            # Supersede old bindings and mint new ones under new contract
+            # Supersede any existing bindings (a safe no-op if the concept never had any),
+            # then mint fresh bindings under the new contract only if still leaf.
             instances_json: str | None = tables["concepts"].at[concept_row_idx, "instances"]
             instances = _parse_instances(instances_json)
             _supersede_bindings_by_concept(tables, concept_uri)
-            _mint_bindings_for_instances(tables, metadata, contract_uri=contract_uri, instances=instances)
+            if event.is_leaf:
+                _mint_bindings_for_instances(tables, metadata, contract_uri=contract_uri, instances=instances)
 
         log.info(
             "Property MODIFIED (breaking):\n  label=%s\n  concept_URI=%s\n  new_revision_URI=%s\n  new_contract_URI=%s",
@@ -492,10 +501,11 @@ def _cascade_instance_bindings(
                 sorted(removed_set),
             )
 
-        # Append bindings for added instances to the existing active contract
+        # Append bindings for added instances to the existing active contract — only for
+        # leaf properties (a reference property never had bindings, so it gets none here).
         if instances_added:
             active_contract = _active_contract_uri(tables, child_uri)
-            if active_contract:
+            if active_contract and _contract_has_any_bindings(tables, active_contract):
                 for instance in instances_added:
                     _mint_binding(tables, metadata, contract_uri=active_contract, instance_label=instance)
                 child_label = tables["concepts"].at[child_idx, "current_label"]
@@ -793,6 +803,17 @@ def _active_contract_uri(tables: dict[str, pd.DataFrame], concept_uri: str) -> s
     if active.empty:
         return None
     return str(active.iloc[0]["contract_uri"])
+
+
+def _contract_has_any_bindings(tables: dict[str, pd.DataFrame], contract_uri: str) -> bool:
+    """Return whether any binding row (regardless of status) was ever minted for this contract.
+
+    Used to recover whether a property concept was previously "leaf" (binding-eligible)
+    without persisting a separate flag on concepts.csv — the ledger is append-only and
+    binding rows are never deleted (only superseded/removed via their ``status`` column),
+    so binding-row existence already encodes the fact.
+    """
+    return bool((tables["bindings"]["contract_uri"] == contract_uri).any())
 
 
 def _child_concepts(tables: dict[str, pd.DataFrame], parent_uri: str) -> pd.DataFrame:
