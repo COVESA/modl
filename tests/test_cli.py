@@ -1,6 +1,8 @@
+import json
 from pathlib import Path
 
 import pytest
+import yaml
 from click.testing import CliRunner
 
 from modl.cli import cli
@@ -275,3 +277,114 @@ class TestNamespaceConsistency:
         meta, aspects = _write_fixtures(tmp_path)
         result = CliRunner().invoke(cli, ["sync", *_base_flags(tmp_path / "ledger", meta, aspects)])
         assert result.exit_code == 0
+
+
+class TestExportBindingsCli:
+    def _build_ledger(self, tmp_path: Path) -> Path:
+        """Sync a small diff report (one instanced entity + property) and return the ledger dir."""
+        meta, aspects = _write_fixtures(tmp_path)
+        ledger_dir = tmp_path / "ledger"
+        diff = tmp_path / "diff.json"
+        diff.write_text(
+            '{"changes": ['
+            '{"label": "Door", "kind": "ENTITY", "change_type": "ADDED", "aspects": {"instances": ["Left", "Right"]}},'
+            '{"label": "Door.IsOpen", "parent_label": "Door", "kind": "PROPERTY", "change_type": "ADDED"}'
+            "]}"
+        )
+        result = CliRunner().invoke(cli, ["sync", "--diff-report", str(diff), *_base_flags(ledger_dir, meta, aspects)])
+        assert result.exit_code == 0
+        return ledger_dir
+
+    def _export_flags(self, ledger_dir: Path, output: Path) -> list[str]:
+        return ["export", "-o", str(ledger_dir), "--output", str(output)]
+
+    def test_export_group_help(self) -> None:
+        """export --help exposes the group-level ledger-dir/output options."""
+        result = CliRunner().invoke(cli, ["export", "--help"])
+        assert result.exit_code == 0
+        for option in ["--ledger-dir", "-o", "--output"]:
+            assert option in result.output
+
+    def test_export_bindings_help(self, tmp_path: Path) -> None:
+        """export bindings --help exposes the format and complete flags."""
+        ledger_dir = tmp_path / "ledger"
+        ledger_dir.mkdir()
+        result = CliRunner().invoke(
+            cli,
+            [*self._export_flags(ledger_dir, tmp_path / "out.json"), "bindings", "--help"],
+        )
+        assert result.exit_code == 0
+        for option in ["--format", "-f", "--complete", "-c"]:
+            assert option in result.output
+
+    def test_export_bindings_json_default(self, tmp_path: Path) -> None:
+        """Happy path: default format is json, nested by instance, binding suffix only."""
+        ledger_dir = self._build_ledger(tmp_path)
+        output = tmp_path / "bindings.json"
+        result = CliRunner().invoke(cli, [*self._export_flags(ledger_dir, output), "bindings"])
+        assert result.exit_code == 0
+        mapping = json.loads(output.read_text())
+        assert set(mapping.keys()) == {"Door.IsOpen"}
+        assert set(mapping["Door.IsOpen"].keys()) == {"Left", "Right"}
+        for entry in mapping["Door.IsOpen"].values():
+            assert set(entry.keys()) == {"binding"}
+            assert not entry["binding"].startswith("http")
+
+    def test_export_bindings_json_complete_flag(self, tmp_path: Path) -> None:
+        """--complete adds binding_uri (full URI) alongside binding in the json shape."""
+        ledger_dir = self._build_ledger(tmp_path)
+        output = tmp_path / "bindings.json"
+        result = CliRunner().invoke(cli, [*self._export_flags(ledger_dir, output), "bindings", "--complete"])
+        assert result.exit_code == 0
+        mapping = json.loads(output.read_text())
+        for entry in mapping["Door.IsOpen"].values():
+            assert set(entry.keys()) == {"binding", "binding_uri"}
+            assert entry["binding_uri"].startswith("http")
+
+    def test_export_bindings_vspec_format(self, tmp_path: Path) -> None:
+        """--format vspec writes a flat, spliced-path YAML mapping."""
+        ledger_dir = self._build_ledger(tmp_path)
+        output = tmp_path / "bindings.yaml"
+        result = CliRunner().invoke(cli, [*self._export_flags(ledger_dir, output), "bindings", "-f", "vspec"])
+        assert result.exit_code == 0
+        mapping = yaml.safe_load(output.read_text())
+        assert set(mapping.keys()) == {"Door.Left.IsOpen", "Door.Right.IsOpen"}
+        for entry in mapping.values():
+            assert set(entry.keys()) == {"binding"}
+
+    def test_export_bindings_vspec_complete_flag(self, tmp_path: Path) -> None:
+        """vspec format + --complete adds the full binding_uri to each entry."""
+        ledger_dir = self._build_ledger(tmp_path)
+        output = tmp_path / "bindings.yaml"
+        result = CliRunner().invoke(cli, [*self._export_flags(ledger_dir, output), "bindings", "-f", "vspec", "-c"])
+        assert result.exit_code == 0
+        mapping = yaml.safe_load(output.read_text())
+        for entry in mapping.values():
+            assert entry["binding_uri"].startswith("http")
+
+    def test_export_missing_ledger_dir_option_errors(self, tmp_path: Path) -> None:
+        """Omitting required --ledger-dir causes non-zero exit."""
+        result = CliRunner().invoke(cli, ["export", "--output", str(tmp_path / "out.json"), "bindings"])
+        assert result.exit_code != 0
+
+    def test_export_missing_output_option_errors(self, tmp_path: Path) -> None:
+        """Omitting required --output causes non-zero exit."""
+        ledger_dir = self._build_ledger(tmp_path)
+        result = CliRunner().invoke(cli, ["export", "-o", str(ledger_dir), "bindings"])
+        assert result.exit_code != 0
+
+    def test_export_nonexistent_ledger_dir_errors(self, tmp_path: Path) -> None:
+        """A --ledger-dir that does not exist on disk causes non-zero exit."""
+        result = CliRunner().invoke(
+            cli,
+            [*self._export_flags(tmp_path / "missing", tmp_path / "out.json"), "bindings"],
+        )
+        assert result.exit_code != 0
+
+    def test_export_invalid_ledger_dir_errors(self, tmp_path: Path) -> None:
+        """A --ledger-dir with unrecognised files causes non-zero exit."""
+        ledger_dir = tmp_path / "ledger"
+        ledger_dir.mkdir()
+        (ledger_dir / "unrelated.txt").write_text("oops")
+        result = CliRunner().invoke(cli, [*self._export_flags(ledger_dir, tmp_path / "out.json"), "bindings"])
+        assert result.exit_code != 0

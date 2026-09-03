@@ -3,11 +3,14 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from modl.config import BreakingChangeConfig, ModelMetadata
+from modl.ir import ChangeType, DiffReport, EntityChanged, PropertyChanged
 from modl.ledger import (
     LedgerValidationError,
     b36decode,
     b36encode,
     empty_ledger,
+    export_bindings,
     next_serial,
     read_ledger,
     validate_ledger,
@@ -15,6 +18,7 @@ from modl.ledger import (
     validate_model_labels,
     write_ledger,
 )
+from modl.sync import sync
 
 
 class TestEmptyLedger:
@@ -1161,3 +1165,175 @@ class TestValidateModelLabels:
         ]
         with pytest.raises(LedgerValidationError, match="labels not in ledger"):
             validate_model_labels(elements, tmp_path)
+
+
+# ── export_bindings ─────────────────────────────────────────────────────────
+
+_NS = "http://export.example/model/"
+
+
+def _export_meta() -> ModelMetadata:
+    return ModelMetadata(name="Export", id=_NS)
+
+
+def _export_cfg() -> BreakingChangeConfig:
+    return BreakingChangeConfig.model_validate({})
+
+
+def _entity_added(label: str, **aspects) -> EntityChanged:
+    return EntityChanged(label=label, change_type=ChangeType.ADDED, aspects=dict(aspects))
+
+
+def _entity_modified(label: str, **aspects) -> EntityChanged:
+    wrapped = {k: v for k, v in aspects.items()}
+    return EntityChanged(label=label, change_type=ChangeType.MODIFIED, aspects=wrapped)
+
+
+def _prop_added(label: str, parent: str, **aspects) -> PropertyChanged:
+    return PropertyChanged(label=label, parent_label=parent, change_type=ChangeType.ADDED, aspects=dict(aspects))
+
+
+class TestExportBindings:
+    def test_json_singleton_binding_is_flat(self) -> None:
+        """A property on an entity with no instances exports as {current_label: {binding: ...}}."""
+        report = DiffReport(changes=[_entity_added("Vehicle"), _prop_added("Vehicle.Speed", parent="Vehicle")])
+        tables = sync(empty_ledger(), report, _export_meta(), _export_cfg())
+        mapping = export_bindings(tables, format="json")
+        binding_uri = tables["bindings"].iloc[0]["binding_uri"]
+        assert mapping == {"Vehicle.Speed": {"binding": binding_uri.rsplit("/", 1)[-1]}}
+
+    def test_json_per_instance_binding_is_nested(self) -> None:
+        """Per-instance bindings nest under the property label, keyed by instance_label."""
+        report = DiffReport(
+            changes=[
+                _entity_added("Door", instances=["Left", "Right"]),
+                _prop_added("Door.IsOpen", parent="Door"),
+            ]
+        )
+        tables = sync(empty_ledger(), report, _export_meta(), _export_cfg())
+        mapping = export_bindings(tables, format="json")
+        assert set(mapping.keys()) == {"Door.IsOpen"}
+        assert set(mapping["Door.IsOpen"].keys()) == {"Left", "Right"}
+        for entry in mapping["Door.IsOpen"].values():
+            assert set(entry.keys()) == {"binding"}
+
+    def test_json_complete_adds_binding_uri(self) -> None:
+        """complete=True adds the full binding_uri alongside binding."""
+        report = DiffReport(changes=[_entity_added("Vehicle"), _prop_added("Vehicle.Speed", parent="Vehicle")])
+        tables = sync(empty_ledger(), report, _export_meta(), _export_cfg())
+        mapping = export_bindings(tables, format="json", complete=True)
+        binding_uri = tables["bindings"].iloc[0]["binding_uri"]
+        assert mapping["Vehicle.Speed"] == {"binding": binding_uri.rsplit("/", 1)[-1], "binding_uri": binding_uri}
+
+    def test_json_default_omits_binding_uri(self) -> None:
+        """complete=False (default) only includes binding, not binding_uri."""
+        report = DiffReport(changes=[_entity_added("Vehicle"), _prop_added("Vehicle.Speed", parent="Vehicle")])
+        tables = sync(empty_ledger(), report, _export_meta(), _export_cfg())
+        mapping = export_bindings(tables, format="json")
+        assert "binding_uri" not in mapping["Vehicle.Speed"]
+
+    def test_json_label_collision_across_concepts_raises(self) -> None:
+        """Two distinct property concepts sharing a current_label raise LedgerValidationError."""
+        report = DiffReport(
+            changes=[
+                _entity_added("Vehicle"),
+                _entity_added("Trailer"),
+                _prop_added("Speed", parent="Vehicle"),
+                _prop_added("Speed", parent="Trailer"),
+            ]
+        )
+        tables = sync(empty_ledger(), report, _export_meta(), _export_cfg())
+        with pytest.raises(LedgerValidationError, match="collision"):
+            export_bindings(tables, format="json")
+
+    def test_vspec_singleton_binding_key_is_property_label(self) -> None:
+        """A property on an entity with no instances exports as {current_label: {binding: ...}}."""
+        report = DiffReport(changes=[_entity_added("Vehicle"), _prop_added("Vehicle.Speed", parent="Vehicle")])
+        tables = sync(empty_ledger(), report, _export_meta(), _export_cfg())
+        mapping = export_bindings(tables, format="vspec")
+        assert set(mapping.keys()) == {"Vehicle.Speed"}
+        assert "instance" not in mapping["Vehicle.Speed"]
+
+    def test_vspec_per_instance_binding_key_splices_instance(self) -> None:
+        """Per-instance bindings splice the instance label between parent and leaf."""
+        report = DiffReport(
+            changes=[
+                _entity_added("Door", instances=["Left", "Right"]),
+                _prop_added("Door.IsOpen", parent="Door"),
+            ]
+        )
+        tables = sync(empty_ledger(), report, _export_meta(), _export_cfg())
+        mapping = export_bindings(tables, format="vspec")
+        assert set(mapping.keys()) == {"Door.Left.IsOpen", "Door.Right.IsOpen"}
+
+    def test_vspec_default_omits_binding_uri(self) -> None:
+        """By default, entries only carry binding, not the full binding_uri."""
+        report = DiffReport(changes=[_entity_added("Vehicle"), _prop_added("Vehicle.Speed", parent="Vehicle")])
+        tables = sync(empty_ledger(), report, _export_meta(), _export_cfg())
+        mapping = export_bindings(tables, format="vspec")
+        binding_uri = tables["bindings"].iloc[0]["binding_uri"]
+        expected_suffix = binding_uri.rsplit("/", 1)[-1]
+        assert mapping["Vehicle.Speed"] == {"binding": expected_suffix}
+        assert not mapping["Vehicle.Speed"]["binding"].startswith("http")
+
+    def test_vspec_complete_uses_full_binding_uri(self) -> None:
+        """complete=True adds the full binding_uri alongside the base-36 binding suffix."""
+        report = DiffReport(changes=[_entity_added("Vehicle"), _prop_added("Vehicle.Speed", parent="Vehicle")])
+        tables = sync(empty_ledger(), report, _export_meta(), _export_cfg())
+        mapping = export_bindings(tables, format="vspec", complete=True)
+        binding_uri = tables["bindings"].iloc[0]["binding_uri"]
+        assert mapping["Vehicle.Speed"]["binding_uri"] == binding_uri
+
+    def test_vspec_removed_binding_excluded(self) -> None:
+        """A binding for a removed instance is excluded from the export."""
+        setup = DiffReport(
+            changes=[
+                _entity_added("Door", instances=["Left", "Right"]),
+                _prop_added("Door.IsOpen", parent="Door"),
+            ]
+        )
+        tables = sync(empty_ledger(), setup, _export_meta(), _export_cfg())
+        removal = DiffReport(changes=[_entity_modified("Door", instances_removed=["Right"])])
+        tables = sync(tables, removal, _export_meta(), _export_cfg())
+        mapping = export_bindings(tables, format="vspec")
+        assert set(mapping.keys()) == {"Door.Left.IsOpen"}
+
+    def test_vspec_prefix_mismatch_falls_back_and_warns(self, caplog: pytest.LogCaptureFixture) -> None:
+        """A property label that doesn't follow '<parent>.<leaf>' falls back and logs a warning."""
+        report = DiffReport(
+            changes=[
+                _entity_added("Door", instances=["Left", "Right"]),
+                _prop_added("IsOpen", parent="Door"),  # not prefixed with "Door."
+            ]
+        )
+        tables = sync(empty_ledger(), report, _export_meta(), _export_cfg())
+        with caplog.at_level("WARNING"):
+            mapping = export_bindings(tables, format="vspec")
+        assert set(mapping.keys()) == {"IsOpen.Left", "IsOpen.Right"}
+        assert any("does not follow" in rec.message for rec in caplog.records)
+
+    def test_vspec_duplicate_key_raises(self) -> None:
+        """Two singleton bindings resolving to the same key raise LedgerValidationError."""
+        report = DiffReport(
+            changes=[
+                _entity_added("Vehicle"),
+                _entity_added("Trailer"),
+                _prop_added("Speed", parent="Vehicle"),
+                _prop_added("Speed", parent="Trailer"),
+            ]
+        )
+        tables = sync(empty_ledger(), report, _export_meta(), _export_cfg())
+        with pytest.raises(LedgerValidationError, match="collision"):
+            export_bindings(tables, format="vspec")
+
+    def test_no_active_bindings_returns_empty_dict(self) -> None:
+        """An empty ledger exports an empty mapping, for either format."""
+        assert export_bindings(empty_ledger(), format="json") == {}
+        assert export_bindings(empty_ledger(), format="vspec") == {}
+
+    def test_invalid_format_raises(self) -> None:
+        """An unrecognized format value raises ValueError."""
+        report = DiffReport(changes=[_entity_added("Vehicle"), _prop_added("Vehicle.Speed", parent="Vehicle")])
+        tables = sync(empty_ledger(), report, _export_meta(), _export_cfg())
+        with pytest.raises(ValueError, match="format must be one of"):
+            export_bindings(tables, format="xml")

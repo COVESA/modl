@@ -1,7 +1,9 @@
+import json
 import logging
 from pathlib import Path
 
 import rich_click as click
+import yaml
 from pydantic import ValidationError as PydanticValidationError
 from rich.traceback import install
 
@@ -17,7 +19,7 @@ from .adapt import (
 )
 from .config import AdaptationConfig, BreakingChangeConfig, ModelMetadata
 from .ir import DiffReport, validate_report_aspects
-from .ledger import LedgerValidationError, empty_ledger, read_ledger, validate_ledger_dir, write_ledger
+from .ledger import LedgerValidationError, empty_ledger, export_bindings, read_ledger, validate_ledger_dir, write_ledger
 from .sync import SyncError
 from .sync import sync as run_sync
 
@@ -189,6 +191,70 @@ def sync(
 
     write_ledger(tables, ledger_dir)
     log.info("Ledger written to %s", ledger_dir)
+
+
+@cli.group("export")
+@click.option(
+    "-o",
+    "--ledger-dir",
+    required=True,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Directory containing the ledger CSV files",
+)
+@click.option(
+    "--output",
+    required=True,
+    type=click.Path(dir_okay=False, writable=True, path_type=Path),
+    help="Path to write the exported file to",
+)
+@click.pass_context
+def export_group(ctx: click.Context, ledger_dir: Path, output: Path) -> None:
+    """Export ledger tables into lookup mappings for downstream tooling."""
+    ctx.ensure_object(dict)
+    ctx.obj["ledger_dir"] = ledger_dir
+    ctx.obj["output"] = output
+
+
+@export_group.command("bindings")
+@click.option(
+    "-f",
+    "--format",
+    "export_format",
+    type=click.Choice(["json", "vspec"]),
+    default="json",
+    show_default=True,
+    help="Shape and serialization of the exported mapping",
+)
+@click.option(
+    "-c",
+    "--complete",
+    is_flag=True,
+    default=False,
+    help="Include binding_uri (the full binding URI) alongside binding in every entry",
+)
+@click.pass_context
+def export_bindings_cmd(ctx: click.Context, export_format: str, complete: bool) -> None:
+    """Export active bindings as a lookup mapping (JSON or vspec-style YAML)."""
+    ledger_dir: Path = ctx.obj["ledger_dir"]
+    output: Path = ctx.obj["output"]
+
+    try:
+        tables = read_ledger(ledger_dir)
+    except LedgerValidationError as exc:
+        log.error("Ledger validation error — %s", exc)
+        raise SystemExit(1) from None
+
+    try:
+        mapping = export_bindings(tables, format=export_format, complete=complete)
+    except LedgerValidationError as exc:
+        log.error("%s", exc)
+        raise SystemExit(1) from None
+
+    if export_format == "vspec":
+        output.write_text(yaml.safe_dump(mapping, sort_keys=True))
+    else:
+        output.write_text(json.dumps(mapping, indent=2, sort_keys=True) + "\n")
+    log.info("Exported %d active binding(s) to %s", len(mapping), output)
 
 
 @cli.command()

@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 ### Tests
 
+## [0.3.0] - 2026-09-03
+### Added
+- CLI command to export ledger bindings in JSON and vspec formats
+
 ## [0.2.0] - 2026-09-03
 
 ### Added

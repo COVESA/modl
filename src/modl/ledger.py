@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import pandas as pd
 
 from modl.models import ElementKind, ElementStatus
+
+log = logging.getLogger(__name__)
 
 # ── Schema constants ──────────────────────────────────────────────────────────
 
@@ -484,3 +487,175 @@ def validate_model_labels(
             mismatches.append(f"'{label}': kind {kind!r} != ledger {ledger_kind!r}")
     if mismatches:
         raise LedgerValidationError("Model/ledger kind mismatch:\n" + "\n".join(f"  {m}" for m in mismatches))
+
+
+def _binding_export_records(tables: dict[str, pd.DataFrame]) -> list[dict]:
+    """Return one record per ACTIVE binding, joined up to its bound property concept.
+
+    Each record has keys: ``concept_uri``, ``current_label``, ``parent_label`` (``None`` if the
+    property has no instances), ``instance_label`` (``None`` for singleton bindings), and
+    ``binding_uri``.
+    """
+    bindings_df = tables["bindings"]
+    contracts_df = tables["contracts"]
+    concepts_df = tables["concepts"]
+
+    active_bindings = bindings_df[bindings_df["status"] == ElementStatus.ACTIVE]
+    if active_bindings.empty:
+        return []
+
+    merged = active_bindings.merge(contracts_df[["contract_uri", "concept_uri"]], on="contract_uri", how="left").merge(
+        concepts_df[["concept_uri", "current_label", "parent_uri"]], on="concept_uri", how="left"
+    )
+
+    label_by_uri = concepts_df.set_index("concept_uri")["current_label"]
+
+    records: list[dict] = []
+    for _, row in merged.iterrows():
+        instance_label = row["instance_label"]
+        parent_uri = row["parent_uri"]
+        parent_label = label_by_uri.get(parent_uri) if pd.notna(parent_uri) else None
+        records.append(
+            {
+                "concept_uri": row["concept_uri"],
+                "current_label": row["current_label"],
+                "parent_label": parent_label,
+                "instance_label": None if pd.isna(instance_label) else instance_label,
+                "binding_uri": row["binding_uri"],
+            }
+        )
+    return records
+
+
+def _binding_fields(binding_uri: str, complete: bool) -> dict[str, str]:
+    """Return the leaf field dict for one binding: always ``binding``, plus ``binding_uri`` if complete."""
+    fields = {"binding": binding_uri.rsplit("/", 1)[-1]}
+    if complete:
+        fields["binding_uri"] = binding_uri
+    return fields
+
+
+def _export_bindings_json(records: list[dict], complete: bool) -> dict:
+    """Group records by ``current_label`` — the abstract concept label from the concepts table.
+
+    Singleton properties (no instances) map directly to the leaf fields. Properties with
+    per-instance bindings nest one level deeper, keyed by ``instance_label``.
+
+    Note: ``current_label`` uniqueness is only guaranteed among siblings sharing the same
+    ``parent_uri`` (see the label-uniqueness rules in :func:`validate_ledger`), not globally.
+    Adapters that store fully-qualified paths as ``current_label`` (e.g. vspec-style
+    ``"Door.IsOpen"``) are safe; adapters that store bare field names could collide here —
+    caught below as a hard error rather than silently dropped.
+    """
+    grouped: dict[str, list[dict]] = {}
+    for r in records:
+        grouped.setdefault(r["current_label"], []).append(r)
+
+    result: dict = {}
+    for label, recs in grouped.items():
+        concept_uris = {r["concept_uri"] for r in recs}
+        if len(concept_uris) > 1:
+            raise LedgerValidationError(
+                f"Label collision while exporting: '{label}' is shared by multiple distinct "
+                f"property concepts: {sorted(concept_uris)}"
+            )
+
+        if len(recs) == 1 and recs[0]["instance_label"] is None:
+            result[label] = _binding_fields(recs[0]["binding_uri"], complete)
+            continue
+
+        inner: dict[str, dict] = {}
+        for r in recs:
+            instance_label = r["instance_label"]
+            if instance_label is None:
+                raise LedgerValidationError(
+                    f"Property '{label}' has a mix of singleton and per-instance bindings — ledger inconsistency"
+                )
+            if instance_label in inner:
+                raise LedgerValidationError(f"Duplicate instance_label '{instance_label}' for property '{label}'")
+            inner[instance_label] = _binding_fields(r["binding_uri"], complete)
+        result[label] = inner
+
+    return result
+
+
+def _export_bindings_vspec(records: list[dict], complete: bool) -> dict:
+    """Flatten records into a vspec-style mapping, splicing the instance label into the runtime path.
+
+    Singleton bindings key on ``current_label`` as-is. Per-instance bindings assume the
+    convention ``current_label == f"{parent_label}.{leaf}"`` and produce
+    ``f"{parent_label}.{instance_label}.{leaf}"``. When a property's ``current_label`` does not
+    follow this convention (e.g. after an independent rename), falls back to
+    ``f"{current_label}.{instance_label}"`` and logs a warning.
+    """
+    result: dict = {}
+    for r in records:
+        current_label = r["current_label"]
+        instance_label = r["instance_label"]
+        binding_uri = r["binding_uri"]
+
+        if instance_label is None:
+            key = current_label
+        else:
+            parent_label = r["parent_label"]
+            prefix = f"{parent_label}." if parent_label is not None else None
+            if prefix is not None and current_label.startswith(prefix):
+                leaf = current_label[len(prefix) :]
+                key = f"{parent_label}.{instance_label}.{leaf}"
+            else:
+                log.warning(
+                    "Binding %s: property label '%s' does not follow the '<parent>.<leaf>' convention "
+                    "(parent_label=%r); falling back to '<label>.<instance>' key format",
+                    binding_uri,
+                    current_label,
+                    parent_label,
+                )
+                key = f"{current_label}.{instance_label}"
+
+        if key in result:
+            raise LedgerValidationError(
+                f"Binding key collision while exporting: '{key}' is produced by more than one binding"
+            )
+        result[key] = _binding_fields(binding_uri, complete)
+
+    return result
+
+
+# Registry mapping a --format name to its (shape-builder) function. Adding a new export
+# format is a matter of adding one entry here plus a serializer choice in the CLI layer.
+_BINDING_EXPORT_BUILDERS: dict[str, Callable[[list[dict], bool], dict]] = {
+    "json": _export_bindings_json,
+    "vspec": _export_bindings_vspec,
+}
+
+
+def export_bindings(tables: dict[str, pd.DataFrame], format: str = "json", complete: bool = False) -> dict:
+    """Export ACTIVE bindings as a lookup mapping for downstream tooling (e.g. vss-tools overlays).
+
+    Only bindings with ``status == ACTIVE`` are included — superseded and removed bindings are
+    omitted. Each leaf entry always carries ``binding`` (the base-36 URI serial suffix); pass
+    ``complete=True`` to additionally include ``binding_uri`` (the full binding URI).
+
+    ``format`` selects the mapping shape:
+
+    - ``"json"`` (default): keyed by the property's ``current_label`` — the abstract concept
+      label. Singleton properties (no instances) map directly to the leaf fields. Properties
+      with per-instance bindings nest one level deeper, keyed by ``instance_label``. See
+      :func:`_export_bindings_json` for a caveat on label uniqueness.
+    - ``"vspec"``: a flat mapping keyed by the realised runtime path — per-instance bindings
+      splice the instance label into the path (e.g. ``"Door.Left.IsOpen"``) to match vspec's
+      fully-qualified node naming; see :func:`_export_bindings_vspec` for the splicing rule
+      and its fallback.
+
+    Raises LedgerValidationError if two bindings would resolve to the same key/label, since
+    that would silently clobber a mapping entry.
+    """
+    builder = _BINDING_EXPORT_BUILDERS.get(format)
+    if builder is None:
+        raise ValueError(f"format must be one of {sorted(_BINDING_EXPORT_BUILDERS)}, got {format!r}")
+
+    records = _binding_export_records(tables)
+    if not records:
+        return {}
+
+    return builder(records, complete)
