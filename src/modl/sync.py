@@ -366,7 +366,7 @@ def _property_modified(
     cfg: BreakingChangeConfig,
 ) -> None:
     lookup_label = event.renamed_from if event.renamed_from is not None else event.label
-    concept_row_idx, concept_uri = _require_concept(tables, lookup_label)
+    concept_row_idx, concept_uri = _require_concept(tables, lookup_label, parent_label=event.parent_label)
     aspect_ops = _aspect_ops_for_event(event)
     breaking = cfg.is_breaking(event.kind, aspect_ops, renamed_from=event.renamed_from)
 
@@ -413,7 +413,7 @@ def _property_removed(
     metadata: ModelMetadata,
     cfg: BreakingChangeConfig,
 ) -> None:
-    concept_row_idx, concept_uri = _require_concept(tables, event.label)
+    concept_row_idx, concept_uri = _require_concept(tables, event.label, parent_label=event.parent_label)
 
     prev_rev_uri = _active_revision_uri(tables, concept_uri)
     _supersede_revision(tables, concept_uri)
@@ -749,15 +749,28 @@ def _set_instances(
 # ── Query helpers ─────────────────────────────────────────────────────────────
 
 
-def _require_concept(tables: dict[str, pd.DataFrame], label: str) -> tuple[int, str]:
+def _require_concept(tables: dict[str, pd.DataFrame], label: str, parent_label: str | None = None) -> tuple[int, str]:
     """Return the DataFrame index and concept_uri for a concept with the given current_label.
+
+    ``current_label`` is scoped to two independent namespaces (see module docs): ENTITY/
+    ENUMERATION_SET labels are globally unique, while PROPERTY/ENUM_VALUE labels are unique only
+    among siblings sharing the same parent. Pass *parent_label* to scope the lookup to a specific
+    parent's children — required whenever the target may be a PROPERTY or ENUM_VALUE, since those
+    labels alone do not guarantee a unique match. *parent_label* itself is resolved via an
+    unscoped lookup, since ENTITY/ENUMERATION_SET labels are always globally unique.
 
     Raises :exc:`SyncError` if no matching concept is found.
     """
     df = tables["concepts"]
-    match = df[df["current_label"] == label]
-    if match.empty:
-        raise SyncError(f"No concept found with current_label '{label}'")
+    if parent_label is not None:
+        _, parent_uri = _require_concept(tables, parent_label)
+        match = df[(df["current_label"] == label) & (df["parent_uri"] == parent_uri)]
+        if match.empty:
+            raise SyncError(f"No concept found with current_label '{label}' under parent '{parent_label}'")
+    else:
+        match = df[df["current_label"] == label]
+        if match.empty:
+            raise SyncError(f"No concept found with current_label '{label}'")
     idx = int(match.index[0])
     return idx, str(match.iloc[0]["concept_uri"])
 

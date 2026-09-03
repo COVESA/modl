@@ -959,8 +959,8 @@ class TestIsBreakingDirectionalInstanceKeys:
 
 # Step 3: cross-kind label duplicate warning
 class TestValidateStructureCrossKind:
-    def test_same_label_entity_and_property_warns(self) -> None:
-        """Same label appearing as both entity and property event produces a warning."""
+    def test_same_label_entity_and_property_no_warning(self) -> None:
+        """An entity and a property may share a label — the two namespaces are never compared."""
         report = DiffReport(
             changes=[
                 EntityChanged(label="Vehicle.Speed", change_type=ChangeType.ADDED),
@@ -972,8 +972,7 @@ class TestValidateStructureCrossKind:
                 ),
             ]
         )
-        warnings = report.validate_structure()
-        assert any("globally unique" in w for w in warnings)
+        assert report.validate_structure() == []
 
     def test_distinct_labels_no_cross_kind_warning(self) -> None:
         """Distinct labels never produce a cross-kind warning."""
@@ -989,6 +988,37 @@ class TestValidateStructureCrossKind:
             ]
         )
         assert report.validate_structure() == []
+
+    def test_same_property_label_different_parent_no_warning(self) -> None:
+        """Two property events sharing a label under different parents produce no warning."""
+        report = DiffReport(
+            changes=[
+                PropertyChanged(
+                    label="IsOpen",
+                    parent_label="Left",
+                    change_type=ChangeType.ADDED,
+                    aspects={"output_type": "Boolean"},
+                ),
+                PropertyChanged(
+                    label="IsOpen",
+                    parent_label="Right",
+                    change_type=ChangeType.ADDED,
+                    aspects={"output_type": "Boolean"},
+                ),
+            ]
+        )
+        assert report.validate_structure() == []
+
+    def test_same_label_entity_and_enumeration_set_warns(self) -> None:
+        """ENTITY and ENUMERATION_SET share one global namespace — a collision still warns."""
+        report = DiffReport(
+            changes=[
+                EntityChanged(label="Status", change_type=ChangeType.ADDED),
+                EntityChanged(label="Status", change_type=ChangeType.ADDED, kind=ElementKind.ENUMERATION_SET),
+            ]
+        )
+        warnings = report.validate_structure()
+        assert any("Duplicate entity event" in w for w in warnings)
 
 
 # Step 6: content cross-validation

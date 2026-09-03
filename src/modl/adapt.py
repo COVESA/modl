@@ -240,9 +240,14 @@ def _process_event(
     direction: AdaptDirection,
 ) -> CompatibilityEntry:
     """Produce a :class:`CompatibilityEntry` for a single diff event."""
-    # Resolve concept URI from the newer ledger (preferred) then older ledger
+    # Resolve concept URI from the newer ledger (preferred) then older ledger. PROPERTY/ENUM_VALUE
+    # labels are only unique among siblings (see modl.ir module docs on the two label namespaces),
+    # so scope the lookup by parent_label whenever the event is a PropertyChanged.
     lookup_label = event.renamed_from if event.renamed_from is not None else event.label
-    concept_uri = _find_concept_uri(newer_tables, lookup_label) or _find_concept_uri(older_tables, lookup_label)
+    parent_label = event.parent_label if isinstance(event, PropertyChanged) else None
+    concept_uri = _find_concept_uri(newer_tables, lookup_label, parent_label) or _find_concept_uri(
+        older_tables, lookup_label, parent_label
+    )
 
     # Determine element kind for config lookups
     kind = event.kind
@@ -527,18 +532,33 @@ def _extract_older_aspects(event: EntityChanged | PropertyChanged) -> dict[str, 
     return result
 
 
-def _find_concept_uri(tables: dict | None, label: str) -> str | None:
-    """Look up the concept_uri for a label in a ledger snapshot; return None if absent or ledger not given."""
+def _find_concept_uri(tables: dict | None, label: str, parent_label: str | None = None) -> str | None:
+    """Look up the concept_uri for a label in a ledger snapshot; return None if absent or ledger not given.
+
+    PROPERTY/ENUM_VALUE labels are unique only among siblings sharing the same parent (see
+    ``modl.ir`` module docs on the two label namespaces). Pass *parent_label* to scope the lookup
+    to that parent's children; omit it for ENTITY/ENUMERATION_SET labels, which are globally
+    unique. When *parent_label* is given, the parent's own concept_uri is resolved first via an
+    unscoped lookup.
+    """
     if tables is None:
         return None
     concepts = tables.get("concepts")
     if concepts is None or concepts.empty:
         return None
-    match = concepts[concepts["current_label"] == label]
+
+    candidates = concepts
+    if parent_label is not None:
+        parent_uri = _find_concept_uri(tables, parent_label)
+        if parent_uri is None:
+            return None
+        candidates = concepts[concepts["parent_uri"] == parent_uri]
+
+    match = candidates[candidates["current_label"] == label]
     if not match.empty:
         return str(match.iloc[0]["concept_uri"])
     # Fall back to previous_labels search
-    for _, row in concepts.iterrows():
+    for _, row in candidates.iterrows():
         prev_raw = row.get("previous_labels")
         if not prev_raw or (isinstance(prev_raw, float)):
             continue

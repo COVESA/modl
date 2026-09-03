@@ -34,6 +34,22 @@ One adapter exists per modeling language (e.g., vspec, GraphQL SDL, JSON Schema)
 | **Property** | Field, attribute, signal, sensor, actuator, characteristic |
 | **Aspect** | Any named attribute of a property that can change (output type, unit, constraints, …) |
 
+### Label namespaces
+
+`label` values live in two independent namespaces, mirroring GraphQL SDL:
+
+- **Container namespace** (`ENTITY` + `ENUMERATION_SET`): labels are globally unique against each
+  other — just as GraphQL `type` and `enum` names share one global namespace.
+- **Member namespace** (`PROPERTY` + `ENUM_VALUE`): labels are unique only among siblings sharing
+  the same `parent_label` — just as GraphQL field names are scoped to their enclosing type and enum
+  value names are scoped to their enclosing enum.
+
+The two namespaces are **never** compared against each other: an entity and a property may share
+a label, since GraphQL never resolves a field by global name lookup either. This matters for
+languages without a separate standalone-type layer — e.g. vspec, where a branch's name is just its
+path segment, exactly like a leaf's — letting an adapter use natural node names without inventing
+suffixes to dodge collisions between unrelated branches and signals.
+
 ---
 
 ## Top-level structure
@@ -64,7 +80,7 @@ The `changes` array is an ordered list of change events. Order does not affect c
 
 | Field | Required | Notes |
 |---|---|---|
-| `label` | always | The current label of the entity (after any rename). Must be **globally unique** across all element kinds in the ledger — use the full dotted path (e.g. `Vehicle.Door`). |
+| `label` | always | The current label of the entity (after any rename). Must be unique among all `ENTITY` and `ENUMERATION_SET` concepts in the ledger — use the full dotted path (e.g. `Vehicle.Door`). Not compared against `PROPERTY`/`ENUM_VALUE` labels (see [Label namespaces](#label-namespaces)). |
 | `kind` | always | Must be `"ENTITY"`. |
 | `change_type` | always | `ADDED`, `REMOVED`, or `MODIFIED`. |
 | `renamed_from` | `MODIFIED` only | Previous label. Signals the ledger to record a rename rather than a separate removal and addition. Must be `null` or absent on `ADDED` and `REMOVED`. |
@@ -98,7 +114,7 @@ The `changes` array is an ordered list of change events. Order does not affect c
 
 | Field | Required | Notes |
 |---|---|---|
-| `label` | always | The current label of the property. Must be **globally unique** across all element kinds in the ledger — use the full dotted path (e.g. `Vehicle.Door.IsOpen`). |
+| `label` | always | The current label of the property. Must be unique among sibling `PROPERTY`/`ENUM_VALUE` concepts sharing the same `parent_label` — not globally unique, and never compared against `ENTITY`/`ENUMERATION_SET` labels (see [Label namespaces](#label-namespaces)). Use the full dotted path (e.g. `Vehicle.Door.IsOpen`). |
 | `parent_label` | always | The label of the immediate parent entity. |
 | `kind` | always | Must be `"PROPERTY"`. |
 | `change_type` | always | `ADDED`, `REMOVED`, or `MODIFIED`. |

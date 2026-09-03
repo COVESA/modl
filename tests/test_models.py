@@ -243,7 +243,7 @@ class TestRevisionAspectRow:
             RevisionAspectRow(
                 revision_uri="ns-r:0",
                 aspect_key="unit",
-                operation="renamed",  # ty: ignore[invalid-argument-type]
+                operation="renamed",
             )
 
     def test_modified_with_null_previous_value_rejected(self) -> None:

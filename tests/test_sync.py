@@ -668,6 +668,83 @@ class TestPropertyRemoved:
         assert len(tables["bindings"]) == 0
 
 
+# ── Label namespace scoping (ENTITY/PROPERTY may share a label; PROPERTY labels are ──
+# ── unique only among siblings of the same parent) ───────────────────────────────────
+
+
+class TestLabelNamespaceScoping:
+    def test_entity_and_property_share_label(self) -> None:
+        """An ENTITY and a PROPERTY (under a different parent) may share the same label."""
+        report = _report(
+            _entity_added("Door"),
+            _entity_added("Vehicle"),
+            _prop_added("Door", parent="Vehicle"),
+        )
+        tables = sync(empty_ledger(), report, _meta(), _cfg())
+        entity_uri = tables["concepts"][
+            (tables["concepts"]["current_label"] == "Door") & (tables["concepts"]["kind"] == ElementKind.ENTITY)
+        ].iloc[0]["concept_uri"]
+        prop_uri = tables["concepts"][
+            (tables["concepts"]["current_label"] == "Door") & (tables["concepts"]["kind"] == ElementKind.PROPERTY)
+        ].iloc[0]["concept_uri"]
+        assert entity_uri != prop_uri
+        validate_ledger(tables)  # must not raise
+
+    def test_same_property_label_different_parents_modify_disambiguated(self) -> None:
+        """MODIFY on a sibling-scoped label updates only the property under the matching parent."""
+        cfg = _cfg(property={"output_type": True})
+        setup = _report(
+            _entity_added("Left"),
+            _entity_added("Right"),
+            _prop_added("IsOpen", parent="Left", output_type="Boolean"),
+            _prop_added("IsOpen", parent="Right", output_type="Boolean"),
+        )
+        tables = sync(empty_ledger(), setup, _meta(), cfg)
+        report = _report(_prop_modified("IsOpen", parent="Left", output_type="Int"))
+        tables = sync(tables, report, _meta(), cfg)
+
+        left_uri = tables["concepts"][
+            (tables["concepts"]["current_label"] == "IsOpen") & (tables["concepts"]["kind"] == ElementKind.PROPERTY)
+        ]
+        left_uri = left_uri[
+            left_uri["parent_uri"]
+            == tables["concepts"][tables["concepts"]["current_label"] == "Left"].iloc[0]["concept_uri"]
+        ].iloc[0]["concept_uri"]
+        right_uri = tables["concepts"][
+            (tables["concepts"]["current_label"] == "IsOpen") & (tables["concepts"]["kind"] == ElementKind.PROPERTY)
+        ]
+        right_uri = right_uri[
+            right_uri["parent_uri"]
+            == tables["concepts"][tables["concepts"]["current_label"] == "Right"].iloc[0]["concept_uri"]
+        ].iloc[0]["concept_uri"]
+
+        left_variants = tables["contracts"][tables["contracts"]["concept_uri"] == left_uri]
+        right_variants = tables["contracts"][tables["contracts"]["concept_uri"] == right_uri]
+        assert len(left_variants) == 2  # superseded + new active variant
+        assert len(right_variants) == 1  # untouched
+
+    def test_same_property_label_different_parents_remove_disambiguated(self) -> None:
+        """REMOVE on a sibling-scoped label removes only the property under the matching parent."""
+        setup = _report(
+            _entity_added("Left"),
+            _entity_added("Right"),
+            _prop_added("IsOpen", parent="Left"),
+            _prop_added("IsOpen", parent="Right"),
+        )
+        tables = sync(empty_ledger(), setup, _meta(), _cfg())
+        report = _report(_prop_removed("IsOpen", parent="Left"))
+        tables = sync(tables, report, _meta(), _cfg())
+
+        concepts = tables["concepts"]
+        props = concepts[(concepts["current_label"] == "IsOpen") & (concepts["kind"] == ElementKind.PROPERTY)]
+        left_entity_uri = concepts[concepts["current_label"] == "Left"].iloc[0]["concept_uri"]
+        right_entity_uri = concepts[concepts["current_label"] == "Right"].iloc[0]["concept_uri"]
+        left_prop = props[props["parent_uri"] == left_entity_uri].iloc[0]
+        right_prop = props[props["parent_uri"] == right_entity_uri].iloc[0]
+        assert left_prop["status"] == ElementStatus.REMOVED
+        assert right_prop["status"] == ElementStatus.ACTIVE
+
+
 # ── Round-trip ────────────────────────────────────────────────────────────────
 
 

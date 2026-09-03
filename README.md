@@ -120,6 +120,8 @@ A concept is the **agreed meaning** of a model element — what it *is*, indepen
 
 Concepts are identified once and never reassigned. If a concept is renamed, the old label is recorded as a previous label — the concept identity does not change.
 
+Label uniqueness is scoped to two independent namespaces, mirroring GraphQL SDL: `ENTITY`/`ENUMERATION_SET` labels (like GraphQL `type`/`enum` names) are globally unique against each other, while `PROPERTY`/`ENUM_VALUE` labels (like GraphQL fields and enum values) are unique only among siblings sharing the same parent. The two namespaces are never compared against each other — an entity and a property may share a label, since a field is never resolved by global name lookup in the first place. This matters for languages with no separate standalone-type layer (e.g. vspec, where a branch's name is just its path segment, exactly like a leaf's).
+
 ### Revisions
 
 A revision is assigned to **every detected change**, regardless of whether it is breaking. It is the raw audit log of what happened.

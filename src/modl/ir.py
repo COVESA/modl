@@ -24,6 +24,21 @@ EnumValue
     ``kind: ENUM_VALUE`` on :class:`PropertyChanged` events.  Receives concept URIs, revisions,
     and contracts, but no bindings.
 
+Label uniqueness
+    ``label`` values live in two independent namespaces, mirroring GraphQL SDL:
+
+    - **Container namespace** (Entity + EnumerationSet): labels are globally unique against
+      each other, just as GraphQL ``type`` and ``enum`` names share one global namespace.
+    - **Member namespace** (Property + EnumValue): labels are unique only among siblings
+      sharing the same parent — just as GraphQL field names are scoped to their enclosing
+      type and enum value names are scoped to their enclosing enum.
+
+    The two namespaces are never compared against each other: an Entity and a Property may
+    share a label, since GraphQL never resolves a field by global name lookup either. This
+    lets languages without a separate standalone-type layer — e.g. vspec, where a branch's
+    name is just its path segment like a leaf's — avoid artificial renaming to dodge
+    collisions between unrelated branches and signals.
+
 Aspect
     Any named attribute of a model element that can change.  Every change is reported in the
     ``aspects`` dict.  The engine uses this dict together with the breaking-change config to
@@ -301,10 +316,18 @@ class DiffReport(BaseModel):
     def validate_structure(self, *, strict: bool = False) -> list[str]:
         """Check structural constraints across the report; return warning messages.
 
+        Label uniqueness is scoped to two independent namespaces, mirroring GraphQL SDL:
+
+        - Container names (``ENTITY`` + ``ENUMERATION_SET``, carried by :class:`EntityChanged`)
+          are globally unique against each other — like GraphQL named types (``type``/``enum``).
+        - Member names (``PROPERTY`` + ``ENUM_VALUE``, carried by :class:`PropertyChanged`) are
+          unique only among siblings sharing the same ``parent_label`` — like GraphQL fields and
+          enum values, which are scoped to their enclosing type. Member names are never compared
+          against container names or against members of a different parent.
+
         Detects:
-        - Duplicate events for the same label within the same kind.
-        - The same label appearing as both an entity event and a property event (cross-kind
-          duplicate), which would violate global label uniqueness.
+        - Duplicate entity/enumeration-set events for the same label.
+        - Duplicate property/enum-value events for the same ``(label, parent_label)`` pair.
 
         Raises :exc:`DiffReportValidationError` if *strict* is ``True`` and any warnings arise.
         """
@@ -324,13 +347,6 @@ class DiffReport(BaseModel):
                         f"Duplicate property event for label '{change.label}' under parent '{change.parent_label}'"
                     )
                 seen_properties.add(key)
-
-        # Cross-kind: same label used as both an entity and a property
-        cross_kind = seen_entities & {label for label, _ in seen_properties}
-        for label in sorted(cross_kind):
-            warnings.append(
-                f"Label '{label}' appears as both an entity event and a property event — labels must be globally unique"
-            )
 
         # ── Content cross-validation ──────────────────────────────────────────
         # Forward: every label in EntityChanged.content must have a standalone event.

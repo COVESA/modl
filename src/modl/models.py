@@ -24,6 +24,13 @@ class ElementKind(StrEnum):
       (one per instance when the parent entity declares instances; one singleton otherwise).
     - ``ENUMERATION_SET`` / ``ENUM_VALUE``: vocabulary elements (enums, units, code lists)
       that receive concept URIs, revisions and contracts but **no bindings**.
+
+    ``current_label`` uniqueness (see :class:`ConceptRow`) is scoped by kind into two
+    independent namespaces, mirroring GraphQL SDL: ``ENTITY`` + ``ENUMERATION_SET`` labels are
+    globally unique against each other (like GraphQL ``type``/``enum`` names), while
+    ``PROPERTY`` + ``ENUM_VALUE`` labels are unique only among siblings sharing the same
+    ``parent_uri`` (like GraphQL fields and enum values, scoped to their enclosing type). The two
+    namespaces are never compared against each other.
     """
 
     ENTITY = "ENTITY"
@@ -33,7 +40,11 @@ class ElementKind(StrEnum):
 
 
 class ConceptRow(BaseModel):
-    """One row of concepts.csv — the agreed meaning of a model element."""
+    """One row of concepts.csv — the agreed meaning of a model element.
+
+    ``current_label`` uniqueness is scoped by ``kind`` — see :class:`ElementKind` for the two
+    namespaces (container vs. member) and how they relate to ``parent_uri``.
+    """
 
     serial: int = Field(ge=0)
     concept_uri: str

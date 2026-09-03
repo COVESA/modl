@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from collections.abc import Sequence
 from pathlib import Path
 
 import pandas as pd
@@ -201,17 +202,44 @@ def validate_ledger(tables: dict[str, pd.DataFrame]) -> None:
             if invalid_kinds:
                 raise LedgerValidationError(f"[{name}] Invalid kind values: {sorted(invalid_kinds)}")
 
-            # current_label must be globally unique across all concepts
-            dup_mask = df["current_label"].duplicated(keep=False)
+            # current_label uniqueness is scoped to two independent namespaces, mirroring GraphQL
+            # SDL: named-type names (ENTITY + ENUMERATION_SET) are globally unique against each
+            # other, while field/enum-value names (PROPERTY + ENUM_VALUE) are unique only among
+            # siblings sharing the same parent_uri — never compared against the container namespace.
+            container_kinds = {ElementKind.ENTITY.value, ElementKind.ENUMERATION_SET.value}
+            member_kinds = {ElementKind.PROPERTY.value, ElementKind.ENUM_VALUE.value}
+
+            # Group A: ENTITY + ENUMERATION_SET — current_label globally unique across the group
+            container_df = df[df["kind"].isin(container_kinds)]
+            dup_mask = container_df["current_label"].duplicated(keep=False)
             if dup_mask.any():
                 msgs: list[str] = []
-                for label, group in df[dup_mask].groupby("current_label"):
+                for label, group in container_df[dup_mask].groupby("current_label"):
                     details = ", ".join(
                         f"concept_uri='{row['concept_uri']}' kind={row['kind']} parent_uri={row['parent_uri']!r}"
                         for _, row in group.iterrows()
                     )
                     msgs.append(f"  '{label}': {details}")
-                raise LedgerValidationError("[concepts] Duplicate current_label values:\n" + "\n".join(msgs))
+                raise LedgerValidationError(
+                    "[concepts] Duplicate current_label values among ENTITY/ENUMERATION_SET concepts:\n"
+                    + "\n".join(msgs)
+                )
+
+            # Group B: PROPERTY + ENUM_VALUE — current_label unique only within (parent_uri, current_label)
+            member_df = df[df["kind"].isin(member_kinds)]
+            dup_mask = member_df.duplicated(subset=["parent_uri", "current_label"], keep=False)
+            if dup_mask.any():
+                msgs = []
+                for (_parent_uri, label), group in member_df[dup_mask].groupby(["parent_uri", "current_label"]):
+                    details = ", ".join(
+                        f"concept_uri='{row['concept_uri']}' kind={row['kind']} parent_uri={row['parent_uri']!r}"
+                        for _, row in group.iterrows()
+                    )
+                    msgs.append(f"  '{label}': {details}")
+                raise LedgerValidationError(
+                    "[concepts] Duplicate current_label values among sibling PROPERTY/ENUM_VALUE concepts "
+                    "(same parent_uri):\n" + "\n".join(msgs)
+                )
 
             # ENTITY and ENUMERATION_SET must not have a parent_uri
             no_parent_kinds = {ElementKind.ENTITY.value, ElementKind.ENUMERATION_SET.value}
@@ -258,6 +286,34 @@ def validate_ledger(tables: dict[str, pd.DataFrame]) -> None:
             raise LedgerValidationError(
                 f"[{child_table}.{child_col}] References missing from [{parent_table}.{parent_col}]: {sorted(orphans)}"
             )
+
+    # Parent-kind consistency: a PROPERTY's parent_uri must resolve to an ENTITY concept, and an
+    # ENUM_VALUE's parent_uri must resolve to an ENUMERATION_SET concept. This is the safety net
+    # that makes label uniqueness safe to scope by parent_uri (Group B above) rather than globally:
+    # without it, a PROPERTY could silently attach to a same-named non-ENTITY concept.
+    concepts_df = tables["concepts"]
+    if not concepts_df.empty:
+        kind_by_uri = concepts_df.set_index("concept_uri")["kind"]
+        expected_parent_kind = {
+            ElementKind.PROPERTY.value: ElementKind.ENTITY.value,
+            ElementKind.ENUM_VALUE.value: ElementKind.ENUMERATION_SET.value,
+        }
+        for child_kind, expected_kind in expected_parent_kind.items():
+            children = concepts_df[(concepts_df["kind"] == child_kind) & concepts_df["parent_uri"].notna()]
+            if children.empty:
+                continue
+            actual_parent_kinds = children["parent_uri"].map(kind_by_uri)
+            bad = children[actual_parent_kinds != expected_kind]
+            if not bad.empty:
+                details = sorted(
+                    f"concept_uri='{row['concept_uri']}' parent_uri='{row['parent_uri']}' "
+                    f"(parent kind={kind_by_uri.get(row['parent_uri'], 'MISSING')!r})"
+                    for _, row in bad.iterrows()
+                )
+                raise LedgerValidationError(
+                    f"[concepts] {child_kind} concepts must have a parent_uri resolving to "
+                    f"an {expected_kind} concept: {details}"
+                )
 
     # Cross-concept consistency: each contract's revision must belong to the same concept
     contracts_df = tables["contracts"]
@@ -343,55 +399,88 @@ def write_ledger(tables: dict[str, pd.DataFrame], ledger_dir: Path) -> None:
 
 
 def validate_model_labels(
-    elements: list[tuple[str, str]],
+    elements: Sequence[tuple[str, str, str | None]],
     ledger_dir: Path,
 ) -> None:
     """Check that ``elements`` exactly matches the active concepts in the ledger at ``ledger_dir``.
 
     Reads and fully validates the four CSV files from ``ledger_dir`` before checking.
-    Each element is a ``(label, kind)`` pair drawn from the composed model.
+    Each element is a ``(label, kind, parent_label)`` triple drawn from the composed model.
+    ``parent_label`` must be ``None`` for ``ENTITY``/``ENUMERATION_SET`` elements (globally unique
+    labels) and the label of the immediate parent for ``PROPERTY``/``ENUM_VALUE`` elements (labels
+    scoped to their parent) — see the two label namespaces documented on
+    :class:`~modl.models.ElementKind`.
+
     Raises LedgerValidationError if:
 
-    - ``elements`` contains duplicate labels (indicates a corrupt or mismatched snapshot).
-    - Any label is absent from the active ledger concepts.
-    - Any active ledger concept is absent from ``elements``.
-    - Any ``kind`` does not match the ledger record for that label.
+    - ``elements`` contains a duplicate ``(label, parent_label)`` pair (indicates a corrupt or
+      mismatched snapshot).
+    - Any element's ``parent_label`` does not resolve to an active ledger concept.
+    - Any element is absent from the active ledger concepts, or vice versa.
+    - Any ``kind`` does not match the ledger record for that ``(label, parent_label)`` pair.
     """
     tables = read_ledger(ledger_dir)
+    concepts = tables["concepts"]
+    active = concepts[concepts["status"] == ElementStatus.ACTIVE]
 
-    # --- 1. Reject duplicate labels in input ---
-    seen: set[str] = set()
+    # --- 1. Reject duplicate (label, parent_label) pairs in input ---
+    seen: set[tuple[str, str | None]] = set()
     dupes: list[str] = []
-    for label, _ in elements:
-        if label in seen:
+    for label, _, parent_label in elements:
+        key = (label, parent_label)
+        if key in seen:
             dupes.append(label)
-        seen.add(label)
+        seen.add(key)
     if dupes:
         raise LedgerValidationError(f"Duplicate labels in input (expected unique model elements): {sorted(set(dupes))}")
 
-    # --- 2. One-to-one label census ---
-    concepts = tables["concepts"]
-    active = concepts[concepts["status"] == ElementStatus.ACTIVE]
-    active_labels: set[str] = set(active["current_label"])
-    input_labels: set[str] = {label for label, _ in elements}
+    # --- 2. Resolve each input parent_label to a parent_uri, so entries can be compared
+    # against the ledger's parent_uri-keyed concepts. ---
+    label_to_uri: dict[str, str] = dict(zip(active["current_label"], active["concept_uri"], strict=True))
 
-    only_in_input = input_labels - active_labels
-    only_in_ledger = active_labels - input_labels
+    input_index: dict[tuple[str, str | None], str] = {}
+    unresolved_parents: list[str] = []
+    for label, kind, parent_label in elements:
+        if parent_label is None:
+            input_index[(label, None)] = kind
+            continue
+        parent_uri = label_to_uri.get(parent_label)
+        if parent_uri is None:
+            unresolved_parents.append(f"'{label}' (parent_label='{parent_label}')")
+            continue
+        input_index[(label, parent_uri)] = kind
+    if unresolved_parents:
+        raise LedgerValidationError(
+            "Elements reference a parent_label not found among active ledger concepts: "
+            + ", ".join(sorted(unresolved_parents))
+        )
+
+    # --- 3. One-to-one census, scoped by (label, parent_uri) ---
+    active_index: dict[tuple[str, str | None], str] = {}
+    for _, row in active.iterrows():
+        parent_uri = row["parent_uri"]
+        parent_key = None if pd.isna(parent_uri) else parent_uri
+        active_index[(row["current_label"], parent_key)] = row["kind"]
+
+    input_keys = set(input_index)
+    active_keys = set(active_index)
+    only_in_input = input_keys - active_keys
+    only_in_ledger = active_keys - input_keys
 
     if only_in_input or only_in_ledger:
         parts: list[str] = []
         if only_in_input:
-            parts.append(f"labels not in ledger: {sorted(only_in_input)}")
+            parts.append(f"labels not in ledger: {sorted(label for label, _ in only_in_input)}")
         if only_in_ledger:
-            parts.append(f"active ledger labels not in input: {sorted(only_in_ledger)}")
+            parts.append(f"active ledger labels not in input: {sorted(label for label, _ in only_in_ledger)}")
         raise LedgerValidationError("Model/ledger label mismatch — " + "; ".join(parts))
 
-    # --- 3. Kind attestation for every matched label ---
-    ledger_index = active.set_index("current_label")
+    # --- 4. Kind attestation for every matched (label, parent_uri) ---
     mismatches: list[str] = []
-    for label, kind in elements:
-        row = ledger_index.loc[label]
-        if kind != row["kind"]:
-            mismatches.append(f"'{label}': kind {kind!r} != ledger {row['kind']!r}")
+    for key, kind in input_index.items():
+        label, _ = key
+        ledger_kind = active_index[key]
+        if kind != ledger_kind:
+            mismatches.append(f"'{label}': kind {kind!r} != ledger {ledger_kind!r}")
     if mismatches:
         raise LedgerValidationError("Model/ledger kind mismatch:\n" + "\n".join(f"  {m}" for m in mismatches))

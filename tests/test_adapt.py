@@ -346,6 +346,69 @@ class TestAnalyzeConceptAbsentInTarget:
         assert report.entries[0].concept_uri is None
 
 
+class TestAnalyzeSiblingScopedLabelCollision:
+    def _ledger_with_colliding_property_labels(self, ns: str = NS) -> dict:
+        """Two entities ('Left', 'Right') each own a PROPERTY labeled 'isOpen' — same label, different parents."""
+        ledger = empty_ledger()
+        import pandas as pd
+
+        ledger["concepts"] = pd.DataFrame(
+            {
+                "serial": [0, 1, 2, 3],
+                "concept_uri": [f"{ns}concepts/{i}" for i in range(4)],
+                "current_label": ["Left", "Right", "isOpen", "isOpen"],
+                "previous_labels": [None, None, None, None],
+                "kind": ["ENTITY", "ENTITY", "PROPERTY", "PROPERTY"],
+                "status": ["ACTIVE", "ACTIVE", "ACTIVE", "ACTIVE"],
+                "parent_uri": [None, None, f"{ns}concepts/0", f"{ns}concepts/1"],
+                "instances": [None, None, None, None],
+            }
+        )
+        ledger["revisions"] = pd.DataFrame(
+            {
+                "serial": [0, 1, 2, 3],
+                "concept_uri": [f"{ns}concepts/{i}" for i in range(4)],
+                "revision_uri": [f"{ns}revisions/{i}" for i in range(4)],
+                "previous_revision_uri": [None, None, None, None],
+                "status": ["ACTIVE", "ACTIVE", "ACTIVE", "ACTIVE"],
+            }
+        )
+        ledger["contracts"] = pd.DataFrame(
+            {
+                "serial": [0, 1, 2, 3],
+                "concept_uri": [f"{ns}concepts/{i}" for i in range(4)],
+                "contract_uri": [f"{ns}contracts/{i}" for i in range(4)],
+                "revision_uri": [f"{ns}revisions/{i}" for i in range(4)],
+                "status": ["ACTIVE", "ACTIVE", "ACTIVE", "ACTIVE"],
+            }
+        )
+        return ledger
+
+    def test_resolves_concept_uri_matching_parent(self) -> None:
+        """A property event resolves to the concept_uri under its own parent, not the sibling's."""
+        ledger = self._ledger_with_colliding_property_labels()
+        event = PropertyChanged(
+            label="isOpen",
+            parent_label="Left",
+            change_type=ChangeType.MODIFIED,
+            aspects={"description": {"_op": "modified", "_value": "new docs", "_previous": "old docs"}},
+        )
+        report = analyze(_report(event), _cfg(), _adapt_cfg(), "v11", "v8", newer_tables=ledger, older_tables=ledger)
+        assert report.entries[0].concept_uri == f"{NS}concepts/2"
+
+    def test_resolves_different_concept_uri_for_other_parent(self) -> None:
+        """The same label under a different parent resolves to the sibling's own concept_uri."""
+        ledger = self._ledger_with_colliding_property_labels()
+        event = PropertyChanged(
+            label="isOpen",
+            parent_label="Right",
+            change_type=ChangeType.MODIFIED,
+            aspects={"description": {"_op": "modified", "_value": "new docs", "_previous": "old docs"}},
+        )
+        report = analyze(_report(event), _cfg(), _adapt_cfg(), "v11", "v8", newer_tables=ledger, older_tables=ledger)
+        assert report.entries[0].concept_uri == f"{NS}concepts/3"
+
+
 class TestSummary:
     def test_summary_counts_correct(self) -> None:
         """Summary aggregation counts match per-entry categories."""
