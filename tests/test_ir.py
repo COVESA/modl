@@ -144,8 +144,14 @@ class TestEntityChanged:
                 change_type=ChangeType.MODIFIED,
                 aspects={"name": "NewVehicle"},
             )
+
+    def test_removed_empty_aspects(self) -> None:
         """REMOVED entity carries no aspects or content."""
-        event = EntityChanged(label="Vehicle.OldFeature", change_type=ChangeType.REMOVED)
+        event = EntityChanged(
+            label="Vehicle.OldFeature",
+            change_type=ChangeType.REMOVED,
+            previous_aspects={"type": "branch"},
+        )
         assert event.aspects == {}
         assert event.content == []
 
@@ -175,7 +181,12 @@ class TestEntityChanged:
     def test_renamed_from_on_removed_rejected(self) -> None:
         """renamed_from on REMOVED event fails validation."""
         with pytest.raises(ValidationError, match="renamed_from is only valid on MODIFIED events"):
-            EntityChanged(label="Vehicle", change_type=ChangeType.REMOVED, renamed_from="OldVehicle")
+            EntityChanged(
+                label="Vehicle",
+                change_type=ChangeType.REMOVED,
+                renamed_from="OldVehicle",
+                previous_aspects={"type": "branch"},
+            )
 
     def test_invalid_change_type_rejected(self) -> None:
         """Unrecognised change_type fails validation."""
@@ -202,14 +213,14 @@ class TestPropertyChanged:
         assert event.renamed_from is None
 
     def test_modified_delta(self) -> None:
-        """MODIFIED property carries only changed aspect keys."""
+        """MODIFIED property carries only changed aspect keys, wrapped with previous/newer values."""
         event = PropertyChanged(
             label="Vehicle.Speed",
             parent_label="Vehicle",
             change_type=ChangeType.MODIFIED,
-            aspects={"output_type": "Float"},
+            aspects={"output_type": {"_op": "modified", "_value": "Float", "_previous": "Integer"}},
         )
-        assert event.aspects == {"output_type": "Float"}
+        assert event.aspects == {"output_type": {"_op": "modified", "_value": "Float", "_previous": "Integer"}}
 
     def test_modified_with_rename(self) -> None:
         """MODIFIED property with rename sets renamed_from."""
@@ -222,11 +233,12 @@ class TestPropertyChanged:
         assert event.renamed_from == "Vehicle.Speed"
 
     def test_removed_empty_aspects(self) -> None:
-        """REMOVED property carries no aspects."""
+        """REMOVED property carries no aspects but must carry previous_aspects."""
         event = PropertyChanged(
             label="Vehicle.OldField",
             parent_label="Vehicle",
             change_type=ChangeType.REMOVED,
+            previous_aspects={"output_type": "Float"},
         )
         assert event.aspects == {}
 
@@ -397,8 +409,18 @@ class TestValidateStructure:
         """Two events for the same entity label produce a warning."""
         payload = {
             "changes": [
-                {"label": "Vehicle.Door", "kind": "ENTITY", "change_type": "REMOVED"},
-                {"label": "Vehicle.Door", "kind": "ENTITY", "change_type": "REMOVED"},
+                {
+                    "label": "Vehicle.Door",
+                    "kind": "ENTITY",
+                    "change_type": "REMOVED",
+                    "previous_aspects": {"type": "branch"},
+                },
+                {
+                    "label": "Vehicle.Door",
+                    "kind": "ENTITY",
+                    "change_type": "REMOVED",
+                    "previous_aspects": {"type": "branch"},
+                },
             ]
         }
         report = DiffReport.from_json(json.dumps(payload))
@@ -415,6 +437,7 @@ class TestValidateStructure:
                     "parent_label": "Vehicle",
                     "kind": "PROPERTY",
                     "change_type": "REMOVED",
+                    "previous_aspects": {"output_type": "Float"},
                 },
                 {
                     "label": "Vehicle.Speed",
@@ -434,8 +457,18 @@ class TestValidateStructure:
         """strict=True turns warnings into DiffReportValidationError."""
         payload = {
             "changes": [
-                {"label": "Vehicle", "kind": "ENTITY", "change_type": "REMOVED"},
-                {"label": "Vehicle", "kind": "ENTITY", "change_type": "REMOVED"},
+                {
+                    "label": "Vehicle",
+                    "kind": "ENTITY",
+                    "change_type": "REMOVED",
+                    "previous_aspects": {"type": "branch"},
+                },
+                {
+                    "label": "Vehicle",
+                    "kind": "ENTITY",
+                    "change_type": "REMOVED",
+                    "previous_aspects": {"type": "branch"},
+                },
             ]
         }
         report = DiffReport.from_json(json.dumps(payload))
@@ -451,12 +484,14 @@ class TestValidateStructure:
                     "parent_label": "Vehicle.Door",
                     "kind": "PROPERTY",
                     "change_type": "REMOVED",
+                    "previous_aspects": {"output_type": "Boolean"},
                 },
                 {
                     "label": "IsOpen",
                     "parent_label": "Vehicle.Window",
                     "kind": "PROPERTY",
                     "change_type": "REMOVED",
+                    "previous_aspects": {"output_type": "Boolean"},
                 },
             ]
         }
@@ -479,7 +514,10 @@ class TestValidateReportAspects:
                             "parent_label": "Vehicle",
                             "kind": "PROPERTY",
                             "change_type": "MODIFIED",
-                            "aspects": {"output_type": "Float", "unit": "mph"},
+                            "aspects": {
+                                "output_type": {"_op": "modified", "_value": "Float", "_previous": "Integer"},
+                                "unit": {"_op": "modified", "_value": "mph", "_previous": "km/h"},
+                            },
                         }
                     ]
                 }
@@ -499,7 +537,7 @@ class TestValidateReportAspects:
                             "parent_label": "Vehicle",
                             "kind": "PROPERTY",
                             "change_type": "MODIFIED",
-                            "aspects": {"unit": "mph"},
+                            "aspects": {"unit": {"_op": "modified", "_value": "mph", "_previous": "km/h"}},
                         }
                     ]
                 }
@@ -522,14 +560,14 @@ class TestValidateReportAspects:
                             "parent_label": "Vehicle",
                             "kind": "PROPERTY",
                             "change_type": "MODIFIED",
-                            "aspects": {"unit": "mph"},
+                            "aspects": {"unit": {"_op": "modified", "_value": "mph", "_previous": "km/h"}},
                         },
                         {
                             "label": "Vehicle.Mass",
                             "parent_label": "Vehicle",
                             "kind": "PROPERTY",
                             "change_type": "MODIFIED",
-                            "aspects": {"unit": "kg"},
+                            "aspects": {"unit": {"_op": "modified", "_value": "kg", "_previous": "g"}},
                         },
                     ]
                 }
@@ -551,7 +589,7 @@ class TestValidateReportAspects:
                             "parent_label": "Vehicle",
                             "kind": "PROPERTY",
                             "change_type": "MODIFIED",
-                            "aspects": {"unit": "mph"},
+                            "aspects": {"unit": {"_op": "modified", "_value": "mph", "_previous": "km/h"}},
                         }
                     ]
                 }
@@ -574,7 +612,7 @@ class TestValidateReportAspects:
                             "parent_label": "Vehicle",
                             "kind": "PROPERTY",
                             "change_type": "MODIFIED",
-                            "aspects": {"unit": "mph"},
+                            "aspects": {"unit": {"_op": "modified", "_value": "mph", "_previous": "km/h"}},
                         }
                     ]
                 }
@@ -596,7 +634,12 @@ class TestValidateReportAspects:
             json.dumps(
                 {
                     "changes": [
-                        {"label": "Vehicle", "kind": "ENTITY", "change_type": "REMOVED"},
+                        {
+                            "label": "Vehicle",
+                            "kind": "ENTITY",
+                            "change_type": "REMOVED",
+                            "previous_aspects": {"type": "branch"},
+                        },
                     ]
                 }
             )
@@ -615,7 +658,11 @@ class TestValidateReportAspects:
                             "parent_label": "Vehicle",
                             "kind": "PROPERTY",
                             "change_type": "MODIFIED",
-                            "aspects": {"unit": "DEG_C", "min": -40, "accuracy": 0.5},
+                            "aspects": {
+                                "unit": {"_op": "modified", "_value": "DEG_C", "_previous": "DEG_F"},
+                                "min": {"_op": "modified", "_value": -40, "_previous": -40.5},
+                                "accuracy": {"_op": "modified", "_value": 0.5, "_previous": 1.0},
+                            },
                         }
                     ]
                 }
@@ -721,7 +768,7 @@ class TestAspectOpsForEvent:
         event = EntityChanged(
             label="Vehicle",
             change_type=ChangeType.MODIFIED,
-            aspects={"type": "branch"},
+            aspects={"type": {"_op": "modified", "_value": "branch", "_previous": "leaf"}},
         )
         ops = _aspect_ops_for_event(event)
         assert ops["type"] == "modified"
@@ -732,7 +779,10 @@ class TestAspectOpsForEvent:
             label="Vehicle.Speed",
             parent_label="Vehicle",
             change_type=ChangeType.MODIFIED,
-            aspects={"unit": "mph", "description": {"_op": "modified", "_value": "text"}},
+            aspects={
+                "unit": {"_op": "modified", "_value": "mph", "_previous": "km/h"},
+                "description": {"_op": "modified", "_value": "text", "_previous": "old text"},
+            },
         )
         ops = _aspect_ops_for_event(event)
         assert ops["unit"] == "modified"
@@ -754,7 +804,7 @@ class TestStructuralKeys:
                             "parent_label": "Vehicle",
                             "kind": "PROPERTY",
                             "change_type": "MODIFIED",
-                            "aspects": {"output_type": "Float"},
+                            "aspects": {"output_type": {"_op": "modified", "_value": "Float", "_previous": "Int"}},
                         }
                     ]
                 }
@@ -842,7 +892,9 @@ class TestVocabularyKinds:
                             "label": "SpeedUnit",
                             "kind": "ENUMERATION_SET",
                             "change_type": "MODIFIED",
-                            "aspects": {"definition": "updated"},
+                            "aspects": {
+                                "definition": {"_op": "modified", "_value": "updated", "_previous": "original"}
+                            },
                         }
                     ]
                 }
@@ -862,7 +914,7 @@ class TestVocabularyKinds:
                             "parent_label": "SpeedUnit",
                             "kind": "ENUM_VALUE",
                             "change_type": "MODIFIED",
-                            "aspects": {"symbol": "km/h"},
+                            "aspects": {"symbol": {"_op": "modified", "_value": "km/h", "_previous": "kmh"}},
                         }
                     ]
                 }
@@ -994,7 +1046,7 @@ class TestValidateStructureContent:
                     label="Vehicle.Speed",
                     parent_label="Vehicle",
                     change_type=ChangeType.MODIFIED,
-                    aspects={"unit": "mph"},
+                    aspects={"unit": {"_op": "modified", "_value": "mph", "_previous": "km/h"}},
                 ),
             ]
         )
@@ -1010,7 +1062,7 @@ class TestValidateStructureContent:
                     label="Vehicle.Speed",
                     parent_label="Vehicle",
                     change_type=ChangeType.MODIFIED,
-                    aspects={"unit": "mph"},
+                    aspects={"unit": {"_op": "modified", "_value": "mph", "_previous": "km/h"}},
                 ),
             ]
         )
@@ -1076,11 +1128,12 @@ class TestPreviousAspects:
         assert event.previous_aspects == {}
 
     def test_previous_aspects_default_empty(self) -> None:
-        """previous_aspects defaults to an empty dict when not supplied."""
+        """previous_aspects defaults to an empty dict when not supplied (on non-REMOVED events)."""
         event = PropertyChanged(
             label="Vehicle.Speed",
             parent_label="Vehicle",
-            change_type=ChangeType.REMOVED,
+            change_type=ChangeType.MODIFIED,
+            aspects={"unit": {"_op": "modified", "_value": "mph", "_previous": "km/h"}},
         )
         assert event.previous_aspects == {}
 

@@ -18,10 +18,10 @@ from modl.ledger import (
 
 
 class TestEmptyLedger:
-    def test_returns_four_tables(self) -> None:
-        """Returns exactly the four expected table keys."""
+    def test_returns_five_tables(self) -> None:
+        """Returns exactly the five expected table keys."""
         ledger = empty_ledger()
-        assert set(ledger.keys()) == {"concepts", "revisions", "contracts", "bindings"}
+        assert set(ledger.keys()) == {"concepts", "revisions", "contracts", "bindings", "revision_aspects"}
 
     def test_tables_are_empty(self) -> None:
         """All tables start with zero rows."""
@@ -50,6 +50,13 @@ class TestEmptyLedger:
         ]
         assert list(ledger["contracts"].columns) == ["serial", "contract_uri", "concept_uri", "revision_uri", "status"]
         assert list(ledger["bindings"].columns) == ["serial", "binding_uri", "contract_uri", "instance_label", "status"]
+        assert list(ledger["revision_aspects"].columns) == [
+            "revision_uri",
+            "aspect_key",
+            "operation",
+            "previous_value",
+            "newer_value",
+        ]
 
     def test_empty_ledger_passes_validation(self) -> None:
         """Empty ledger satisfies all schema constraints."""
@@ -488,6 +495,156 @@ class TestValidateLedger:
             }
         )
         with pytest.raises(LedgerValidationError, match="Only PROPERTY concepts"):
+            validate_ledger(ledger)
+
+
+class TestRevisionAspectsValidation:
+    def _ledger_with_revision(self) -> dict[str, pd.DataFrame]:
+        ledger = empty_ledger()
+        ledger["concepts"] = pd.DataFrame(
+            {
+                "serial": [0],
+                "concept_uri": ["http://ns.example/concepts/0"],
+                "current_label": ["Vehicle.Speed"],
+                "previous_labels": [None],
+                "kind": ["PROPERTY"],
+                "status": ["ACTIVE"],
+                "parent_uri": [None],
+                "instances": [None],
+            }
+        )
+        ledger["revisions"] = pd.DataFrame(
+            {
+                "serial": [0],
+                "concept_uri": ["http://ns.example/concepts/0"],
+                "revision_uri": ["http://ns.example/revisions/0"],
+                "previous_revision_uri": [None],
+                "status": ["ACTIVE"],
+            }
+        )
+        return ledger
+
+    def test_valid_added_modified_removed_rows_pass(self) -> None:
+        """One row per operation, respecting nullability rules, passes validation."""
+        ledger = self._ledger_with_revision()
+        ledger["revision_aspects"] = pd.DataFrame(
+            {
+                "revision_uri": [
+                    "http://ns.example/revisions/0",
+                    "http://ns.example/revisions/0",
+                    "http://ns.example/revisions/0",
+                ],
+                "aspect_key": ["unit", "output_type", "description"],
+                "operation": ["added", "modified", "removed"],
+                "previous_value": [None, '"Integer"', '"old text"'],
+                "newer_value": ['"km/h"', '"Float"', None],
+            }
+        )
+        validate_ledger(ledger)  # must not raise
+
+    def test_duplicate_revision_aspect_key_raises(self) -> None:
+        """Duplicate (revision_uri, aspect_key) pair triggers validation failure."""
+        ledger = self._ledger_with_revision()
+        ledger["revision_aspects"] = pd.DataFrame(
+            {
+                "revision_uri": ["http://ns.example/revisions/0", "http://ns.example/revisions/0"],
+                "aspect_key": ["unit", "unit"],
+                "operation": ["added", "added"],
+                "previous_value": [None, None],
+                "newer_value": ['"km/h"', '"km/h"'],
+            }
+        )
+        with pytest.raises(LedgerValidationError, match="Duplicate"):
+            validate_ledger(ledger)
+
+    def test_invalid_operation_raises(self) -> None:
+        """Operation value outside {added, modified, removed} triggers validation failure."""
+        ledger = self._ledger_with_revision()
+        ledger["revision_aspects"] = pd.DataFrame(
+            {
+                "revision_uri": ["http://ns.example/revisions/0"],
+                "aspect_key": ["unit"],
+                "operation": ["renamed"],
+                "previous_value": [None],
+                "newer_value": ['"km/h"'],
+            }
+        )
+        with pytest.raises(LedgerValidationError, match="Invalid operation"):
+            validate_ledger(ledger)
+
+    def test_modified_with_null_previous_value_raises(self) -> None:
+        """operation='modified' with null previous_value triggers validation failure."""
+        ledger = self._ledger_with_revision()
+        ledger["revision_aspects"] = pd.DataFrame(
+            {
+                "revision_uri": ["http://ns.example/revisions/0"],
+                "aspect_key": ["unit"],
+                "operation": ["modified"],
+                "previous_value": [None],
+                "newer_value": ['"km/h"'],
+            }
+        )
+        with pytest.raises(LedgerValidationError):
+            validate_ledger(ledger)
+
+    def test_modified_with_null_newer_value_raises(self) -> None:
+        """operation='modified' with null newer_value triggers validation failure."""
+        ledger = self._ledger_with_revision()
+        ledger["revision_aspects"] = pd.DataFrame(
+            {
+                "revision_uri": ["http://ns.example/revisions/0"],
+                "aspect_key": ["unit"],
+                "operation": ["modified"],
+                "previous_value": ['"mph"'],
+                "newer_value": [None],
+            }
+        )
+        with pytest.raises(LedgerValidationError):
+            validate_ledger(ledger)
+
+    def test_added_with_non_null_previous_value_raises(self) -> None:
+        """operation='added' with non-null previous_value triggers validation failure."""
+        ledger = self._ledger_with_revision()
+        ledger["revision_aspects"] = pd.DataFrame(
+            {
+                "revision_uri": ["http://ns.example/revisions/0"],
+                "aspect_key": ["unit"],
+                "operation": ["added"],
+                "previous_value": ['"mph"'],
+                "newer_value": ['"km/h"'],
+            }
+        )
+        with pytest.raises(LedgerValidationError):
+            validate_ledger(ledger)
+
+    def test_removed_with_non_null_newer_value_raises(self) -> None:
+        """operation='removed' with non-null newer_value triggers validation failure."""
+        ledger = self._ledger_with_revision()
+        ledger["revision_aspects"] = pd.DataFrame(
+            {
+                "revision_uri": ["http://ns.example/revisions/0"],
+                "aspect_key": ["unit"],
+                "operation": ["removed"],
+                "previous_value": ['"mph"'],
+                "newer_value": ['"km/h"'],
+            }
+        )
+        with pytest.raises(LedgerValidationError):
+            validate_ledger(ledger)
+
+    def test_fk_violation_on_revision_uri_raises(self) -> None:
+        """revision_aspects row referencing a non-existent revision_uri triggers validation failure."""
+        ledger = self._ledger_with_revision()
+        ledger["revision_aspects"] = pd.DataFrame(
+            {
+                "revision_uri": ["http://ns.example/revisions/zz"],  # does not exist
+                "aspect_key": ["unit"],
+                "operation": ["added"],
+                "previous_value": [None],
+                "newer_value": ['"km/h"'],
+            }
+        )
+        with pytest.raises(LedgerValidationError, match="References missing"):
             validate_ledger(ledger)
 
 

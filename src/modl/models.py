@@ -1,8 +1,9 @@
-"""Pydantic row models and shared enums for the four ledger tables."""
+"""Pydantic row models and shared enums for the five ledger tables."""
 
 from enum import StrEnum
+from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class ElementStatus(StrEnum):
@@ -78,3 +79,32 @@ class BindingRow(BaseModel):
     contract_uri: str
     instance_label: str | None = None
     status: ElementStatus
+
+
+class RevisionAspectRow(BaseModel):
+    """One row of revision_aspects.csv — the old/new value of one aspect changed by a revision.
+
+    Identity is the composite key ``(revision_uri, aspect_key)`` — no row has its own serial or
+    URI, since nothing else in the ledger references an individual aspect change by identity.
+    ``operation`` is ``"added"``, ``"modified"``, or ``"removed"``: ``"modified"`` requires both
+    ``previous_value`` and ``newer_value`` to be non-null; ``"added"`` forbids ``previous_value``;
+    ``"removed"`` forbids ``newer_value``.
+    """
+
+    revision_uri: str
+    aspect_key: str
+    operation: str
+    previous_value: Any | None = None
+    newer_value: Any | None = None
+
+    @model_validator(mode="after")
+    def _validate_operation_nullability(self) -> "RevisionAspectRow":
+        if self.operation not in {"added", "modified", "removed"}:
+            raise ValueError(f"operation must be 'added', 'modified', or 'removed', got {self.operation!r}")
+        if self.operation == "modified" and (self.previous_value is None or self.newer_value is None):
+            raise ValueError("operation='modified' requires both previous_value and newer_value to be non-null")
+        if self.operation == "added" and self.previous_value is not None:
+            raise ValueError("operation='added' requires previous_value to be null")
+        if self.operation == "removed" and self.newer_value is not None:
+            raise ValueError("operation='removed' requires newer_value to be null")
+        return self

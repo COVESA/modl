@@ -1,6 +1,6 @@
 # Test Suite — What Is Tested Where
 
-220 tests across 7 files. Run with `uv run pytest`.
+397 tests across 7 files. Run with `uv run pytest`.
 
 ---
 
@@ -8,13 +8,13 @@
 
 | File | Tests | What it covers |
 |---|---|---|
-| `test_modl.py` | 1 | Package version importable |
-| `test_config.py` | 27 | Namespace validation, breaking-change classification |
-| `test_ir.py` | 51 | IR parsing, structural validation, aspect-key checking |
-| `test_ledger.py` | 39 | CSV schema, FK integrity, base-36 encoding, read/write |
-| `test_models.py` | 18 | Pydantic row models for the four ledger tables |
-| `test_sync.py` | 71 | Sync engine — every event type, every edge case |
-| `test_cli.py` | 12 | CLI surface — flags, error handling, clean exit messages |
+| `test_config.py` | 66 | Namespace validation, breaking-change classification |
+| `test_ir.py` | 88 | IR parsing, structural validation, aspect-key checking, mandatory MODIFIED value wrapping, mandatory REMOVED `previous_aspects` |
+| `test_ledger.py` | 64 | CSV schema, FK integrity, base-36 encoding, read/write, `revision_aspects` row validation |
+| `test_models.py` | 25 | Pydantic row models for the five ledger tables |
+| `test_sync.py` | 91 | Sync engine — every event type, every edge case, `revision_aspects` row minting |
+| `test_adapt.py` | 45 | `modl adapt` compatibility-plan engine |
+| `test_cli.py` | 18 | CLI surface — flags, error handling, clean exit messages |
 
 ---
 
@@ -46,8 +46,9 @@ Also covers YAML loading and rejection of unknown top-level config keys.
 
 ### `TestEntityChanged` / `TestPropertyChanged`
 Each event type's payload rules:
-- ADDED must not carry `content` (entity) or `renamed_from`
-- REMOVED must not carry `aspects`, `content`, or `renamed_from`
+- ADDED must not carry `content` (entity), `renamed_from`, or `previous_aspects`
+- MODIFIED aspect values must be wrapped as `{"_op": ..., "_value": ..., "_previous": ...}` — plain unwrapped values are rejected
+- REMOVED must not carry `aspects`, `content`, or `renamed_from`; `previous_aspects` is mandatory and must be non-empty
 - `renamed_from` is only valid on MODIFIED
 - `PropertyChanged` requires `parent_label`
 
@@ -83,16 +84,19 @@ Data-level constraints enforced by `validate_ledger()`:
 | Binding on non-PROPERTY concept | ENTITY or ENUMERATION_SET concept linked to a binding |
 
 ### `TestValidateLedgerDir`
-Directory-level checks: must be a directory, exactly the four CSVs, nothing else.
+Directory-level checks: must be a directory, exactly the five CSVs, nothing else.
 
 ### `TestReadWriteLedger` / `TestNextSerial` / `TestB36`
 Round-trip write → read → validate; `next_serial()` returns `max + 1`; `b36encode()` covers 0, 1–9, a–z, multi-digit values.
+
+### `TestRevisionAspectsValidation`
+Row-level constraints on `revision_aspects.csv`: valid ADDED/MODIFIED/REMOVED rows pass; duplicate `(revision_uri, aspect_key)` raises; invalid `operation` raises; `modified` rows with a null `previous_value` or `newer_value` raise; `added` rows with a non-null `previous_value` raise; `removed` rows with a non-null `newer_value` raise; FK violation on `revision_uri` raises.
 
 ---
 
 ## test_models.py
 
-Pydantic row models for the four tables (`ConceptRow`, `RevisionRow`, `ContractRow`, `BindingRow`). Checks required fields, defaults, value constraints (negative serial rejected), and vocabulary kinds (`ENUMERATION_SET`, `ENUM_VALUE`).
+Pydantic row models for the five tables (`ConceptRow`, `RevisionRow`, `ContractRow`, `BindingRow`, `RevisionAspectRow`). Checks required fields, defaults, value constraints (negative serial rejected), vocabulary kinds (`ENUMERATION_SET`, `ENUM_VALUE`), and `RevisionAspectRow`'s operation/value invariants (`modified` requires both values non-null, `added` forbids `previous_value`, `removed` forbids `newer_value`).
 
 ---
 
@@ -150,7 +154,15 @@ The largest file. Each test class exercises one engine path.
 
 **`TestRoundTrip`** — `sync → write_ledger → read_ledger → validate_ledger` round-trips without data loss. Two successive syncs accumulate rows correctly.
 
-**`TestThreeSuccessiveSyncs`** — three syncs produce gap-free, duplicate-free, monotonically-increasing serials across all four tables. A concept from run 1 can be looked up and broken in run 3 after an unrelated run 2.
+**`TestThreeSuccessiveSyncs`** — three syncs produce gap-free, duplicate-free, monotonically-increasing serials across all five tables. A concept from run 1 can be looked up and broken in run 3 after an unrelated run 2.
+
+### `revision_aspects`
+
+**`TestRevisionAspectsAdded`** — ADDED events mint one `revision_aspects` row per aspect key, `operation="added"`.
+
+**`TestRevisionAspectsModified`** — MODIFIED events mint one row per changed aspect key with both `previous_value` and `newer_value` populated; `instances_added`/`instances_removed` are excluded.
+
+**`TestRevisionAspectsRemoved`** — REMOVED events mint one row per key in `previous_aspects`, `operation="removed"`, `newer_value` null.
 
 ---
 

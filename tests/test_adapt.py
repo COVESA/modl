@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 import yaml
 from click.testing import CliRunner
+from pydantic import ValidationError
 
 from modl.adapt import (
     AdaptDirection,
@@ -277,16 +279,14 @@ class TestAnalyzeFieldAdded:
 
 
 class TestAnalyzeFieldRemoved:
-    def test_removed_field_unsupported_when_no_previous_aspects(self) -> None:
-        """REMOVED field in newer_to_older is UNSUPPORTED."""
-        event = PropertyChanged(
-            label="ChargingSession.duration",
-            parent_label="ChargingSession",
-            change_type=ChangeType.REMOVED,
-        )
-        report = analyze(_report(event), _cfg(), _adapt_cfg(), "v11", "v8")
-        entry = report.entries[0]
-        assert entry.category == CompatibilityCategory.UNSUPPORTED
+    def test_removed_field_requires_previous_aspects(self) -> None:
+        """REMOVED PropertyChanged event without previous_aspects fails validation."""
+        with pytest.raises(ValidationError, match="previous_aspects"):
+            PropertyChanged(
+                label="ChargingSession.duration",
+                parent_label="ChargingSession",
+                change_type=ChangeType.REMOVED,
+            )
 
     def test_removed_field_always_unsupported_newer_to_older(self) -> None:
         """REMOVED field in newer_to_older is always UNSUPPORTED — no auto-emission of default steps."""
@@ -311,7 +311,9 @@ class TestAnalyzeNonBreakingChange:
             label="ChargingSession.duration",
             parent_label="ChargingSession",
             change_type=ChangeType.MODIFIED,
-            aspects={"description": "updated description"},
+            aspects={
+                "description": {"_op": "modified", "_value": "updated description", "_previous": "old description"}
+            },
         )
         cfg = _cfg(property_={"description": False})
         report = analyze(_report(event), cfg, _adapt_cfg(), "v11", "v8")
@@ -327,6 +329,7 @@ class TestAnalyzeConceptAbsentInTarget:
             label="ChargingSession.unknownField",
             parent_label="ChargingSession",
             change_type=ChangeType.REMOVED,
+            previous_aspects={"output_type": "Int"},
         )
         report = analyze(_report(event), _cfg(), _adapt_cfg(), "v11", "v8")
         assert report.entries[0].concept_uri is None
@@ -337,6 +340,7 @@ class TestAnalyzeConceptAbsentInTarget:
             label="ChargingSession.unknownField",
             parent_label="ChargingSession",
             change_type=ChangeType.REMOVED,
+            previous_aspects={"output_type": "Int"},
         )
         report = analyze(_report(event), _cfg(), _adapt_cfg(), "v11", "v8", newer_tables={}, older_tables={})
         assert report.entries[0].concept_uri is None
@@ -507,6 +511,7 @@ class TestAnalyzeOlderToNewer:
             label="ChargingSession.duration",
             parent_label="ChargingSession",
             change_type=ChangeType.REMOVED,
+            previous_aspects={"output_type": "Int"},
         )
         report = analyze(_report(event), _cfg(), _adapt_cfg(), "v11", "v8", direction=AdaptDirection.OLDER_TO_NEWER)
         entry = report.entries[0]

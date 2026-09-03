@@ -1,8 +1,9 @@
-"""Sync engine — processes a DiffReport and updates the four ledger tables.
+"""Sync engine — processes a DiffReport and updates the five ledger tables.
 
 The engine iterates the ordered list of change events from a :class:`~modl.ir.DiffReport`,
 determines whether each change is breaking according to the :class:`~modl.config.BreakingChangeConfig`,
-and writes the appropriate rows to the concepts, revisions, contracts, and bindings tables.
+and writes the appropriate rows to the concepts, revisions, contracts, bindings, and
+revision_aspects tables.
 
 Usage::
 
@@ -19,7 +20,7 @@ from typing import Any
 import pandas as pd
 
 from modl.config import BreakingChangeConfig, ModelMetadata
-from modl.ir import ChangeType, DiffReport, EntityChanged, PropertyChanged, _aspect_ops_for_event
+from modl.ir import ChangeType, DiffReport, EntityChanged, PropertyChanged, _aspect_ops_for_event, extract_op_full
 from modl.ledger import b36encode, next_serial
 from modl.models import ElementKind, ElementStatus
 
@@ -33,6 +34,9 @@ _INSTANCES_ADDED_KEY = "instances_added"
 _INSTANCES_REMOVED_KEY = "instances_removed"
 # Aspect key for full instance list on ADDED entity events
 _INSTANCES_SNAPSHOT_KEY = "instances"
+# Structural instance keys carry list payloads, not single old/new scalar values — they are
+# tracked via the concepts.instances column instead of revision_aspects.
+_INSTANCE_STRUCTURAL_KEYS = frozenset({_INSTANCES_SNAPSHOT_KEY, _INSTANCES_ADDED_KEY, _INSTANCES_REMOVED_KEY})
 
 
 class SyncError(Exception):
@@ -150,6 +154,7 @@ def _entity_added(
     revision_uri = _mint_revision(
         tables, metadata, concept_uri=concept_uri, prev_revision_uri=None, status=ElementStatus.ACTIVE
     )
+    _record_added_aspects(tables, revision_uri, event.aspects)
     _mint_contract(tables, metadata, concept_uri=concept_uri, revision_uri=revision_uri)
 
     log.info(
@@ -220,6 +225,7 @@ def _entity_modified(
     revision_uri = _mint_revision(
         tables, metadata, concept_uri=concept_uri, prev_revision_uri=prev_rev_uri, status=ElementStatus.ACTIVE
     )
+    _record_modified_aspects(tables, revision_uri, event.aspects)
 
     if breaking:
         # New entity contract
@@ -294,9 +300,10 @@ def _entity_removed(
 
     prev_rev_uri = _active_revision_uri(tables, concept_uri)
     _supersede_revision(tables, concept_uri)
-    _mint_revision(
+    revision_uri = _mint_revision(
         tables, metadata, concept_uri=concept_uri, prev_revision_uri=prev_rev_uri, status=ElementStatus.REMOVED
     )
+    _record_removed_aspects(tables, revision_uri, event.previous_aspects)
 
     # All active contracts → REMOVED
     _set_contract_status(tables, concept_uri, ElementStatus.REMOVED)
@@ -336,6 +343,7 @@ def _property_added(
     revision_uri = _mint_revision(
         tables, metadata, concept_uri=concept_uri, prev_revision_uri=None, status=ElementStatus.ACTIVE
     )
+    _record_added_aspects(tables, revision_uri, event.aspects)
     contract_uri = _mint_contract(tables, metadata, concept_uri=concept_uri, revision_uri=revision_uri)
 
     # Mint bindings for PROPERTY kind only
@@ -370,6 +378,7 @@ def _property_modified(
     revision_uri = _mint_revision(
         tables, metadata, concept_uri=concept_uri, prev_revision_uri=prev_rev_uri, status=ElementStatus.ACTIVE
     )
+    _record_modified_aspects(tables, revision_uri, event.aspects)
 
     if breaking:
         _supersede_contract(tables, concept_uri)
@@ -408,9 +417,10 @@ def _property_removed(
 
     prev_rev_uri = _active_revision_uri(tables, concept_uri)
     _supersede_revision(tables, concept_uri)
-    _mint_revision(
+    revision_uri = _mint_revision(
         tables, metadata, concept_uri=concept_uri, prev_revision_uri=prev_rev_uri, status=ElementStatus.REMOVED
     )
+    _record_removed_aspects(tables, revision_uri, event.previous_aspects)
 
     # All active contracts → REMOVED
     _set_contract_status(tables, concept_uri, ElementStatus.REMOVED)
@@ -604,6 +614,66 @@ def _mint_bindings_for_instances(
             _mint_binding(tables, metadata, contract_uri=contract_uri, instance_label=inst)
     else:
         _mint_binding(tables, metadata, contract_uri=contract_uri, instance_label=None)
+
+
+def _serialize_aspect_value(value: Any) -> str | None:
+    """JSON-encode an aspect value for storage in revision_aspects; None passes through unchanged."""
+    if value is None:
+        return None
+    return json.dumps(value)
+
+
+def _append_revision_aspect_row(
+    tables: dict[str, pd.DataFrame],
+    revision_uri: str,
+    aspect_key: str,
+    operation: str,
+    previous_value: Any,
+    newer_value: Any,
+) -> None:
+    """Mint one revision_aspects row for a single changed aspect key."""
+    new_row: dict[str, Any] = {
+        "revision_uri": revision_uri,
+        "aspect_key": aspect_key,
+        "operation": operation,
+        "previous_value": _serialize_aspect_value(previous_value),
+        "newer_value": _serialize_aspect_value(newer_value),
+    }
+    tables["revision_aspects"] = pd.concat([tables["revision_aspects"], pd.DataFrame([new_row])], ignore_index=True)
+
+
+def _record_added_aspects(tables: dict[str, pd.DataFrame], revision_uri: str, aspects: dict[str, Any]) -> None:
+    """Mint one revision_aspects row per key in an ADDED event's initial-state snapshot."""
+    for key, value in aspects.items():
+        if key in _INSTANCE_STRUCTURAL_KEYS:
+            continue
+        _, new_val, _ = extract_op_full(value)
+        _append_revision_aspect_row(
+            tables, revision_uri, aspect_key=key, operation="added", previous_value=None, newer_value=new_val
+        )
+
+
+def _record_modified_aspects(tables: dict[str, pd.DataFrame], revision_uri: str, aspects: dict[str, Any]) -> None:
+    """Mint one revision_aspects row per key in a MODIFIED event's aspect delta."""
+    for key, value in aspects.items():
+        if key in _INSTANCE_STRUCTURAL_KEYS:
+            continue
+        op, new_val, prev_val = extract_op_full(value)
+        _append_revision_aspect_row(
+            tables, revision_uri, aspect_key=key, operation=op, previous_value=prev_val, newer_value=new_val
+        )
+
+
+def _record_removed_aspects(
+    tables: dict[str, pd.DataFrame], revision_uri: str, previous_aspects: dict[str, Any]
+) -> None:
+    """Mint one revision_aspects row per key in a REMOVED event's prior-state snapshot."""
+    for key, value in previous_aspects.items():
+        if key in _INSTANCE_STRUCTURAL_KEYS:
+            continue
+        _append_revision_aspect_row(
+            tables, revision_uri, aspect_key=key, operation="removed", previous_value=value, newer_value=None
+        )
 
 
 # ── Mutation helpers ──────────────────────────────────────────────────────────

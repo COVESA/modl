@@ -1,4 +1,4 @@
-"""Ledger I/O, schema validation, and ID minting for the four ledger CSV tables."""
+"""Ledger I/O, schema validation, and ID minting for the five ledger CSV tables."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from modl.models import ElementKind, ElementStatus
 
 # ── Schema constants ──────────────────────────────────────────────────────────
 
-TABLES = ("concepts", "revisions", "contracts", "bindings")
+TABLES = ("concepts", "revisions", "contracts", "bindings", "revision_aspects")
 
 EXPECTED_COLUMNS: dict[str, list[str]] = {
     "concepts": [
@@ -29,6 +29,7 @@ EXPECTED_COLUMNS: dict[str, list[str]] = {
     "revisions": ["serial", "revision_uri", "concept_uri", "previous_revision_uri", "status"],
     "contracts": ["serial", "contract_uri", "concept_uri", "revision_uri", "status"],
     "bindings": ["serial", "binding_uri", "contract_uri", "instance_label", "status"],
+    "revision_aspects": ["revision_uri", "aspect_key", "operation", "previous_value", "newer_value"],
 }
 
 UNIQUE_COLUMNS: dict[str, list[str]] = {
@@ -36,6 +37,11 @@ UNIQUE_COLUMNS: dict[str, list[str]] = {
     "revisions": ["serial", "revision_uri"],
     "contracts": ["serial", "contract_uri"],
     "bindings": ["serial", "binding_uri"],
+}
+
+# Tables with no own serial/URI — identity is the composite key below instead.
+COMPOSITE_KEY_COLUMNS: dict[str, list[str]] = {
+    "revision_aspects": ["revision_uri", "aspect_key"],
 }
 
 # (child_table, child_column, parent_table, parent_column)
@@ -46,10 +52,12 @@ FK_CONSTRAINTS: list[tuple[str, str, str, str]] = [
     ("contracts", "concept_uri", "concepts", "concept_uri"),
     ("contracts", "revision_uri", "revisions", "revision_uri"),
     ("bindings", "contract_uri", "contracts", "contract_uri"),
+    ("revision_aspects", "revision_uri", "revisions", "revision_uri"),
 ]
 
 VALID_STATUSES = {s.value for s in ElementStatus}
 VALID_KINDS = {k.value for k in ElementKind}
+VALID_REVISION_ASPECT_OPERATIONS = {"added", "modified", "removed"}
 
 # Required (non-nullable) columns per table — previous_revision_uri and instance_label are nullable
 REQUIRED_COLUMNS: dict[str, list[str]] = {
@@ -57,6 +65,7 @@ REQUIRED_COLUMNS: dict[str, list[str]] = {
     "revisions": ["serial", "concept_uri", "revision_uri", "status"],
     "contracts": ["serial", "concept_uri", "contract_uri", "revision_uri", "status"],
     "bindings": ["serial", "contract_uri", "binding_uri", "status"],
+    "revision_aspects": ["revision_uri", "aspect_key", "operation"],
 }
 
 # ── Exception ─────────────────────────────────────────────────────────────────
@@ -93,7 +102,7 @@ def b36decode(s: str) -> int:
 
 
 def empty_ledger() -> dict[str, pd.DataFrame]:
-    """Return four empty DataFrames with the correct columns for each ledger table."""
+    """Return five empty DataFrames with the correct columns for each ledger table."""
     return {name: pd.DataFrame(columns=cols) for name, cols in EXPECTED_COLUMNS.items()}
 
 
@@ -124,6 +133,39 @@ def validate_ledger(tables: dict[str, pd.DataFrame]) -> None:
         for col in REQUIRED_COLUMNS[name]:
             if df[col].isnull().any():
                 raise LedgerValidationError(f"[{name}] Column '{col}' contains null values")
+
+        # revision_aspects has no own serial/URI — identity is the composite key, and value
+        # nullability is governed by 'operation' rather than a single required-columns check.
+        if name in COMPOSITE_KEY_COLUMNS:
+            key_cols = COMPOSITE_KEY_COLUMNS[name]
+            if df.duplicated(subset=key_cols).any():
+                bad = df[df.duplicated(subset=key_cols)][key_cols].values.tolist()
+                raise LedgerValidationError(f"[{name}] Duplicate {tuple(key_cols)} pairs: {bad}")
+
+            invalid_ops = set(df["operation"].dropna().unique()) - VALID_REVISION_ASPECT_OPERATIONS
+            if invalid_ops:
+                raise LedgerValidationError(f"[{name}] Invalid operation values: {sorted(invalid_ops)}")
+
+            bad_modified = df[
+                (df["operation"] == "modified") & (df["previous_value"].isnull() | df["newer_value"].isnull())
+            ]
+            if not bad_modified.empty:
+                bad = bad_modified[key_cols].values.tolist()
+                raise LedgerValidationError(
+                    f"[{name}] operation='modified' rows must have non-null previous_value and newer_value: {bad}"
+                )
+
+            bad_added = df[(df["operation"] == "added") & df["previous_value"].notna()]
+            if not bad_added.empty:
+                bad = bad_added[key_cols].values.tolist()
+                raise LedgerValidationError(f"[{name}] operation='added' rows must have null previous_value: {bad}")
+
+            bad_removed = df[(df["operation"] == "removed") & df["newer_value"].notna()]
+            if not bad_removed.empty:
+                bad = bad_removed[key_cols].values.tolist()
+                raise LedgerValidationError(f"[{name}] operation='removed' rows must have null newer_value: {bad}")
+
+            continue  # no serial/URI/status columns to validate below
 
         # Serial must be non-negative
         if (df["serial"] < 0).any():
@@ -261,7 +303,7 @@ def next_serial(table: pd.DataFrame) -> int:
 
 
 def validate_ledger_dir(ledger_dir: Path) -> None:
-    """Validate that an existing directory contains exactly the four expected ledger CSV files and nothing else."""
+    """Validate that an existing directory contains exactly the five expected ledger CSV files and nothing else."""
     if not ledger_dir.is_dir():
         raise LedgerValidationError(f"Ledger path is not a directory: {ledger_dir}")
     expected = {f"{name}.csv" for name in TABLES}
@@ -275,7 +317,7 @@ def validate_ledger_dir(ledger_dir: Path) -> None:
 
 
 def read_ledger(ledger_dir: Path) -> dict[str, pd.DataFrame]:
-    """Read the four ledger CSVs from a directory, validating both directory contents and table schemas."""
+    """Read the five ledger CSVs from a directory, validating both directory contents and table schemas."""
     validate_ledger_dir(ledger_dir)
     tables: dict[str, pd.DataFrame] = {}
     for name in TABLES:
@@ -285,9 +327,9 @@ def read_ledger(ledger_dir: Path) -> dict[str, pd.DataFrame]:
 
 
 def write_ledger(tables: dict[str, pd.DataFrame], ledger_dir: Path) -> None:
-    """Write the four ledger DataFrames to CSV files in the given directory.
+    """Write the five ledger DataFrames to CSV files in the given directory.
 
-    All four files are written to a temporary directory on the same filesystem first,
+    All five files are written to a temporary directory on the same filesystem first,
     then atomically renamed into place.  A crash or disk-full error during writing
     leaves any pre-existing ledger intact.
     """

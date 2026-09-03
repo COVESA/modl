@@ -185,31 +185,33 @@ In both cases, child property **contracts are never changed** by an instance-lis
 
 The table below shows which rows `modl sync` creates or updates for each type of change event, given the breaking-change classification configured by the user.
 
-| Event | concepts | revisions | contracts | bindings |
-|---|---|---|---|---|
-| ENTITY `ADDED` | new row | new row | new row (initial contract) | — |
-| ENTITY `MODIFIED`, non-breaking (no instance change) | update `current_label` if renamed | new row | — (unchanged) | — |
-| ENTITY `MODIFIED`, non-breaking (instances changed) | update `current_label` if renamed | new row | — (unchanged) | added instances → new bindings on existing child contracts; removed instances → bindings marked REMOVED |
-| ENTITY `MODIFIED`, breaking (non-instance) | update `current_label` if renamed | new row | new row | — |
-| ENTITY `MODIFIED`, breaking (instances changed) | update `current_label` if renamed | new row | new row (entity only) | added instances → new bindings on existing child contracts; removed instances → bindings marked REMOVED |
-| ENTITY `REMOVED` | status → REMOVED | new row | status → REMOVED | status → REMOVED for child property bindings (via child REMOVED events) |
-| Property `ADDED` | new row | new row | new row (initial contract) | new binding per instance; one singleton if no instances |
-| Property `MODIFIED`, non-breaking | update `current_label` if renamed | new row | — (unchanged) | — |
-| Property `MODIFIED`, breaking | update `current_label` if renamed | new row | new row | new bindings anchored to new contract (old bindings superseded) |
-| Property `REMOVED` | status → REMOVED | new row | status → REMOVED | status → REMOVED |
-| `ENUMERATION_SET` `ADDED` | new row | new row | new row (initial contract) | — |
-| `ENUMERATION_SET` `MODIFIED` | update `current_label` if renamed | new row | new row if breaking, unchanged if not | — |
-| `ENUMERATION_SET` `REMOVED` | status → REMOVED | new row | status → REMOVED | — |
-| `ENUM_VALUE` `ADDED` | new row | new row | new row (initial contract) | — |
-| `ENUM_VALUE` `MODIFIED` | update `current_label` if renamed | new row | new row if breaking, unchanged if not | — |
-| `ENUM_VALUE` `REMOVED` | status → REMOVED | new row | status → REMOVED | — |
+| Event | concepts | revisions | contracts | bindings | revision_aspects |
+|---|---|---|---|---|---|
+| ENTITY `ADDED` | new row | new row | new row (initial contract) | — | one row per aspect key excluding `instances`, `added` |
+| ENTITY `MODIFIED`, non-breaking (no instance change) | update `current_label` if renamed | new row | — (unchanged) | — | one row per changed aspect key |
+| ENTITY `MODIFIED`, non-breaking (instances changed) | update `current_label` if renamed | new row | — (unchanged) | added instances → new bindings on existing child contracts; removed instances → bindings marked REMOVED | one row per changed aspect key (excludes instance keys) |
+| ENTITY `MODIFIED`, breaking (non-instance) | update `current_label` if renamed | new row | new row | — | one row per changed aspect key |
+| ENTITY `MODIFIED`, breaking (instances changed) | update `current_label` if renamed | new row | new row (entity only) | added instances → new bindings on existing child contracts; removed instances → bindings marked REMOVED | one row per changed aspect key (excludes instance keys) |
+| ENTITY `REMOVED` | status → REMOVED | new row | status → REMOVED | status → REMOVED for child property bindings (via child REMOVED events) | one row per prior-state aspect key, `removed` |
+| Property `ADDED` | new row | new row | new row (initial contract) | new binding per instance; one singleton if no instances | one row per aspect key, `added` |
+| Property `MODIFIED`, non-breaking | update `current_label` if renamed | new row | — (unchanged) | — | one row per changed aspect key |
+| Property `MODIFIED`, breaking | update `current_label` if renamed | new row | new row | new bindings anchored to new contract (old bindings superseded) | one row per changed aspect key |
+| Property `REMOVED` | status → REMOVED | new row | status → REMOVED | status → REMOVED | one row per prior-state aspect key, `removed` |
+| `ENUMERATION_SET` `ADDED` | new row | new row | new row (initial contract) | — | one row per aspect key, `added` |
+| `ENUMERATION_SET` `MODIFIED` | update `current_label` if renamed | new row | new row if breaking, unchanged if not | — | one row per changed aspect key |
+| `ENUMERATION_SET` `REMOVED` | status → REMOVED | new row | status → REMOVED | — | one row per prior-state aspect key, `removed` |
+| `ENUM_VALUE` `ADDED` | new row | new row | new row (initial contract) | — | one row per aspect key, `added` |
+| `ENUM_VALUE` `MODIFIED` | update `current_label` if renamed | new row | new row if breaking, unchanged if not | — | one row per changed aspect key |
+| `ENUM_VALUE` `REMOVED` | status → REMOVED | new row | status → REMOVED | — | one row per prior-state aspect key, `removed` |
 
 Key observations:
 - Every event produces a revision — the revision log is unconditional and unfiltered.
+- Every event also produces one `revision_aspects` row per changed aspect key (excluding the instance-list keys `instances`, `instances_added`, `instances_removed` — those are tracked via `concepts.instances` instead) — `ADDED` events record `operation="added"`, `MODIFIED` events record the wrapped `_op`, and `REMOVED` events record `operation="removed"` from `previous_aspects`.
 - A contract is only created or superseded when a change is classified as breaking by the config. Non-breaking changes leave the active contract untouched.
 - An instance-list change on an entity **never** creates or supersedes child property contracts — only bindings are affected. Added instances gain new bindings on the existing child contract; removed instances have their bindings marked REMOVED.
 - A rename never changes the concept URI. It updates `current_label` and appends the old label to `previous_labels` in the concept row.
 - `ENUMERATION_SET` and `ENUM_VALUE` events follow the same revision and contract rules as `ENTITY` and `PROPERTY` respectively, but **never produce bindings** regardless of configuration.
+- An `ENTITY`/`ENUMERATION_SET` `REMOVED` event requires every existing child `PROPERTY`/`ENUM_VALUE` concept to also have an explicit `REMOVED` event in the **same** diff report. `modl sync` aborts with an error (no ledger write) if any child concept is missing its `REMOVED` event.
 
 ## The Ledger Tables
 
@@ -264,6 +266,16 @@ The `kind` column records the structural kind of the concept permanently. Only `
 
 The third row is a **singleton binding** — `Battery.StateOfCharge` whose parent has no instances. `instance_label` is null; the binding still provides a stable, versioned identity for the runtime path.
 
+### `revision_aspects.csv`
+
+| revision_uri | aspect_key | operation | previous_value | newer_value |
+|---|---|---|---|---|
+| `http://namespace.example/revisions/2v` | output_type | modified | `"Int"` | `"Float"` |
+| `http://namespace.example/revisions/2v` | unit | added | *(null)* | `"km/h"` |
+| `http://namespace.example/revisions/1l` | description | removed | `"legacy field"` | *(null)* |
+
+Unlike the other four tables, `revision_aspects` rows have **no serial or URI** — identity is the composite key `(revision_uri, aspect_key)`, since nothing external ever references an individual row. `previous_value` and `newer_value` are JSON-encoded so any value type round-trips unambiguously. `operation` mirrors the `_op` of the source aspect (`added`, `modified`, or `removed`); `previous_value` is null for `added` rows and `newer_value` is null for `removed` rows.
+
 ### Table relationships
 
 ```mermaid
@@ -271,6 +283,7 @@ erDiagram
     concepts ||--o{ revisions : "tracked by"
     concepts ||--o{ contracts : "realized as"
     revisions ||--o{ contracts : "triggers"
+    revisions ||--o{ revision_aspects : "records changes in"
     contracts ||--o{ bindings : "expanded into"
 
     concepts {
@@ -302,6 +315,13 @@ erDiagram
         string instance_label
         string status
     }
+    revision_aspects {
+        string revision_uri FK
+        string aspect_key
+        string operation
+        string previous_value
+        string newer_value
+    }
 ```
 
 
@@ -320,10 +340,10 @@ modl sync --ledger-dir PATH --model-metadata PATH --breaking-aspects PATH [--dif
 | Option | Description |
 |---|---|
 | `-d`, `--diff-report` | Path to the diff report JSON file (optional). Omit to initialise an empty ledger. |
-| `-o`, `--ledger-dir` | Directory where the four ledger CSV files are read from and written to. |
+| `-o`, `--ledger-dir` | Directory where the five ledger CSV files are read from and written to. |
 | `-m`, `--model-metadata` | Path to the model metadata YAML file (`name`, `id`, `preferred_prefix`). |
 | `-b`, `--breaking-aspects` | Path to the breaking aspects config YAML file. |
-| `-n`, `--dry-run` | Preview what would change without writing anything to disk. Exits with code `1` if changes would be made. |
+| `-n`, `--dry-run` | Preview what would change without writing anything to disk. Exits with code `0` regardless of whether changes would have been made (a non-zero exit still occurs for unrelated errors, e.g. invalid config/diff-report, a sync error, or `--strict` warnings). |
 | `-s`, `--strict` | Treat aspect keys in the diff report that are not declared in the config as errors instead of warnings. |
 
 #### Model metadata file format
@@ -398,7 +418,8 @@ Each change event covers either an **entity** (container, object type, branch) o
 |---|---|
 | `kind` | `ENTITY`, `PROPERTY`, `ENUMERATION_SET`, or `ENUM_VALUE` |
 | `change_type` | `ADDED`, `REMOVED`, or `MODIFIED` |
-| `aspects` | On `ADDED`: full initial-state snapshot. On `MODIFIED`: delta of changed keys only. Absent on `REMOVED`. |
+| `aspects` | On `ADDED`: full initial-state snapshot. On `MODIFIED`: delta of changed keys only, each value wrapped as `{"_op": "modified", "_value": <new>, "_previous": <old>}` — plain unwrapped values are not accepted. Absent/empty on `REMOVED`. |
+| `previous_aspects` | **Mandatory and non-empty on `REMOVED`** — the full prior-state snapshot being removed. Absent on `ADDED` and `MODIFIED`. |
 | `renamed_from` | Previous label when the element was renamed (`MODIFIED` only). |
 | `parent_label` | Required for `PROPERTY` — the label of the owning entity. |
 | `content` | `ENTITY` `MODIFIED` only — list of `{label, change_type}` for children that changed. Evaluated against `properties.added`/`properties.removed` config keys; must be consistent with standalone child events in the same report. |
@@ -647,7 +668,7 @@ Only entries classified as `projection_compatible`, `deterministic_transform`, `
 **Without `--output-dir`** — a compact plain-text summary is printed to stdout:
 
 ```
-Compatibility: v11 → v8  (3 changes)
+Compatibility: v11 → v8  [newer→older]  (3 changes)
 
   breaking — no adapter (1):
     - Vehicle.power  [field_removed]
@@ -790,7 +811,7 @@ On the first run, the ledger does not exist yet. `modl sync` creates it. For a f
 modl sync --ledger-dir ledger/ --model-metadata metadata.yaml --breaking-aspects breaking.yaml --diff-report initial_diff.json
 ```
 
-Persist (e.g., release) the four generated CSV files (`concepts.csv`, `revisions.csv`, `contracts.csv`, `bindings.csv`) alongside your model.
+Persist (e.g., release) the five generated CSV files (`concepts.csv`, `revisions.csv`, `contracts.csv`, `bindings.csv`, `revision_aspects.csv`) alongside your model.
 
 ### 7. Sync on every subsequent release
 
@@ -827,16 +848,17 @@ See [here](CONTRIBUTING.md) if you would like to contribute.
 
 This section documents the rationale behind key design decisions and the alternatives that were considered and rejected. It serves as a reference when the design is challenged.
 
-### Why four tables?
+### Why five tables?
 
-One could argue that concepts and contracts are sufficient: concepts capture identity, contracts capture the data contract. This is true only if what constitutes a breaking change is known a priori and applies uniformly to all downstream consumers. In practice, different teams have different definitions of "breaking". The four-table split reflects this:
+One could argue that concepts and contracts are sufficient: concepts capture identity, contracts capture the data contract. This is true only if what constitutes a breaking change is known a priori and applies uniformly to all downstream consumers. In practice, different teams have different definitions of "breaking". The five-table split reflects this:
 
 - **concepts** — stable identity; what a thing *is*, regardless of how it changes
 - **revisions** — a complete, unfiltered audit log of every detected change; does not judge whether a change is breaking
 - **contracts** — derived from revisions using a user-configurable set of essential attributes; two rows share a contract only if nothing essential to *that project's* definition of "breaking" changed
 - **bindings** — some modeling languages define entity instances (e.g., `Door: [Left, Right]`), which expand fields into multiple individually addressable runtime paths; bindings assign a stable identity to each such path
+- **revision_aspects** — a detailed audit trail of exactly which aspect keys changed on each revision, and their old/new values; separated from `revisions` because a revision is a single unconditional event while the aspects it touched are a variable-length, key-value breakdown of that event
 
-Merging revisions and contracts would either force a single global breaking-change policy or lose the audit trail. Merging bindings into contracts would require contracts to know about instance expansion, coupling two independent concepts.
+Merging revisions and contracts would either force a single global breaking-change policy or lose the audit trail. Merging bindings into contracts would require contracts to know about instance expansion, coupling two independent concepts. Merging revision_aspects into revisions would require a wide, sparse schema (one column per possible aspect key) instead of a normalized key-value table.
 
 ### Why URIs as identifiers?
 

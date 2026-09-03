@@ -44,16 +44,34 @@ def _report(*changes) -> DiffReport:
     return DiffReport(changes=list(changes))
 
 
+_INSTANCE_STRUCTURAL_KEYS = {"instances_added", "instances_removed", "instances"}
+
+
+def _wrap_modified_aspects(aspects: dict) -> dict:
+    """Wrap plain aspect values as {"_op": "modified", "_value": ..., "_previous": ...} for MODIFIED events."""
+    wrapped = {}
+    for key, value in aspects.items():
+        if key in _INSTANCE_STRUCTURAL_KEYS:
+            wrapped[key] = value
+        else:
+            wrapped[key] = {"_op": "modified", "_value": value, "_previous": f"old_{key}"}
+    return wrapped
+
+
 def _entity_added(label: str, kind: ElementKind = ElementKind.ENTITY, **aspects) -> EntityChanged:
     return EntityChanged(label=label, kind=kind, change_type=ChangeType.ADDED, aspects=dict(aspects))
 
 
 def _entity_modified(label: str, renamed_from: str | None = None, **aspects) -> EntityChanged:
-    return EntityChanged(label=label, change_type=ChangeType.MODIFIED, renamed_from=renamed_from, aspects=dict(aspects))
+    return EntityChanged(
+        label=label, change_type=ChangeType.MODIFIED, renamed_from=renamed_from, aspects=_wrap_modified_aspects(aspects)
+    )
 
 
-def _entity_removed(label: str) -> EntityChanged:
-    return EntityChanged(label=label, change_type=ChangeType.REMOVED)
+def _entity_removed(label: str, **previous_aspects) -> EntityChanged:
+    return EntityChanged(
+        label=label, change_type=ChangeType.REMOVED, previous_aspects=previous_aspects or {"type": "branch"}
+    )
 
 
 def _prop_added(label: str, parent: str, kind: ElementKind = ElementKind.PROPERTY, **aspects) -> PropertyChanged:
@@ -68,12 +86,17 @@ def _prop_modified(label: str, parent: str, renamed_from: str | None = None, **a
         parent_label=parent,
         change_type=ChangeType.MODIFIED,
         renamed_from=renamed_from,
-        aspects=dict(aspects),
+        aspects=_wrap_modified_aspects(aspects),
     )
 
 
-def _prop_removed(label: str, parent: str) -> PropertyChanged:
-    return PropertyChanged(label=label, parent_label=parent, change_type=ChangeType.REMOVED)
+def _prop_removed(label: str, parent: str, **previous_aspects) -> PropertyChanged:
+    return PropertyChanged(
+        label=label,
+        parent_label=parent,
+        change_type=ChangeType.REMOVED,
+        previous_aspects=previous_aspects or {"output_type": "Float"},
+    )
 
 
 # ── URI helpers ───────────────────────────────────────────────────────────────
@@ -691,6 +714,112 @@ class TestRoundTrip:
         assert len(prop_variants) == 2
         assert (prop_variants["status"] == ElementStatus.SUPERSEDED).sum() == 1
         assert (prop_variants["status"] == ElementStatus.ACTIVE).sum() == 1
+
+
+# ── revision_aspects ──────────────────────────────────────────────────────────
+
+
+class TestRevisionAspectsAdded:
+    def test_entity_added_mints_one_row_per_aspect(self) -> None:
+        """ADDED entity event mints one revision_aspects row per aspect key with operation='added'."""
+        cfg = _cfg()
+        report = _report(_entity_added("Vehicle", type="branch"))
+        tables = sync(empty_ledger(), report, _meta(), cfg)
+        rows = tables["revision_aspects"]
+        assert len(rows) == 1
+        row = rows.iloc[0]
+        assert row["aspect_key"] == "type"
+        assert row["operation"] == "added"
+        assert row["previous_value"] is None
+        assert json.loads(row["newer_value"]) == "branch"
+
+    def test_property_added_mints_one_row_per_aspect(self) -> None:
+        """ADDED property event mints one revision_aspects row per aspect key with operation='added'."""
+        cfg = _cfg()
+        report = _report(
+            _entity_added("Vehicle"),
+            _prop_added("Vehicle.Speed", parent="Vehicle", output_type="Float", unit="km/h"),
+        )
+        tables = sync(empty_ledger(), report, _meta(), cfg)
+        rows = tables["revision_aspects"]
+        assert len(rows) == 2
+        assert set(rows["aspect_key"]) == {"output_type", "unit"}
+        assert (rows["operation"] == "added").all()
+        assert rows["previous_value"].isnull().all()
+
+
+class TestRevisionAspectsModified:
+    def test_entity_modified_mints_row_with_previous_and_newer(self) -> None:
+        """MODIFIED entity event mints a revision_aspects row with both previous_value and newer_value."""
+        cfg = _cfg()
+        report = _report(_entity_added("Vehicle", type="branch"), _entity_modified("Vehicle", type="object"))
+        tables = sync(empty_ledger(), report, _meta(), cfg)
+        rows = tables["revision_aspects"]
+        modified_rows = rows[rows["operation"] == "modified"]
+        assert len(modified_rows) == 1
+        row = modified_rows.iloc[0]
+        assert row["aspect_key"] == "type"
+        assert json.loads(row["previous_value"]) == "old_type"
+        assert json.loads(row["newer_value"]) == "object"
+
+    def test_property_modified_mints_row_with_previous_and_newer(self) -> None:
+        """MODIFIED property event mints a revision_aspects row with both previous_value and newer_value."""
+        cfg = _cfg(property={"output_type": True})
+        report = _report(
+            _entity_added("Vehicle"),
+            _prop_added("Vehicle.Speed", parent="Vehicle", output_type="Int"),
+            _prop_modified("Vehicle.Speed", parent="Vehicle", output_type="Float"),
+        )
+        tables = sync(empty_ledger(), report, _meta(), cfg)
+        rows = tables["revision_aspects"]
+        modified_rows = rows[rows["operation"] == "modified"]
+        assert len(modified_rows) == 1
+        row = modified_rows.iloc[0]
+        assert row["aspect_key"] == "output_type"
+        assert json.loads(row["previous_value"]) == "old_output_type"
+        assert json.loads(row["newer_value"]) == "Float"
+
+    def test_instance_structural_keys_excluded(self) -> None:
+        """instances_added / instances_removed keys are excluded from revision_aspects rows."""
+        cfg = _cfg(entity={"instances.added": True})
+        report = _report(
+            _entity_added("Door", instances=["Left", "Right"]),
+            _entity_modified("Door", instances_added=["Center"]),
+        )
+        tables = sync(empty_ledger(), report, _meta(), cfg)
+        assert len(tables["revision_aspects"]) == 0
+
+
+class TestRevisionAspectsRemoved:
+    def test_entity_removed_mints_row_per_previous_aspect(self) -> None:
+        """REMOVED entity event mints one revision_aspects row per previous_aspects key with operation='removed'."""
+        cfg = _cfg()
+        report = _report(_entity_added("Vehicle", type="branch"), _entity_removed("Vehicle", type="branch"))
+        tables = sync(empty_ledger(), report, _meta(), cfg)
+        rows = tables["revision_aspects"]
+        removed_rows = rows[rows["operation"] == "removed"]
+        assert len(removed_rows) == 1
+        row = removed_rows.iloc[0]
+        assert row["aspect_key"] == "type"
+        assert json.loads(row["previous_value"]) == "branch"
+        assert row["newer_value"] is None
+
+    def test_property_removed_mints_row_per_previous_aspect(self) -> None:
+        """REMOVED property event mints one revision_aspects row per previous_aspects key with operation='removed'."""
+        cfg = _cfg()
+        report = _report(
+            _entity_added("Vehicle"),
+            _prop_added("Vehicle.Speed", parent="Vehicle", output_type="Float"),
+            _prop_removed("Vehicle.Speed", parent="Vehicle", output_type="Float"),
+        )
+        tables = sync(empty_ledger(), report, _meta(), cfg)
+        rows = tables["revision_aspects"]
+        removed_rows = rows[rows["operation"] == "removed"]
+        assert len(removed_rows) == 1
+        row = removed_rows.iloc[0]
+        assert row["aspect_key"] == "output_type"
+        assert json.loads(row["previous_value"]) == "Float"
+        assert row["newer_value"] is None
 
 
 # ── Second rename ─────────────────────────────────────────────────────────────

@@ -45,19 +45,23 @@ Aspect
 
 Operation annotation (MODIFIED events only)
 --------------------------------------------
-By default, a key present in a MODIFIED event's ``aspects`` dict is treated as having the
-operation ``"modified"`` (value changed).  Adapters that can determine the exact operation
-may wrap the value to be more specific::
+Every key present in a MODIFIED event's ``aspects`` dict must be wrapped to declare its
+operation and carry both the new and previous value where applicable::
 
     "aspects": {
-        "unit": {"_op": "added", "_value": "mph"},       # key appeared for the first time
-        "accuracy": {"_op": "removed"},                  # key was dropped
-        "description": {"_op": "modified", "_value": "new text"}  # value changed
+        "unit": {"_op": "added", "_value": "mph"},                                  # key appeared for the first time
+        "accuracy": {"_op": "removed", "_previous": "0.1"},                         # key was dropped
+        "description": {"_op": "modified", "_value": "new text", "_previous": "old text"}  # value changed
     }
 
-Plain values (not wrapped) remain valid and default to op ``"modified"``.  This is an
-opt-in extension — adapters that cannot distinguish "appeared" from "changed" emit plain
-values and the engine evaluates them against the ``modified`` rule only.
+When ``"_op"`` is ``"modified"``, both ``"_value"`` and ``"_previous"`` are **mandatory**
+and must be non-null — adapters must always be able to report what an aspect changed from
+and to.  Plain (unwrapped) values are no longer valid on MODIFIED events, since they cannot
+carry a previous value.  ``"_op": "added"`` must omit (or null) ``"_previous"``; ``"_op":
+"removed"`` must omit (or null) ``"_value"``.
+
+Each MODIFIED aspect entry is recorded as a row in the ``revision_aspects`` ledger table,
+keyed by ``(revision_uri, aspect_key)``, alongside the operation and both values.
 
 Reserved aspect keys
 --------------------
@@ -128,14 +132,15 @@ def extract_op(value: Any) -> tuple[str, Any]:
 def extract_op_full(value: Any) -> tuple[str, Any, Any]:
     """Return ``(op, new_value, prev_value)`` from an aspect value.
 
-    Extends :func:`extract_op` by also extracting the optional ``"_previous"`` key
-    that language adapters may include on ``MODIFIED`` events to carry the old value::
+    Extends :func:`extract_op` by also extracting the ``"_previous"`` key that carries the
+    old value on ``MODIFIED``-op aspects::
 
         "unit": {"_op": "modified", "_value": "minute", "_previous": "second"}
 
-    Plain (non-annotated) values return ``("modified", value, None)``.
-    ``"_previous"`` is ``None`` when absent — adapters that cannot determine the old
-    value simply omit it and the compatibility engine degrades gracefully.
+    Plain (non-annotated) values return ``("modified", value, None)``.  On MODIFIED-type
+    events, :class:`EntityChanged` and :class:`PropertyChanged` reject aspects whose derived
+    op is ``"modified"`` unless both ``new_value`` and ``prev_value`` are non-null — so plain
+    values (which never carry a previous value) are only valid on ADDED-type events.
     """
     if isinstance(value, dict) and "_op" in value:
         op: str = value["_op"]
@@ -143,6 +148,32 @@ def extract_op_full(value: Any) -> tuple[str, Any, Any]:
         prev_val = value.get("_previous")
         return op, new_val, prev_val
     return "modified", value, None
+
+
+def _validate_modified_aspect_values(aspects: dict[str, Any]) -> None:
+    """Enforce per-key operation/value invariants on a MODIFIED event's ``aspects`` dict.
+
+    - ``"modified"``: both the new and previous values must be present (non-null).
+    - ``"added"``: the previous value must be absent (null).
+    - ``"removed"``: the new value must be absent (null).
+
+    Structural instance-delta keys (``instances_added``/``instances_removed``) carry list
+    payloads rather than single old/new values and are exempt from this check.
+    """
+    for key, value in aspects.items():
+        if key in _INSTANCE_DELTA_KEYS:
+            continue
+        op, new_val, prev_val = extract_op_full(value)
+        if op == "modified" and (new_val is None or prev_val is None):
+            raise ValueError(
+                f"Aspect '{key}' has op 'modified' but is missing '_value' and/or '_previous'. "
+                "MODIFIED events must wrap every changed aspect as "
+                '{"_op": "modified", "_value": <new>, "_previous": <old>}.'
+            )
+        if op == "added" and prev_val is not None:
+            raise ValueError(f"Aspect '{key}' has op 'added' but specifies a '_previous' value.")
+        if op == "removed" and new_val is not None:
+            raise ValueError(f"Aspect '{key}' has op 'removed' but specifies a '_value'.")
 
 
 def extract_aspect_ops(aspects: dict[str, Any]) -> dict[str, str]:
@@ -165,11 +196,13 @@ class EntityChanged(BaseModel):
     - ``ADDED``: ``aspects`` holds the full initial-state snapshot.  Use ``instances`` to
       carry the list of instance labels if applicable.  ``content`` and ``renamed_from``
       must be absent.
-    - ``MODIFIED``: ``aspects`` carries only the keys that changed (delta).  Use
-      ``instances_added`` and ``instances_removed`` (not ``instances``) to report instance
-      list changes.  ``renamed_from`` is set when the element was renamed.  ``content``
+    - ``MODIFIED``: ``aspects`` carries only the keys that changed (delta), with every entry
+      wrapped to declare its operation and, for ``"modified"`` keys, both the new and previous
+      value.  Use ``instances_added`` and ``instances_removed`` (not ``instances``) to report
+      instance list changes.  ``renamed_from`` is set when the element was renamed.  ``content``
       lists the children that changed.
-    - ``REMOVED``: ``aspects`` and ``content`` must be empty; ``renamed_from`` must be absent.
+    - ``REMOVED``: ``aspects`` and ``content`` must be empty; ``renamed_from`` must be absent;
+      ``previous_aspects`` must carry the full prior-state snapshot.
 
     The key ``"name"`` is forbidden in ``aspects`` — use ``renamed_from`` for renames.
     """
@@ -190,6 +223,8 @@ class EntityChanged(BaseModel):
             raise ValueError("ADDED events must not carry previous_aspects — there is no prior state")
         if self.change_type == ChangeType.REMOVED and (self.aspects or self.content):
             raise ValueError("REMOVED events must not carry aspects or content")
+        if self.change_type == ChangeType.REMOVED and not self.previous_aspects:
+            raise ValueError("REMOVED events must carry previous_aspects — the prior state being removed")
         if self.change_type == ChangeType.ADDED and self.content:
             raise ValueError("ADDED events must not carry content")
         if self.renamed_from is not None and self.change_type != ChangeType.MODIFIED:
@@ -201,6 +236,8 @@ class EntityChanged(BaseModel):
                 "The key 'instances' is not valid on MODIFIED entity events. "
                 "Use 'instances_added' and 'instances_removed' to report directional instance changes."
             )
+        if self.change_type == ChangeType.MODIFIED:
+            _validate_modified_aspect_values(self.aspects)
         return self
 
 
@@ -215,9 +252,11 @@ class PropertyChanged(BaseModel):
 
     - ``ADDED``: ``aspects`` holds the full initial-state snapshot.  ``renamed_from`` must
       be absent.
-    - ``MODIFIED``: ``aspects`` carries only the keys that changed (delta).  ``renamed_from``
-      is set when the element was renamed.
-    - ``REMOVED``: ``aspects`` must be empty; ``renamed_from`` must be absent.
+    - ``MODIFIED``: ``aspects`` carries only the keys that changed (delta), with every entry
+      wrapped to declare its operation and, for ``"modified"`` keys, both the new and previous
+      value.  ``renamed_from`` is set when the element was renamed.
+    - ``REMOVED``: ``aspects`` must be empty; ``renamed_from`` must be absent; ``previous_aspects``
+      must carry the full prior-state snapshot.
 
     The key ``"name"`` is forbidden in ``aspects`` — use ``renamed_from`` for renames.
     """
@@ -238,10 +277,14 @@ class PropertyChanged(BaseModel):
             raise ValueError("ADDED events must not carry previous_aspects — there is no prior state")
         if self.change_type == ChangeType.REMOVED and self.aspects:
             raise ValueError("REMOVED events must not carry aspects")
+        if self.change_type == ChangeType.REMOVED and not self.previous_aspects:
+            raise ValueError("REMOVED events must carry previous_aspects — the prior state being removed")
         if self.renamed_from is not None and self.change_type != ChangeType.MODIFIED:
             raise ValueError("renamed_from is only valid on MODIFIED events")
         if "name" in self.aspects:
             raise ValueError("The key 'name' is forbidden in aspects. Signal renames via the 'renamed_from' field.")
+        if self.change_type == ChangeType.MODIFIED:
+            _validate_modified_aspect_values(self.aspects)
         return self
 
 

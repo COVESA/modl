@@ -1,7 +1,15 @@
 import pytest
 from pydantic import ValidationError
 
-from modl.models import BindingRow, ConceptRow, ContractRow, ElementKind, ElementStatus, RevisionRow
+from modl.models import (
+    BindingRow,
+    ConceptRow,
+    ContractRow,
+    ElementKind,
+    ElementStatus,
+    RevisionAspectRow,
+    RevisionRow,
+)
 
 
 class TestElementStatus:
@@ -193,3 +201,89 @@ class TestBindingRow:
             status=ElementStatus.ACTIVE,
         )
         assert row.instance_label is None
+
+
+class TestRevisionAspectRow:
+    def test_valid_added_row(self) -> None:
+        """operation='added' requires previous_value to be null."""
+        row = RevisionAspectRow(
+            revision_uri="ns-r:0",
+            aspect_key="unit",
+            operation="added",
+            newer_value="km/h",
+        )
+        assert row.previous_value is None
+        assert row.newer_value == "km/h"
+
+    def test_valid_modified_row(self) -> None:
+        """operation='modified' requires both previous_value and newer_value to be non-null."""
+        row = RevisionAspectRow(
+            revision_uri="ns-r:0",
+            aspect_key="unit",
+            operation="modified",
+            previous_value="km/h",
+            newer_value="mph",
+        )
+        assert row.previous_value == "km/h"
+        assert row.newer_value == "mph"
+
+    def test_valid_removed_row(self) -> None:
+        """operation='removed' requires newer_value to be null."""
+        row = RevisionAspectRow(
+            revision_uri="ns-r:0",
+            aspect_key="unit",
+            operation="removed",
+            previous_value="km/h",
+        )
+        assert row.newer_value is None
+
+    def test_invalid_operation_rejected(self) -> None:
+        """Operation outside {added, modified, removed} fails validation."""
+        with pytest.raises(ValidationError, match="operation"):
+            RevisionAspectRow(
+                revision_uri="ns-r:0",
+                aspect_key="unit",
+                operation="renamed",  # ty: ignore[invalid-argument-type]
+            )
+
+    def test_modified_with_null_previous_value_rejected(self) -> None:
+        """operation='modified' with null previous_value fails validation."""
+        with pytest.raises(ValidationError, match="previous_value"):
+            RevisionAspectRow(
+                revision_uri="ns-r:0",
+                aspect_key="unit",
+                operation="modified",
+                newer_value="mph",
+            )
+
+    def test_modified_with_null_newer_value_rejected(self) -> None:
+        """operation='modified' with null newer_value fails validation."""
+        with pytest.raises(ValidationError, match="newer_value"):
+            RevisionAspectRow(
+                revision_uri="ns-r:0",
+                aspect_key="unit",
+                operation="modified",
+                previous_value="km/h",
+            )
+
+    def test_added_with_non_null_previous_value_rejected(self) -> None:
+        """operation='added' with non-null previous_value fails validation."""
+        with pytest.raises(ValidationError, match="previous_value"):
+            RevisionAspectRow(
+                revision_uri="ns-r:0",
+                aspect_key="unit",
+                operation="added",
+                previous_value="km/h",
+                newer_value="mph",
+            )
+
+    def test_removed_with_non_null_newer_value_rejected(self) -> None:
+        """operation='removed' with non-null newer_value fails validation."""
+        with pytest.raises(ValidationError, match="newer_value"):
+            RevisionAspectRow(
+                revision_uri="ns-r:0",
+                aspect_key="unit",
+                operation="removed",
+                previous_value="km/h",
+                newer_value="mph",
+            )

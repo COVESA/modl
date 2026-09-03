@@ -58,7 +58,7 @@ line-length = 120
 select = ["E", "F", "I", "UP", "PGH", "B", "SIM"]
 
 [tool.bumpversion]
-current_version = "0.1.0"
+current_version = "0.2.0"
 
 [[tool.bumpversion.files]]
 filename = "./src/modl/__init__.py"

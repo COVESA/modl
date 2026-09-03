@@ -52,12 +52,13 @@ The `changes` array is an ordered list of change events. Order does not affect c
 
 ```json
 {
-  "label":        "<string>",
-  "kind":         "ENTITY",
-  "change_type":  "ADDED" | "REMOVED" | "MODIFIED",
-  "renamed_from": "<string>" | null,
-  "aspects":      { "<key>": <value>, ... },
-  "content":      [ { "label": "<string>", "change_type": "ADDED" | "REMOVED" | "MODIFIED" }, ... ]
+  "label":             "<string>",
+  "kind":              "ENTITY",
+  "change_type":       "ADDED" | "REMOVED" | "MODIFIED",
+  "renamed_from":      "<string>" | null,
+  "aspects":           { "<key>": <value>, ... },
+  "previous_aspects":  { "<key>": <value>, ... },
+  "content":           [ { "label": "<string>", "change_type": "ADDED" | "REMOVED" | "MODIFIED" }, ... ]
 }
 ```
 
@@ -67,14 +68,15 @@ The `changes` array is an ordered list of change events. Order does not affect c
 | `kind` | always | Must be `"ENTITY"`. |
 | `change_type` | always | `ADDED`, `REMOVED`, or `MODIFIED`. |
 | `renamed_from` | `MODIFIED` only | Previous label. Signals the ledger to record a rename rather than a separate removal and addition. Must be `null` or absent on `ADDED` and `REMOVED`. |
-| `aspects` | `ADDED` | Full initial-state snapshot of all entity-level attributes. Empty on `REMOVED`. Delta (changed keys only) on `MODIFIED`. |
+| `aspects` | `ADDED` | Full initial-state snapshot of all entity-level attributes. Empty on `REMOVED`. Delta (changed keys only) on `MODIFIED` — every value must be wrapped with both `_value` and `_previous` (see [Operation annotation](#operation-annotation-modified-events)). |
+| `previous_aspects` | `REMOVED` | The full aspects snapshot as it existed immediately before removal. **Mandatory and non-empty on `REMOVED` events** — records what is being lost so it can be written to `revision_aspects.csv`. Must be absent on `ADDED`. Accepted but ignored on `MODIFIED` — the sync engine never reads `previous_aspects` for `MODIFIED` events. |
 | `content` | `MODIFIED` only | Declares which child elements changed. Each item carries `label` and `change_type`. The engine evaluates `ADDED` and `REMOVED` content items against the `properties.added` / `properties.removed` config keys (or `values.added` / `values.removed` for `ENUMERATION_SET`) to decide whether a new entity contract is warranted. Every label in `content` must have a corresponding standalone event in the same diff report, and vice versa. Absent on `ADDED` and `REMOVED`. |
 
 ### Rules
 
-- **ADDED**: `aspects` carries the full snapshot. Use `instances` to carry the full list of instance labels. `content` must be absent. `renamed_from` must be absent.
-- **MODIFIED**: `aspects` carries only the keys that actually changed. For instance-list changes use `instances_added` and `instances_removed` (the directional delta — not the full list). `renamed_from` is set only when a rename occurred. `content` lists affected children — every item must have a corresponding standalone event in the same report, and every standalone child event must be reflected in the parent's `content`.
-- **REMOVED**: `aspects` must be empty. `content` must be absent. `renamed_from` must be absent.
+- **ADDED**: `aspects` carries the full snapshot. Use `instances` to carry the full list of instance labels. `content` must be absent. `renamed_from` must be absent. `previous_aspects` must be absent.
+- **MODIFIED**: `aspects` carries only the keys that actually changed, and every value must be wrapped as `{"_op": "modified", "_value": <new>, "_previous": <old>}` — plain (unwrapped) values are no longer accepted on `MODIFIED` events. For instance-list changes use `instances_added` and `instances_removed` (the directional delta — not the full list; these two keys are exempt from the wrapping requirement). `renamed_from` is set only when a rename occurred. `content` lists affected children — every item must have a corresponding standalone event in the same report, and every standalone child event must be reflected in the parent's `content`.
+- **REMOVED**: `aspects` must be empty. `previous_aspects` is **mandatory and must be non-empty** — it carries the full prior-state snapshot being removed. `content` must be absent. `renamed_from` must be absent. Additionally, every existing child `PROPERTY`/`ENUM_VALUE` concept of this entity must also have an explicit `REMOVED` event in the same diff report — `modl sync` raises an error and aborts the whole sync (no ledger write) if any child concept lacks one.
 
 > **Reserved keys on entity events:** `"name"` is forbidden in `aspects` — signal renames via `renamed_from`. On `MODIFIED` events, `"instances"` is also forbidden — use `"instances_added"` / `"instances_removed"` to report the directional delta. `"instances"` is only valid on `ADDED` events (full initial snapshot).
 
@@ -84,12 +86,13 @@ The `changes` array is an ordered list of change events. Order does not affect c
 
 ```json
 {
-  "label":        "<string>",
-  "parent_label": "<string>",
-  "kind":         "PROPERTY",
-  "change_type":  "ADDED" | "REMOVED" | "MODIFIED",
-  "renamed_from": "<string>" | null,
-  "aspects":      { "<key>": <value>, ... }
+  "label":             "<string>",
+  "parent_label":      "<string>",
+  "kind":              "PROPERTY",
+  "change_type":       "ADDED" | "REMOVED" | "MODIFIED",
+  "renamed_from":      "<string>" | null,
+  "aspects":           { "<key>": <value>, ... },
+  "previous_aspects":  { "<key>": <value>, ... }
 }
 ```
 
@@ -100,13 +103,14 @@ The `changes` array is an ordered list of change events. Order does not affect c
 | `kind` | always | Must be `"PROPERTY"`. |
 | `change_type` | always | `ADDED`, `REMOVED`, or `MODIFIED`. |
 | `renamed_from` | `MODIFIED` only | Previous label. Must be `null` or absent on `ADDED` and `REMOVED`. |
-| `aspects` | `ADDED` | Full initial-state snapshot on `ADDED`. Empty on `REMOVED`. Delta on `MODIFIED`. |
+| `aspects` | `ADDED` | Full initial-state snapshot on `ADDED`. Empty on `REMOVED`. Delta on `MODIFIED` — every value must be wrapped with both `_value` and `_previous` (see [Operation annotation](#operation-annotation-modified-events)). |
+| `previous_aspects` | `REMOVED` | The full aspects snapshot as it existed immediately before removal. **Mandatory and non-empty on `REMOVED` events.** Must be absent on `ADDED`. Accepted but ignored on `MODIFIED` — the sync engine never reads `previous_aspects` for `MODIFIED` events. |
 
 ### Rules
 
-- **ADDED**: `aspects` carries the full snapshot; `output_type` is expected to be present for typed properties (signals, fields). Omit it for vocabulary elements such as enum values or unit definitions where no type resolution is involved. `renamed_from` must be absent.
-- **MODIFIED**: `aspects` carries only the keys that changed. `renamed_from` is set only when a rename occurred.
-- **REMOVED**: `aspects` must be empty. `renamed_from` must be absent.
+- **ADDED**: `aspects` carries the full snapshot; `output_type` is expected to be present for typed properties (signals, fields). Omit it for vocabulary elements such as enum values or unit definitions where no type resolution is involved. `renamed_from` and `previous_aspects` must be absent.
+- **MODIFIED**: `aspects` carries only the keys that changed, each wrapped as `{"_op": "modified", "_value": <new>, "_previous": <old>}` — plain (unwrapped) values are no longer accepted. `renamed_from` is set only when a rename occurred.
+- **REMOVED**: `aspects` must be empty. `previous_aspects` is **mandatory and must be non-empty** — it carries the full prior-state snapshot being removed. `renamed_from` must be absent.
 
 > **Reserved key:** `"name"` is forbidden in `aspects` on property events — signal renames via `renamed_from`.
 
@@ -145,19 +149,27 @@ All other keys are **adapter-defined**. Examples: `unit`, `min`, `max`, `accurac
 
 ## Operation annotation (MODIFIED events)
 
-By default, a key present in a `MODIFIED` event's `aspects` dict is treated as having the operation `"modified"` (the value changed). Adapters that can determine the exact operation may wrap the value to be more specific:
+Every key present in a `MODIFIED` event's `aspects` dict must be wrapped to declare its operation and carry both the new and previous value:
 
 ```json
 "aspects": {
-    "unit":        { "_op": "added",    "_value": "mph"      },
-    "accuracy":    { "_op": "removed"                       },
-    "description": { "_op": "modified", "_value": "new text" }
+    "unit":        { "_op": "added",    "_value": "mph"                        },
+    "accuracy":    { "_op": "removed",                  "_previous": 0.5       },
+    "description": { "_op": "modified", "_value": "new text", "_previous": "old text" }
 }
 ```
 
-Plain values (not wrapped) remain valid and default to op `"modified"`. This is an opt-in extension — adapters that cannot distinguish "appeared" from "changed" emit plain values; the engine evaluates them against the `modified` rule only.
+| `_op` | `_value` (newer) | `_previous` | Meaning |
+|---|---|---|---|
+| `"added"` | required | must be absent/`null` | The aspect key did not exist before and now has a value. |
+| `"removed"` | must be absent/`null` | optional | The aspect key existed before and no longer applies. |
+| `"modified"` | required | required | The aspect key's value changed from `_previous` to `_value`. |
 
-This matters when the breaking-change config uses **per-op granular keys** (e.g., `unit.added: true`, `unit.removed: false`). Without the `_op` annotation, the engine can only match against the generic `modified` rule.
+Plain (unwrapped) values are **no longer valid** on `MODIFIED` events — they were previously accepted as shorthand for `{"_op": "modified", "_value": <value>}`, but since `_previous` is now mandatory for the `"modified"` op, every changed aspect must use the explicit wrapped form. The two directional instance keys (`instances_added`, `instances_removed`) are exempt from this rule since they are list-valued deltas, not single old/new value pairs.
+
+Each wrapped aspect on a `MODIFIED` event (excluding `instances_added`/`instances_removed`) produces one row in `revision_aspects.csv` recording the operation, previous value, and newer value — see [The `revision_aspects.csv` table](#the-revision_aspectscsv-table).
+
+This matters when the breaking-change config uses **per-op granular keys** (e.g., `unit.added: true`, `unit.removed: false`) — the `_op` annotation is what lets the engine match against the correct rule instead of falling back to the generic `modified` rule.
 
 ---
 
@@ -191,7 +203,7 @@ A single `MODIFIED` event can carry both `renamed_from` and a non-empty `aspects
   "kind":         "PROPERTY",
   "change_type":  "MODIFIED",
   "renamed_from": "Vehicle.Speed",
-  "aspects":      { "unit": "m/s" }
+  "aspects":      { "unit": { "_op": "modified", "_value": "m/s", "_previous": "km/h" } }
 }
 ```
 
@@ -252,6 +264,30 @@ The `unit` aspect value is treated as an opaque string by `modl`. Use a plain la
 | Vocabulary property (`ENUM_VALUE`, e.g. `SpeedUnit.KMH`) | ✅ | ✅ | ✅ | ❌ |
 
 The `kind` column in `concepts.csv` records the structural kind permanently. Only `PROPERTY` concepts receive bindings. `ENTITY`, `ENUMERATION_SET`, and `ENUM_VALUE` concepts never do — the ledger validator enforces this as a hard constraint.
+
+---
+
+## The `revision_aspects.csv` table
+
+Every revision minted by `modl sync` — for `ADDED`, `MODIFIED`, and `REMOVED` events alike — also writes one row per changed aspect key to `revision_aspects.csv`. This table is a detailed audit trail of exactly which aspect values changed, from what, and to what, for every revision in the ledger.
+
+| Column | Notes |
+|---|---|
+| `revision_uri` | Foreign key into `revisions.csv`. |
+| `aspect_key` | The aspect name (e.g. `unit`, `output_type`, `description`). |
+| `operation` | One of `added`, `modified`, `removed` — mirrors the `_op` of the source aspect. |
+| `previous_value` | JSON-encoded old value. `null` when `operation` is `added`. |
+| `newer_value` | JSON-encoded new value. `null` when `operation` is `removed`. |
+
+The identity of a row is the composite key `(revision_uri, aspect_key)` — there is no separate serial or URI, since nothing external ever references an individual `revision_aspects` row.
+
+Population rules, mirroring the event's payload:
+
+- **ADDED** event → one row per key in `aspects` excluding `instances`, `operation="added"`, `previous_value=null`.
+- **MODIFIED** event → one row per key in `aspects` excluding `instances_added`/`instances_removed` (already wrapped with `_op`/`_value`/`_previous`), using the wrapped operation and both values.
+- **REMOVED** event → one row per key in `previous_aspects`, `operation="removed"`, `newer_value=null`.
+
+The instance-list keys (`instances` on `ADDED` events, `instances_added`/`instances_removed` on `MODIFIED` events) are excluded — they carry list payloads rather than single old/new values, and are tracked via the `concepts.instances` column instead of `revision_aspects.csv`.
 
 ---
 
@@ -335,7 +371,7 @@ The following diff report covers a range of typical changes:
       "parent_label": "Vehicle",
       "kind":         "PROPERTY",
       "change_type":  "MODIFIED",
-      "aspects": { "output_type": "Float" }
+      "aspects": { "output_type": { "_op": "modified", "_value": "Float", "_previous": "Int" } }
     },
     {
       "label":        "Vehicle.Velocity",
@@ -346,10 +382,11 @@ The following diff report covers a range of typical changes:
       "aspects":      {}
     },
     {
-      "label":        "Vehicle.OldFeature",
-      "parent_label": "Vehicle",
-      "kind":         "PROPERTY",
-      "change_type":  "REMOVED"
+      "label":             "Vehicle.OldFeature",
+      "parent_label":      "Vehicle",
+      "kind":              "PROPERTY",
+      "change_type":       "REMOVED",
+      "previous_aspects":  { "output_type": "Boolean" }
     }
   ]
 }
@@ -363,21 +400,21 @@ Use this checklist when building an adapter for a new modeling language:
 
 - [ ] Parse both the previous and current model snapshots. **When no previous snapshot is provided (first run), treat every element as `ADDED` and emit the complete `aspects` snapshot for each entity and property — not a delta.** This is identical to the standard `ADDED` event contract and requires no special handling from `modl`.
 - [ ] For each entity that exists in current but not previous: emit `ADDED` entity event with full `aspects` snapshot
-- [ ] For each entity that exists in previous but not current: emit `REMOVED` entity event
+- [ ] For each entity that exists in previous but not current: emit `REMOVED` entity event with `previous_aspects` set to the full prior-state snapshot (**mandatory and non-empty**), and emit a `REMOVED` event for every one of its child property/enum-value concepts in the same report \u2014 `modl sync` aborts with an error if any are missing
 - [ ] For each entity that exists in both:
   - [ ] Detect renames via explicit model annotations → emit `MODIFIED` with `renamed_from`
   - [ ] If the element was also modified in the same release, include both `renamed_from` and the changed keys in `aspects` within the same event
-  - [ ] Detect changes to entity-level attributes → emit `MODIFIED` with changed keys in `aspects`
-  - [ ] Detect added/removed instances → emit `MODIFIED` with `instances_added` and/or `instances_removed` (the directional delta — **not** the full list)
+  - [ ] Detect changes to entity-level attributes → emit `MODIFIED` with changed keys in `aspects`, each value wrapped as `{"_op": "modified", "_value": <new>, "_previous": <old>}`
+  - [ ] Detect added/removed instances → emit `MODIFIED` with `instances_added` and/or `instances_removed` (the directional delta — **not** the full list; these two keys are exempt from the wrapping requirement)
   - [ ] Detect added/removed/modified child properties → emit `MODIFIED` entity event with `content` summary **and** individual property events. The `content` list and the set of standalone property events in the same report must be consistent: every label listed in `content` must have a standalone event, and every standalone child event whose parent has a `MODIFIED` event must appear in that parent's `content`. Mismatches produce warnings (errors with `--strict`).
 - [ ] For each vocabulary entity (enum type, unit group, code list): set `kind` to `ENUMERATION_SET` in the entity `ADDED` event
 - [ ] For each vocabulary property (enum value, unit entry): set `kind` to `ENUM_VALUE` in the property `ADDED` event
 - [ ] For each property that exists in current but not previous: emit `ADDED` property event with full `aspects`; include `output_type` for typed properties (signals, fields) — omit for vocabulary elements (enum values, unit definitions) where no type resolution is involved
-- [ ] For each property that exists in previous but not current: emit `REMOVED` property event
+- [ ] For each property that exists in previous but not current: emit `REMOVED` property event with `previous_aspects` set to the full prior-state snapshot (**mandatory and non-empty**)
 - [ ] For each property that exists in both and has changed:
   - [ ] Detect renames → emit `MODIFIED` with `renamed_from`
   - [ ] If the element was also modified in the same release, include both `renamed_from` and the changed keys in `aspects` within the same event
-  - [ ] Compute delta of changed aspect keys → emit `MODIFIED` with only changed keys in `aspects`
+  - [ ] Compute delta of changed aspect keys → emit `MODIFIED` with only changed keys in `aspects`, each value wrapped as `{"_op": "modified", "_value": <new>, "_previous": <old>}`
 - [ ] Map language-specific attribute names to consistent aspect key names (e.g., vspec `datatype` → `output_type`)
 - [ ] Ensure `output_type` carries the base type name only (no list brackets, no `!` suffix)
 - [ ] Set `is_list` and `is_required` separately for languages that express them (e.g., GraphQL `[Type]!`)
