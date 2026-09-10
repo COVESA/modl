@@ -318,6 +318,28 @@ def _entity_removed(
 # ── Property handlers ─────────────────────────────────────────────────────────
 
 
+def _effective_instantiate(instantiate: bool | None) -> bool:
+    """Resolve a property event's optional ``instantiate`` field to its effective boolean.
+
+    ``None`` (omitted by the adapter) means "inherit the parent's instances" — the
+    default, backward-compatible behaviour.  ``False`` means the property exists exactly
+    once and must never receive the parent's per-instance expansion.
+    """
+    return True if instantiate is None else instantiate
+
+
+def _resolve_property_instances(parent_instances: list[str] | None, instantiate: bool | None) -> list[str] | None:
+    """Return the instance list a property concept should store, honouring ``instantiate``.
+
+    Mirrors the parent entity's instance list only when the property is instantiated
+    (the default). When ``instantiate`` is explicitly ``False``, the property is pinned
+    to a single non-instantiated path and must never inherit the parent's instances.
+    """
+    if not _effective_instantiate(instantiate):
+        return None
+    return parent_instances
+
+
 def _property_added(
     tables: dict[str, pd.DataFrame],
     event: PropertyChanged,
@@ -329,13 +351,18 @@ def _property_added(
     parent_instances_json: str | None = tables["concepts"].at[parent_idx, "instances"]
     parent_instances: list[str] | None = _parse_instances(parent_instances_json)
 
+    # A property with instantiate=False is pinned to a single non-instantiated path and
+    # must never inherit the parent entity's instance list — see _resolve_property_instances.
+    resolved_instances = _resolve_property_instances(parent_instances, event.instantiate)
+    resolved_instances_json = _serialize_instances(resolved_instances)
+
     concept_uri = _mint_concept(
         tables,
         metadata,
         label=event.label,
         kind=event.kind,
         parent_uri=parent_uri,
-        instances_json=parent_instances_json,
+        instances_json=resolved_instances_json,
     )
     revision_uri = _mint_revision(
         tables, metadata, concept_uri=concept_uri, prev_revision_uri=None, status=ElementStatus.ACTIVE
@@ -346,7 +373,7 @@ def _property_added(
     # Mint bindings for leaf PROPERTY concepts only — a property whose output type
     # references another entity (is_leaf=False) never receives a binding.
     if event.kind == ElementKind.PROPERTY and event.is_leaf:
-        _mint_bindings_for_instances(tables, metadata, contract_uri=contract_uri, instances=parent_instances)
+        _mint_bindings_for_instances(tables, metadata, contract_uri=contract_uri, instances=resolved_instances)
 
     log.info(
         "Property ADDED:\n  label=%s\n  concept_URI=%s\n  revision_URI=%s\n  contract_URI=%s",
@@ -375,7 +402,22 @@ def _property_modified(
     old_is_leaf = old_contract_uri is not None and _contract_has_any_bindings(tables, old_contract_uri)
     is_leaf_changed = event.kind == ElementKind.PROPERTY and old_is_leaf != bool(event.is_leaf)
 
-    breaking = cfg.is_breaking(event.kind, aspect_ops, renamed_from=event.renamed_from) or is_leaf_changed
+    # An instantiate transition is likewise always breaking, regardless of the config — it
+    # changes whether the property is per-instance-addressable at all. The new resolved
+    # instance list is derived from the *current* parent instances plus the event's
+    # instantiate field, then compared against what is currently stored on this concept.
+    new_instances: list[str] | None = None
+    instances_changed = False
+    if event.kind == ElementKind.PROPERTY:
+        parent_uri = tables["concepts"].at[concept_row_idx, "parent_uri"]
+        parent_instances = _instances_by_concept_uri(tables, parent_uri) if parent_uri is not None else None
+        new_instances = _resolve_property_instances(parent_instances, event.instantiate)
+        old_instances = _parse_instances(tables["concepts"].at[concept_row_idx, "instances"])
+        instances_changed = new_instances != old_instances
+
+    breaking = (
+        cfg.is_breaking(event.kind, aspect_ops, renamed_from=event.renamed_from) or is_leaf_changed or instances_changed
+    )
 
     if event.renamed_from is not None:
         _apply_rename(tables, concept_row_idx, event.label, event.renamed_from)
@@ -392,6 +434,8 @@ def _property_modified(
         contract_uri = _mint_contract(tables, metadata, concept_uri=concept_uri, revision_uri=revision_uri)
 
         if event.kind == ElementKind.PROPERTY:
+            if instances_changed:
+                _set_instances(tables, concept_row_idx, new_instances)
             # Supersede any existing bindings (a safe no-op if the concept never had any),
             # then mint fresh bindings under the new contract only if still leaf.
             instances_json: str | None = tables["concepts"].at[concept_row_idx, "instances"]
@@ -478,6 +522,13 @@ def _cascade_instance_bindings(
         child_kind: str = tables["concepts"].at[child_idx, "kind"]
 
         if child_kind != ElementKind.PROPERTY:
+            continue
+
+        # A non-instantiated property (its own stored instances is null — e.g. instantiate=False
+        # was set when it was added) never mirrors the parent's instance list and never receives
+        # per-instance bindings — it keeps its single singleton binding regardless of how the
+        # parent's instance list changes.
+        if _parse_instances(tables["concepts"].at[child_idx, "instances"]) is None:
             continue
 
         # Mark bindings for removed instances as REMOVED
@@ -820,6 +871,15 @@ def _child_concepts(tables: dict[str, pd.DataFrame], parent_uri: str) -> pd.Data
     """Return all concept rows whose parent_uri matches the given entity concept URI."""
     df = tables["concepts"]
     return df[df["parent_uri"] == parent_uri]
+
+
+def _instances_by_concept_uri(tables: dict[str, pd.DataFrame], concept_uri: str) -> list[str] | None:
+    """Return the parsed instance list stored on the concept row with the given concept_uri."""
+    df = tables["concepts"]
+    match = df[df["concept_uri"] == concept_uri]
+    if match.empty:
+        return None
+    return _parse_instances(match.iloc[0]["instances"])
 
 
 # ── Serialisation helpers ─────────────────────────────────────────────────────

@@ -75,7 +75,12 @@ def _entity_removed(label: str, **previous_aspects) -> EntityChanged:
 
 
 def _prop_added(
-    label: str, parent: str, kind: ElementKind = ElementKind.PROPERTY, is_leaf: bool | None = None, **aspects
+    label: str,
+    parent: str,
+    kind: ElementKind = ElementKind.PROPERTY,
+    is_leaf: bool | None = None,
+    instantiate: bool | None = None,
+    **aspects,
 ) -> PropertyChanged:
     if kind == ElementKind.PROPERTY and is_leaf is None:
         is_leaf = True
@@ -85,12 +90,18 @@ def _prop_added(
         kind=kind,
         change_type=ChangeType.ADDED,
         is_leaf=is_leaf,
+        instantiate=instantiate,
         aspects=dict(aspects),
     )
 
 
 def _prop_modified(
-    label: str, parent: str, renamed_from: str | None = None, is_leaf: bool = True, **aspects
+    label: str,
+    parent: str,
+    renamed_from: str | None = None,
+    is_leaf: bool = True,
+    instantiate: bool | None = None,
+    **aspects,
 ) -> PropertyChanged:
     return PropertyChanged(
         label=label,
@@ -98,6 +109,7 @@ def _prop_modified(
         change_type=ChangeType.MODIFIED,
         renamed_from=renamed_from,
         is_leaf=is_leaf,
+        instantiate=instantiate,
         aspects=_wrap_modified_aspects(aspects),
     )
 
@@ -252,6 +264,56 @@ class TestPropertyAdded:
         tables = sync(empty_ledger(), report, _meta(), _cfg())
         prop_row = tables["concepts"][tables["concepts"]["current_label"] == "Door.IsOpen"].iloc[0]
         assert json.loads(prop_row["instances"]) == ["Left", "Right"]
+
+    def test_non_instantiated_property_stores_null_instances(self) -> None:
+        """A property with instantiate=False never inherits the parent entity's instance list."""
+        report = _report(
+            _entity_added("Container", instances=["A", "B"]),
+            _prop_added("Container.Singleton", parent="Container", instantiate=False),
+        )
+        tables = sync(empty_ledger(), report, _meta(), _cfg())
+        prop_row = tables["concepts"][tables["concepts"]["current_label"] == "Container.Singleton"].iloc[0]
+        assert prop_row["instances"] is None or str(prop_row["instances"]) == "nan"
+
+    def test_non_instantiated_property_gets_singleton_binding(self) -> None:
+        """A property with instantiate=False gets exactly one binding, not one per parent instance."""
+        report = _report(
+            _entity_added("Container", instances=["A", "B"]),
+            _prop_added("Container.Singleton", parent="Container", instantiate=False),
+        )
+        tables = sync(empty_ledger(), report, _meta(), _cfg())
+        assert len(tables["bindings"]) == 1
+        b = tables["bindings"].iloc[0]
+        assert b["instance_label"] is None or str(b["instance_label"]) == "nan"
+
+    def test_instantiate_omitted_still_inherits_instances(self) -> None:
+        """Omitting instantiate (default None) preserves the original inherit-from-parent behavior."""
+        report = _report(
+            _entity_added("Container", instances=["A", "B"]),
+            _prop_added("Container.Member", parent="Container"),
+        )
+        tables = sync(empty_ledger(), report, _meta(), _cfg())
+        prop_row = tables["concepts"][tables["concepts"]["current_label"] == "Container.Member"].iloc[0]
+        assert json.loads(prop_row["instances"]) == ["A", "B"]
+        assert len(tables["bindings"]) == 2
+
+    def test_instantiate_true_explicit_inherits_instances(self) -> None:
+        """Explicit instantiate=True behaves the same as the default (inherit parent instances)."""
+        report = _report(
+            _entity_added("Container", instances=["A", "B"]),
+            _prop_added("Container.Member", parent="Container", instantiate=True),
+        )
+        tables = sync(empty_ledger(), report, _meta(), _cfg())
+        prop_row = tables["concepts"][tables["concepts"]["current_label"] == "Container.Member"].iloc[0]
+        assert json.loads(prop_row["instances"]) == ["A", "B"]
+
+    def test_ledger_validates_with_non_instantiated_property(self) -> None:
+        """Full ledger validation passes when a non-instantiated property coexists with an instanced parent."""
+        report = _report(
+            _entity_added("Container", instances=["A", "B"]),
+            _prop_added("Container.Singleton", parent="Container", instantiate=False),
+        )
+        validate_ledger(sync(empty_ledger(), report, _meta(), _cfg()))
 
     def test_enum_value_no_binding(self) -> None:
         """ENUM_VALUE property gets concept+revision+variant but no binding."""
@@ -417,6 +479,22 @@ class TestEntityModifiedInstanceNonBreaking:
         tables = sync(empty_ledger(), report, _meta(), cfg)
         entity_row = tables["concepts"][tables["concepts"]["current_label"] == "Door"].iloc[0]
         assert json.loads(entity_row["instances"]) == ["Left", "Right", "Center"]
+
+    def test_non_instantiated_child_property_unaffected_by_cascade(self) -> None:
+        """A non-instantiated child property keeps its singleton binding and null instances
+        when the parent entity's instance list changes."""
+        cfg = _cfg(entity={"instances": False})
+        report = _report(
+            _entity_added("Door", instances=["Left", "Right"]),
+            _prop_added("Door.Singleton", parent="Door", instantiate=False),
+            _entity_modified("Door", instances_added=["Center"]),
+        )
+        tables = sync(empty_ledger(), report, _meta(), cfg)
+        prop_row = tables["concepts"][tables["concepts"]["current_label"] == "Door.Singleton"].iloc[0]
+        assert prop_row["instances"] is None or str(prop_row["instances"]) == "nan"
+        active = tables["bindings"][tables["bindings"]["status"] == ElementStatus.ACTIVE]
+        assert len(active) == 1
+        assert active.iloc[0]["instance_label"] is None or str(active.iloc[0]["instance_label"]) == "nan"
 
 
 # ── Entity MODIFIED (instance change, breaking) ───────────────────────────────
@@ -602,6 +680,106 @@ class TestPropertyModifiedBreaking:
         assert row["current_label"] == "Vehicle.Speed"
         prev = json.loads(row["previous_labels"])
         assert "Vehicle.Velocity" in prev
+
+
+class TestPropertyModifiedInstantiateTransition:
+    """A change in effective instantiation is always breaking, independent of config."""
+
+    def test_false_to_true_forces_new_contract(self) -> None:
+        """instantiate flipping False->True mints a new contract even with an empty config."""
+        report = _report(
+            _entity_added("Container", instances=["A", "B"]),
+            _prop_added("Container.Member", parent="Container", instantiate=False),
+            _prop_modified("Container.Member", parent="Container", instantiate=True),
+        )
+        tables = sync(empty_ledger(), report, _meta(), _cfg())
+        prop_uri = tables["concepts"][tables["concepts"]["current_label"] == "Container.Member"].iloc[0]["concept_uri"]
+        contracts = tables["contracts"][tables["contracts"]["concept_uri"] == prop_uri]
+        assert len(contracts) == 2
+        assert (contracts["status"] == ElementStatus.SUPERSEDED).sum() == 1
+        assert (contracts["status"] == ElementStatus.ACTIVE).sum() == 1
+
+    def test_false_to_true_updates_instances_column(self) -> None:
+        """instantiate flipping False->True re-populates the concept's instances from the parent."""
+        report = _report(
+            _entity_added("Container", instances=["A", "B"]),
+            _prop_added("Container.Member", parent="Container", instantiate=False),
+            _prop_modified("Container.Member", parent="Container", instantiate=True),
+        )
+        tables = sync(empty_ledger(), report, _meta(), _cfg())
+        prop_row = tables["concepts"][tables["concepts"]["current_label"] == "Container.Member"].iloc[0]
+        assert json.loads(prop_row["instances"]) == ["A", "B"]
+
+    def test_false_to_true_replaces_singleton_with_per_instance_bindings(self) -> None:
+        """instantiate flipping False->True supersedes the singleton binding and mints one per instance."""
+        report = _report(
+            _entity_added("Container", instances=["A", "B"]),
+            _prop_added("Container.Member", parent="Container", instantiate=False),
+            _prop_modified("Container.Member", parent="Container", instantiate=True),
+        )
+        tables = sync(empty_ledger(), report, _meta(), _cfg())
+        active = tables["bindings"][tables["bindings"]["status"] == ElementStatus.ACTIVE]
+        superseded = tables["bindings"][tables["bindings"]["status"] == ElementStatus.SUPERSEDED]
+        assert len(superseded) == 1
+        assert set(active["instance_label"].tolist()) == {"A", "B"}
+
+    def test_true_to_false_forces_new_contract(self) -> None:
+        """instantiate flipping True->False mints a new contract even with an empty config."""
+        report = _report(
+            _entity_added("Container", instances=["A", "B"]),
+            _prop_added("Container.Member", parent="Container"),
+            _prop_modified("Container.Member", parent="Container", instantiate=False),
+        )
+        tables = sync(empty_ledger(), report, _meta(), _cfg())
+        prop_uri = tables["concepts"][tables["concepts"]["current_label"] == "Container.Member"].iloc[0]["concept_uri"]
+        contracts = tables["contracts"][tables["contracts"]["concept_uri"] == prop_uri]
+        assert len(contracts) == 2
+
+    def test_true_to_false_clears_instances_column(self) -> None:
+        """instantiate flipping True->False clears the concept's instances column."""
+        report = _report(
+            _entity_added("Container", instances=["A", "B"]),
+            _prop_added("Container.Member", parent="Container"),
+            _prop_modified("Container.Member", parent="Container", instantiate=False),
+        )
+        tables = sync(empty_ledger(), report, _meta(), _cfg())
+        prop_row = tables["concepts"][tables["concepts"]["current_label"] == "Container.Member"].iloc[0]
+        assert prop_row["instances"] is None or str(prop_row["instances"]) == "nan"
+
+    def test_true_to_false_replaces_per_instance_bindings_with_singleton(self) -> None:
+        """instantiate flipping True->False supersedes per-instance bindings and mints a singleton."""
+        report = _report(
+            _entity_added("Container", instances=["A", "B"]),
+            _prop_added("Container.Member", parent="Container"),
+            _prop_modified("Container.Member", parent="Container", instantiate=False),
+        )
+        tables = sync(empty_ledger(), report, _meta(), _cfg())
+        active = tables["bindings"][tables["bindings"]["status"] == ElementStatus.ACTIVE]
+        superseded = tables["bindings"][tables["bindings"]["status"] == ElementStatus.SUPERSEDED]
+        assert len(superseded) == 2
+        assert len(active) == 1
+        assert active.iloc[0]["instance_label"] is None or str(active.iloc[0]["instance_label"]) == "nan"
+
+    def test_unchanged_instantiate_is_not_breaking(self) -> None:
+        """No instantiate change and no other breaking aspect leaves the contract unchanged."""
+        report = _report(
+            _entity_added("Container", instances=["A", "B"]),
+            _prop_added("Container.Member", parent="Container", instantiate=False),
+            _prop_modified("Container.Member", parent="Container", instantiate=False),
+        )
+        tables = sync(empty_ledger(), report, _meta(), _cfg())
+        prop_uri = tables["concepts"][tables["concepts"]["current_label"] == "Container.Member"].iloc[0]["concept_uri"]
+        contracts = tables["contracts"][tables["contracts"]["concept_uri"] == prop_uri]
+        assert len(contracts) == 1
+
+    def test_ledger_validates_after_instantiate_transition(self) -> None:
+        """Full ledger validation passes after an instantiate transition either direction."""
+        report = _report(
+            _entity_added("Container", instances=["A", "B"]),
+            _prop_added("Container.Member", parent="Container", instantiate=False),
+            _prop_modified("Container.Member", parent="Container", instantiate=True),
+        )
+        validate_ledger(sync(empty_ledger(), report, _meta(), _cfg()))
 
 
 # ── Property MODIFIED (non-breaking) ─────────────────────────────────────────

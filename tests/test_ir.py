@@ -378,6 +378,68 @@ class TestPropertyChangedIsLeaf:
         assert event.is_leaf is None
 
 
+class TestPropertyChangedInstantiate:
+    """``instantiate`` is optional for PROPERTY events and forbidden for ENUM_VALUE events."""
+
+    def test_instantiate_omitted_defaults_to_none(self) -> None:
+        """Omitting instantiate on a PROPERTY event leaves it as None (inherit parent instances)."""
+        event = PropertyChanged(
+            label="Container.Member",
+            parent_label="Container",
+            change_type=ChangeType.ADDED,
+            is_leaf=True,
+            aspects={"output_type": "Float"},
+        )
+        assert event.instantiate is None
+
+    def test_instantiate_true_accepted_for_property(self) -> None:
+        """instantiate=True is accepted on a PROPERTY event."""
+        event = PropertyChanged(
+            label="Container.Member",
+            parent_label="Container",
+            change_type=ChangeType.ADDED,
+            is_leaf=True,
+            instantiate=True,
+            aspects={"output_type": "Float"},
+        )
+        assert event.instantiate is True
+
+    def test_instantiate_false_accepted_for_property(self) -> None:
+        """instantiate=False is accepted on a PROPERTY event (pinned to a single non-instantiated path)."""
+        event = PropertyChanged(
+            label="Container.Member",
+            parent_label="Container",
+            change_type=ChangeType.ADDED,
+            is_leaf=True,
+            instantiate=False,
+            aspects={"output_type": "Float"},
+        )
+        assert event.instantiate is False
+
+    def test_instantiate_forbidden_on_enum_value(self) -> None:
+        """Setting instantiate on an ENUM_VALUE event fails validation."""
+        with pytest.raises(ValidationError, match="'instantiate' must be omitted"):
+            PropertyChanged(
+                label="MyEnum.VALUE_A",
+                parent_label="MyEnum",
+                kind=ElementKind.ENUM_VALUE,
+                change_type=ChangeType.ADDED,
+                instantiate=False,
+                aspects={"symbol": "a"},
+            )
+
+    def test_instantiate_omitted_accepted_for_enum_value(self) -> None:
+        """Omitting instantiate (default None) is valid for an ENUM_VALUE event."""
+        event = PropertyChanged(
+            label="MyEnum.VALUE_A",
+            parent_label="MyEnum",
+            kind=ElementKind.ENUM_VALUE,
+            change_type=ChangeType.ADDED,
+            aspects={"symbol": "a"},
+        )
+        assert event.instantiate is None
+
+
 # ── DiffReport ────────────────────────────────────────────────────────────────
 
 

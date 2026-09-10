@@ -10,6 +10,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 ### Tests
 
+## [0.5.0] - 2026-10-09
+### Added
+- Added optional `instantiate` metadata to `PROPERTY` diff events, mirroring `is_leaf`, letting adapters pin a property to a single non-instantiated path instead of inheriting the parent entity's instances.
+
+### Changed
+- Sync logic now resolves each property's `instances` from its own `instantiate` flag instead of unconditionally copying the parent entity's instances, fixing incorrectly-generated per-instance bindings for non-instantiated properties.
+- Entity instance-list changes no longer cascade instance bindings onto non-instantiated child properties.
+- Validation rejects `instantiate` on `ENUM_VALUE` events, consistent with `is_leaf`.
+- Updated `diff_report_template.md` to document the `instantiate` field and its rules.
+
+### Tests
+- Added coverage for `instantiate` IR validation, property add/modify instance resolution, and cascade immunity for non-instantiated child properties.
+
 ## [0.4.0] - 2026-09-04
 ### Added
 - Added mandatory `is_leaf` metadata to `PROPERTY` diff events to distinguish scalar/primitive properties from entity-valued properties.

@@ -274,6 +274,18 @@ class PropertyChanged(BaseModel):
     distinct from the "vocabulary leaf elements" phrase above, which describes
     ``ENUM_VALUE`` as a terminal vocabulary node — ``is_leaf`` never applies to that kind.
 
+    ``instantiate`` (``PROPERTY`` only) is an optional top-level field — analogous to
+    ``is_leaf`` rather than an ``aspects`` key — that overrides whether this property
+    inherits its parent entity's instance list.  ``None`` (the default, omitted by
+    adapters that have no such concept) means "inherit the parent's instances", which is
+    the previous unconditional behaviour.  ``False`` means the property exists exactly
+    once and must never receive the parent's per-instance expansion, regardless of how
+    many instances the parent declares.  Forbidden (must be ``None``) when ``kind`` is
+    ``ENUM_VALUE``, since enum values never carry instances either way.  A change in the
+    *effective* instantiation outcome between snapshots always forces a new contract and
+    a binding lifecycle transition, independent of the breaking-change config — mirroring
+    the ``is_leaf`` transition rule.
+
     Payload rules by ``change_type``:
 
     - ``ADDED``: ``aspects`` holds the full initial-state snapshot.  ``renamed_from`` must
@@ -293,6 +305,7 @@ class PropertyChanged(BaseModel):
     change_type: ChangeType
     renamed_from: str | None = None
     is_leaf: bool | None = None
+    instantiate: bool | None = None
     aspects: dict[str, Any] = {}
     previous_aspects: dict[str, Any] = {}
 
@@ -304,6 +317,8 @@ class PropertyChanged(BaseModel):
             raise ValueError(f"PropertyChanged '{self.label}': 'is_leaf' is required when kind is PROPERTY")
         if self.kind == ElementKind.ENUM_VALUE and self.is_leaf is not None:
             raise ValueError(f"PropertyChanged '{self.label}': 'is_leaf' must be omitted when kind is ENUM_VALUE")
+        if self.kind == ElementKind.ENUM_VALUE and self.instantiate is not None:
+            raise ValueError(f"PropertyChanged '{self.label}': 'instantiate' must be omitted when kind is ENUM_VALUE")
         if self.change_type == ChangeType.ADDED and self.previous_aspects:
             raise ValueError("ADDED events must not carry previous_aspects — there is no prior state")
         if self.change_type == ChangeType.REMOVED and self.aspects:
