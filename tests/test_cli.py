@@ -363,6 +363,65 @@ class TestExportBindingsCli:
         for entry in mapping.values():
             assert entry["binding_uri"].startswith("http")
 
+    def _build_ledger_with_structs(self, tmp_path: Path) -> Path:
+        """Sync a diff report with both domain (Door) and struct-prefixed (Structs) bindings."""
+        meta, aspects = _write_fixtures(tmp_path)
+        ledger_dir = tmp_path / "ledger"
+        diff = tmp_path / "diff.json"
+        diff.write_text(
+            '{"changes": ['
+            '{"label": "Door", "kind": "ENTITY", "change_type": "ADDED", "aspects": {"instances": ["Left", "Right"]}},'
+            '{"label": "Door.IsOpen", "parent_label": "Door", "kind": "PROPERTY", "is_leaf": true,'
+            ' "change_type": "ADDED"},'
+            '{"label": "Structs", "kind": "ENTITY", "change_type": "ADDED"},'
+            '{"label": "Structs.Latitude", "parent_label": "Structs", "kind": "PROPERTY", "is_leaf": true,'
+            ' "change_type": "ADDED"}'
+            "]}"
+        )
+        result = CliRunner().invoke(cli, ["sync", "--diff-report", str(diff), *_base_flags(ledger_dir, meta, aspects)])
+        assert result.exit_code == 0
+        return ledger_dir
+
+    def test_export_bindings_vspec_struct_prefix_splits_output(self, tmp_path: Path) -> None:
+        """--struct-prefix splits vspec output into overlay_tree.vspec and types_tree.vspec under --output dir."""
+        ledger_dir = self._build_ledger_with_structs(tmp_path)
+        output_dir = tmp_path / "vspec_out"  # does not exist yet — must be auto-created
+        result = CliRunner().invoke(
+            cli,
+            [*self._export_flags(ledger_dir, output_dir), "bindings", "-f", "vspec", "-p", "Structs"],
+        )
+        assert result.exit_code == 0
+
+        overlay = yaml.safe_load((output_dir / "overlay_tree.vspec").read_text())
+        types = yaml.safe_load((output_dir / "types_tree.vspec").read_text())
+        assert set(overlay.keys()) == {"Door.Left.IsOpen", "Door.Right.IsOpen"}
+        assert set(types.keys()) == {"Structs.Latitude"}
+
+    def test_export_bindings_struct_prefix_requires_vspec_format(self, tmp_path: Path) -> None:
+        """--struct-prefix combined with --format json (the default) causes non-zero exit."""
+        ledger_dir = self._build_ledger_with_structs(tmp_path)
+        output_dir = tmp_path / "vspec_out"
+        result = CliRunner().invoke(
+            cli,
+            [*self._export_flags(ledger_dir, output_dir), "bindings", "-p", "Structs"],
+        )
+        assert result.exit_code != 0
+
+    def test_export_bindings_vspec_struct_prefix_complete_flag(self, tmp_path: Path) -> None:
+        """--struct-prefix + --complete adds binding_uri to entries in both split files."""
+        ledger_dir = self._build_ledger_with_structs(tmp_path)
+        output_dir = tmp_path / "vspec_out"
+        result = CliRunner().invoke(
+            cli,
+            [*self._export_flags(ledger_dir, output_dir), "bindings", "-f", "vspec", "-p", "Structs", "-c"],
+        )
+        assert result.exit_code == 0
+
+        overlay = yaml.safe_load((output_dir / "overlay_tree.vspec").read_text())
+        types = yaml.safe_load((output_dir / "types_tree.vspec").read_text())
+        for entry in {**overlay, **types}.values():
+            assert entry["binding_uri"].startswith("http")
+
     def test_export_missing_ledger_dir_option_errors(self, tmp_path: Path) -> None:
         """Omitting required --ledger-dir causes non-zero exit."""
         result = CliRunner().invoke(cli, ["export", "--output", str(tmp_path / "out.json"), "bindings"])

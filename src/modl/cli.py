@@ -204,8 +204,8 @@ def sync(
 @click.option(
     "--output",
     required=True,
-    type=click.Path(dir_okay=False, writable=True, path_type=Path),
-    help="Path to write the exported file to",
+    type=click.Path(writable=True, path_type=Path),
+    help="Path to write the exported file to (a directory when --struct-prefix is used)",
 )
 @click.pass_context
 def export_group(ctx: click.Context, ledger_dir: Path, output: Path) -> None:
@@ -232,11 +232,25 @@ def export_group(ctx: click.Context, ledger_dir: Path, output: Path) -> None:
     default=False,
     help="Include binding_uri (the full binding URI) alongside binding in every entry",
 )
+@click.option(
+    "-p",
+    "--struct-prefix",
+    default=None,
+    help=(
+        "Top-level label prefix (e.g. 'Structs') marking struct/type entries in vspec output. "
+        "When set, --output is treated as a directory; writes overlay_tree.vspec (domain tree) "
+        "and types_tree.vspec (prefix-matched entries) inside it. Only valid with --format vspec."
+    ),
+)
 @click.pass_context
-def export_bindings_cmd(ctx: click.Context, export_format: str, complete: bool) -> None:
+def export_bindings_cmd(ctx: click.Context, export_format: str, complete: bool, struct_prefix: str | None) -> None:
     """Export active bindings as a lookup mapping (JSON or vspec-style YAML)."""
     ledger_dir: Path = ctx.obj["ledger_dir"]
     output: Path = ctx.obj["output"]
+
+    if struct_prefix is not None and export_format != "vspec":
+        log.error("--struct-prefix is only valid with --format vspec")
+        raise SystemExit(1)
 
     try:
         tables = read_ledger(ledger_dir)
@@ -249,6 +263,23 @@ def export_bindings_cmd(ctx: click.Context, export_format: str, complete: bool) 
     except LedgerValidationError as exc:
         log.error("%s", exc)
         raise SystemExit(1) from None
+
+    if struct_prefix is not None:
+        types_tree = {
+            key: value for key, value in mapping.items() if key == struct_prefix or key.startswith(f"{struct_prefix}.")
+        }
+        overlay_tree = {key: value for key, value in mapping.items() if key not in types_tree}
+
+        output.mkdir(parents=True, exist_ok=True)
+        (output / "overlay_tree.vspec").write_text(yaml.safe_dump(overlay_tree, sort_keys=True))
+        (output / "types_tree.vspec").write_text(yaml.safe_dump(types_tree, sort_keys=True))
+        log.info(
+            "Exported %d overlay binding(s) and %d type binding(s) to %s",
+            len(overlay_tree),
+            len(types_tree),
+            output,
+        )
+        return
 
     if export_format == "vspec":
         output.write_text(yaml.safe_dump(mapping, sort_keys=True))
