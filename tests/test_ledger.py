@@ -1339,3 +1339,42 @@ class TestExportBindings:
         tables = sync(empty_ledger(), report, _export_meta(), _export_cfg())
         with pytest.raises(ValueError, match="format must be one of"):
             export_bindings(tables, format="xml")
+
+    def test_json_custom_key_renames_leaf_field(self) -> None:
+        """key='value' renames the leaf field from 'binding' to 'value' in the json shape."""
+        report = DiffReport(changes=[_entity_added("Vehicle"), _prop_added("Vehicle.Speed", parent="Vehicle")])
+        tables = sync(empty_ledger(), report, _export_meta(), _export_cfg())
+        mapping = export_bindings(tables, format="json", key="value")
+        binding_uri = tables["bindings"].iloc[0]["binding_uri"]
+        assert mapping == {"Vehicle.Speed": {"value": binding_uri.rsplit("/", 1)[-1]}}
+
+    def test_json_custom_key_with_complete_keeps_binding_uri_name(self) -> None:
+        """The secondary 'binding_uri' field name is unaffected by a custom key."""
+        report = DiffReport(changes=[_entity_added("Vehicle"), _prop_added("Vehicle.Speed", parent="Vehicle")])
+        tables = sync(empty_ledger(), report, _export_meta(), _export_cfg())
+        mapping = export_bindings(tables, format="json", complete=True, key="value")
+        assert set(mapping["Vehicle.Speed"].keys()) == {"value", "binding_uri"}
+
+    def test_vspec_custom_key_renames_leaf_field(self) -> None:
+        """key='value' renames the leaf field from 'binding' to 'value' in the vspec shape."""
+        report = DiffReport(changes=[_entity_added("Vehicle"), _prop_added("Vehicle.Speed", parent="Vehicle")])
+        tables = sync(empty_ledger(), report, _export_meta(), _export_cfg())
+        mapping = export_bindings(tables, format="vspec", key="value")
+        binding_uri = tables["bindings"].iloc[0]["binding_uri"]
+        assert mapping == {"Vehicle.Speed": {"value": binding_uri.rsplit("/", 1)[-1]}}
+
+    def test_empty_key_raises(self) -> None:
+        """An empty or whitespace-only key raises ValueError."""
+        report = DiffReport(changes=[_entity_added("Vehicle"), _prop_added("Vehicle.Speed", parent="Vehicle")])
+        tables = sync(empty_ledger(), report, _export_meta(), _export_cfg())
+        with pytest.raises(ValueError, match="non-empty"):
+            export_bindings(tables, format="json", key="")
+        with pytest.raises(ValueError, match="non-empty"):
+            export_bindings(tables, format="json", key="   ")
+
+    def test_key_reserved_word_raises(self) -> None:
+        """key='binding_uri' collides with the --complete field name and raises ValueError."""
+        report = DiffReport(changes=[_entity_added("Vehicle"), _prop_added("Vehicle.Speed", parent="Vehicle")])
+        tables = sync(empty_ledger(), report, _export_meta(), _export_cfg())
+        with pytest.raises(ValueError, match="reserved"):
+            export_bindings(tables, format="json", key="binding_uri")

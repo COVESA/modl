@@ -363,6 +363,27 @@ class TestExportBindingsCli:
         for entry in mapping.values():
             assert entry["binding_uri"].startswith("http")
 
+    def test_export_bindings_binding_key_renames_leaf_field(self, tmp_path: Path) -> None:
+        """--binding-key renames the leaf field from 'binding' to the given value."""
+        ledger_dir = self._build_ledger(tmp_path)
+        output = tmp_path / "bindings.json"
+        result = CliRunner().invoke(
+            cli, [*self._export_flags(ledger_dir, output), "bindings", "--binding-key", "value"]
+        )
+        assert result.exit_code == 0
+        mapping = json.loads(output.read_text())
+        for entry in mapping["Door.IsOpen"].values():
+            assert set(entry.keys()) == {"value"}
+
+    def test_export_bindings_invalid_binding_key_errors(self, tmp_path: Path) -> None:
+        """--binding-key binding_uri collides with the --complete field name and causes non-zero exit."""
+        ledger_dir = self._build_ledger(tmp_path)
+        output = tmp_path / "bindings.json"
+        result = CliRunner().invoke(
+            cli, [*self._export_flags(ledger_dir, output), "bindings", "--binding-key", "binding_uri"]
+        )
+        assert result.exit_code != 0
+
     def _build_ledger_with_structs(self, tmp_path: Path) -> Path:
         """Sync a diff report with both domain (Door) and struct-prefixed (Structs) bindings."""
         meta, aspects = _write_fixtures(tmp_path)

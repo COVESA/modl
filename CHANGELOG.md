@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+- `modl export` outputs VSPEC bindings in a separate file
+- `modl export bindings` accepts `--binding-key` to export bindings under an arbitrary key instead of the default `binding`.
+
 ### Changed
 ### Tests
 

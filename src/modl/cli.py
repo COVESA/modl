@@ -242,8 +242,16 @@ def export_group(ctx: click.Context, ledger_dir: Path, output: Path) -> None:
         "and types_tree.vspec (prefix-matched entries) inside it. Only valid with --format vspec."
     ),
 )
+@click.option(
+    "--binding-key",
+    default="binding",
+    show_default=True,
+    help="Key name to use for the binding value in each exported entry, instead of 'binding'",
+)
 @click.pass_context
-def export_bindings_cmd(ctx: click.Context, export_format: str, complete: bool, struct_prefix: str | None) -> None:
+def export_bindings_cmd(
+    ctx: click.Context, export_format: str, complete: bool, struct_prefix: str | None, binding_key: str
+) -> None:
     """Export active bindings as a lookup mapping (JSON or vspec-style YAML)."""
     ledger_dir: Path = ctx.obj["ledger_dir"]
     output: Path = ctx.obj["output"]
@@ -259,8 +267,8 @@ def export_bindings_cmd(ctx: click.Context, export_format: str, complete: bool, 
         raise SystemExit(1) from None
 
     try:
-        mapping = export_bindings(tables, format=export_format, complete=complete)
-    except LedgerValidationError as exc:
+        mapping = export_bindings(tables, format=export_format, complete=complete, key=binding_key)
+    except (LedgerValidationError, ValueError) as exc:
         log.error("%s", exc)
         raise SystemExit(1) from None
 

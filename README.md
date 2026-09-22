@@ -741,6 +741,68 @@ rules:
 
 `recipe.status` is `complete` when all required parameters are available (the recipe row matched the actual diff values) and `incomplete` when the strategy is known but recipe parameters are still missing. The `adaptation_strategy` category is used for `incomplete` entries — they still appear in the plan so you can fill in the parameters incrementally.
 
+### `modl export`
+
+Exports ledger tables into lookup mappings for downstream tooling — e.g. feeding a vss-tools overlay, or any consumer that needs to resolve a property's runtime path to its stable binding identity without reading the ledger CSVs directly.
+
+```shell
+modl export --ledger-dir PATH --output PATH bindings [--format {json,vspec}] [--complete] [--binding-key KEY] [--struct-prefix PREFIX]
+```
+
+| Option | Description |
+|---|---|
+| `-o`, `--ledger-dir` | Directory containing the ledger CSV files. |
+| `--output` | Path to write the exported file to (a directory when `--struct-prefix` is used). |
+
+The `export` command is a group; `bindings` is currently its only subcommand.
+
+#### `modl export bindings`
+
+Exports **ACTIVE** bindings as a lookup mapping. Superseded and removed bindings are omitted.
+
+| Option | Description |
+|---|---|
+| `-f`, `--format` | Shape and serialization of the exported mapping: `json` (default) or `vspec`. |
+| `-c`, `--complete` | Include `binding_uri` (the full binding URI) alongside the leaf key in every entry. |
+| `--binding-key` | Key name to use for the binding value in each exported entry, instead of the default `binding`. |
+| `-p`, `--struct-prefix` | Top-level label prefix (e.g. `Structs`) marking struct/type entries in vspec output. Only valid with `--format vspec`. |
+
+**`--format json`** (default) groups entries by the property's `current_label` — the abstract concept label. Singleton properties (no instances) map directly to the leaf fields; properties with per-instance bindings nest one level deeper, keyed by instance label:
+
+```json
+{
+  "Vehicle.Speed": { "binding": "16" },
+  "Vehicle.Door.IsOpen": {
+    "Left": { "binding": "o" },
+    "Right": { "binding": "p" }
+  }
+}
+```
+
+**`--format vspec`** produces a flat mapping keyed by the realised runtime path — per-instance bindings splice the instance label into the path to match vspec's fully-qualified node naming:
+
+```yaml
+Vehicle.Speed:
+  binding: "16"
+Vehicle.Door.Left.IsOpen:
+  binding: "o"
+Vehicle.Door.Right.IsOpen:
+  binding: "p"
+```
+
+Passing `--complete` adds the full `binding_uri` alongside the leaf key in every entry, regardless of format or a custom `--binding-key`:
+
+```yaml
+Vehicle.Speed:
+  binding: "16"
+  binding_uri: "http://namespace.example/bindings/16"
+```
+
+Use `--binding-key` to rename the leaf field — for example `--binding-key value` produces `{"binding": ...}` → `{"value": ...}` — for consumers that expect a different field name. The custom key must be non-empty and cannot be `binding_uri`, since that name is reserved for the field added by `--complete`.
+
+`--struct-prefix` splits vspec output into two files under `--output` (treated as a directory in this mode): `overlay_tree.vspec` for domain entries, and `types_tree.vspec` for entries whose key equals or starts with the given prefix. Only valid with `--format vspec`.
+
+`modl export bindings` exits non-zero if two bindings would resolve to the same key — this would otherwise silently clobber a mapping entry.
 
 ## Adoption Guide
 

@@ -527,15 +527,15 @@ def _binding_export_records(tables: dict[str, pd.DataFrame]) -> list[dict]:
     return records
 
 
-def _binding_fields(binding_uri: str, complete: bool) -> dict[str, str]:
-    """Return the leaf field dict for one binding: always ``binding``, plus ``binding_uri`` if complete."""
-    fields = {"binding": binding_uri.rsplit("/", 1)[-1]}
+def _binding_fields(binding_uri: str, complete: bool, key: str = "binding") -> dict[str, str]:
+    """Return the leaf field dict for one binding: always ``key``, plus ``binding_uri`` if complete."""
+    fields = {key: binding_uri.rsplit("/", 1)[-1]}
     if complete:
         fields["binding_uri"] = binding_uri
     return fields
 
 
-def _export_bindings_json(records: list[dict], complete: bool) -> dict:
+def _export_bindings_json(records: list[dict], complete: bool, key: str) -> dict:
     """Group records by ``current_label`` — the abstract concept label from the concepts table.
 
     Singleton properties (no instances) map directly to the leaf fields. Properties with
@@ -561,7 +561,7 @@ def _export_bindings_json(records: list[dict], complete: bool) -> dict:
             )
 
         if len(recs) == 1 and recs[0]["instance_label"] is None:
-            result[label] = _binding_fields(recs[0]["binding_uri"], complete)
+            result[label] = _binding_fields(recs[0]["binding_uri"], complete, key)
             continue
 
         inner: dict[str, dict] = {}
@@ -573,13 +573,13 @@ def _export_bindings_json(records: list[dict], complete: bool) -> dict:
                 )
             if instance_label in inner:
                 raise LedgerValidationError(f"Duplicate instance_label '{instance_label}' for property '{label}'")
-            inner[instance_label] = _binding_fields(r["binding_uri"], complete)
+            inner[instance_label] = _binding_fields(r["binding_uri"], complete, key)
         result[label] = inner
 
     return result
 
 
-def _export_bindings_vspec(records: list[dict], complete: bool) -> dict:
+def _export_bindings_vspec(records: list[dict], complete: bool, key: str) -> dict:
     """Flatten records into a vspec-style mapping, splicing the instance label into the runtime path.
 
     Singleton bindings key on ``current_label`` as-is. Per-instance bindings assume the
@@ -595,13 +595,13 @@ def _export_bindings_vspec(records: list[dict], complete: bool) -> dict:
         binding_uri = r["binding_uri"]
 
         if instance_label is None:
-            key = current_label
+            path_key = current_label
         else:
             parent_label = r["parent_label"]
             prefix = f"{parent_label}." if parent_label is not None else None
             if prefix is not None and current_label.startswith(prefix):
                 leaf = current_label[len(prefix) :]
-                key = f"{parent_label}.{instance_label}.{leaf}"
+                path_key = f"{parent_label}.{instance_label}.{leaf}"
             else:
                 log.warning(
                     "Binding %s: property label '%s' does not follow the '<parent>.<leaf>' convention "
@@ -610,31 +610,34 @@ def _export_bindings_vspec(records: list[dict], complete: bool) -> dict:
                     current_label,
                     parent_label,
                 )
-                key = f"{current_label}.{instance_label}"
+                path_key = f"{current_label}.{instance_label}"
 
-        if key in result:
+        if path_key in result:
             raise LedgerValidationError(
-                f"Binding key collision while exporting: '{key}' is produced by more than one binding"
+                f"Binding key collision while exporting: '{path_key}' is produced by more than one binding"
             )
-        result[key] = _binding_fields(binding_uri, complete)
+        result[path_key] = _binding_fields(binding_uri, complete, key)
 
     return result
 
 
 # Registry mapping a --format name to its (shape-builder) function. Adding a new export
 # format is a matter of adding one entry here plus a serializer choice in the CLI layer.
-_BINDING_EXPORT_BUILDERS: dict[str, Callable[[list[dict], bool], dict]] = {
+_BINDING_EXPORT_BUILDERS: dict[str, Callable[[list[dict], bool, str], dict]] = {
     "json": _export_bindings_json,
     "vspec": _export_bindings_vspec,
 }
 
 
-def export_bindings(tables: dict[str, pd.DataFrame], format: str = "json", complete: bool = False) -> dict:
+def export_bindings(
+    tables: dict[str, pd.DataFrame], format: str = "json", complete: bool = False, key: str = "binding"
+) -> dict:
     """Export ACTIVE bindings as a lookup mapping for downstream tooling (e.g. vss-tools overlays).
 
     Only bindings with ``status == ACTIVE`` are included — superseded and removed bindings are
-    omitted. Each leaf entry always carries ``binding`` (the base-36 URI serial suffix); pass
-    ``complete=True`` to additionally include ``binding_uri`` (the full binding URI).
+    omitted. Each leaf entry always carries ``key`` (the base-36 URI serial suffix, under the
+    field name given by ``key``); pass ``complete=True`` to additionally include ``binding_uri``
+    (the full binding URI, always under that fixed field name regardless of ``key``).
 
     ``format`` selects the mapping shape:
 
@@ -654,8 +657,13 @@ def export_bindings(tables: dict[str, pd.DataFrame], format: str = "json", compl
     if builder is None:
         raise ValueError(f"format must be one of {sorted(_BINDING_EXPORT_BUILDERS)}, got {format!r}")
 
+    if not key or not key.strip():
+        raise ValueError("key must be a non-empty string")
+    if key == "binding_uri":
+        raise ValueError("key must not be 'binding_uri' — that field name is reserved for the full binding URI")
+
     records = _binding_export_records(tables)
     if not records:
         return {}
 
-    return builder(records, complete)
+    return builder(records, complete, key)
