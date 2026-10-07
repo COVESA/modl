@@ -108,6 +108,7 @@ The `changes` array is an ordered list of change events. Order does not affect c
   "change_type":       "ADDED" | "REMOVED" | "MODIFIED",
   "is_leaf":           true | false,
   "instantiate":       true | false | null,
+  "binding_eligible":  true | false,
   "renamed_from":      "<string>" | null,
   "aspects":           { "<key>": <value>, ... },
   "previous_aspects":  { "<key>": <value>, ... }
@@ -122,19 +123,38 @@ The `changes` array is an ordered list of change events. Order does not affect c
 | `change_type` | always | `ADDED`, `REMOVED`, or `MODIFIED`. |
 | `is_leaf` | always, `PROPERTY` only | `true` when `output_type` resolves to a primitive/scalar (the property is a leaf, and thus binding-eligible); `false` when `output_type` names another entity (a reference — no bindings are ever minted for it). Required on every `PROPERTY` event, all `change_type`s. A change in `is_leaf` between snapshots always forces a new contract and a binding-lifecycle transition, independent of the breaking-change config. Not an aspect — see [Aspect keys](#aspect-keys). |
 | `instantiate` | optional, `PROPERTY` only | `false` pins the property to a single non-instantiated path — it never mirrors the parent entity's instance list, regardless of how many instances the parent declares, and receives exactly one singleton binding. Omitted or `null` (the default) means "inherit the parent's instances" — the property is expanded once per parent instance, same as if the field didn't exist. Forbidden (must be `null`/absent) on `ENUM_VALUE` events. A change in the *effective* instantiation outcome between snapshots always forces a new contract and a binding-lifecycle transition, independent of the breaking-change config — same treatment as `is_leaf`. Not an aspect — see [Aspect keys](#aspect-keys). |
+| `binding_eligible` | optional, `PROPERTY` only | Purely *additive* override — defaults to `false`. The effective binding-eligibility outcome is `is_leaf OR binding_eligible`, so this flag can never suppress a binding that `is_leaf: true` would already produce. Set `true` to mint a binding for a non-leaf property whose runtime representation is nonetheless read/written as one atomic unit — e.g. a vspec `Struct`-typed property, where each child property already receives its own binding but the struct root also needs one. Forbidden (must be `false`/absent) on `ENUM_VALUE` events. A change in the *effective* outcome (`is_leaf OR binding_eligible`) between snapshots always forces a new contract and a binding-lifecycle transition, independent of the breaking-change config — same treatment as `is_leaf`. Not an aspect — see [Aspect keys](#aspect-keys). |
 | `renamed_from` | `MODIFIED` only | Previous label. Must be `null` or absent on `ADDED` and `REMOVED`. |
 | `aspects` | `ADDED` | Full initial-state snapshot on `ADDED`. Empty on `REMOVED`. Delta on `MODIFIED` — every value must be wrapped with both `_value` and `_previous` (see [Operation annotation](#operation-annotation-modified-events)). |
 | `previous_aspects` | `REMOVED` | The full aspects snapshot as it existed immediately before removal. **Mandatory and non-empty on `REMOVED` events.** Must be absent on `ADDED`. Accepted but ignored on `MODIFIED` — the sync engine never reads `previous_aspects` for `MODIFIED` events. |
 
 ### Rules
 
-- **ADDED**: `aspects` carries the full snapshot; `output_type` is expected to be present for typed properties (signals, fields). Omit it for vocabulary elements such as enum values or unit definitions where no type resolution is involved. `is_leaf` is mandatory and must reflect whether `output_type` is primitive (`true`) or another entity (`false`). Set `instantiate: false` when the source model pins this property to a single non-instantiated path — otherwise omit it (default inherit-from-parent). `renamed_from` and `previous_aspects` must be absent.
-- **MODIFIED**: `aspects` carries only the keys that changed, each wrapped as `{"_op": "modified", "_value": <new>, "_previous": <old>}` — plain (unwrapped) values are no longer accepted. `is_leaf` is still mandatory and must reflect the property's current state, even when it hasn't changed. `instantiate` should likewise reflect the property's current effective state, even when unchanged, so the ledger can detect a transition. `renamed_from` is set only when a rename occurred.
+- **ADDED**: `aspects` carries the full snapshot; `output_type` is expected to be present for typed properties (signals, fields). Omit it for vocabulary elements such as enum values or unit definitions where no type resolution is involved. `is_leaf` is mandatory and must reflect whether `output_type` is primitive (`true`) or another entity (`false`). Set `instantiate: false` when the source model pins this property to a single non-instantiated path — otherwise omit it (default inherit-from-parent). Set `binding_eligible: true` when a non-leaf property must still receive a binding because it is read/written as one atomic unit (e.g. a struct) — otherwise omit it (default `false`). `renamed_from` and `previous_aspects` must be absent.
+- **MODIFIED**: `aspects` carries only the keys that changed, each wrapped as `{"_op": "modified", "_value": <new>, "_previous": <old>}` — plain (unwrapped) values are no longer accepted. `is_leaf` is still mandatory and must reflect the property's current state, even when it hasn't changed. `instantiate` should likewise reflect the property's current effective state, even when unchanged, so the ledger can detect a transition. `binding_eligible` should likewise reflect the property's current state, even when unchanged, so the ledger can detect a transition. `renamed_from` is set only when a rename occurred.
 - **REMOVED**: `aspects` must be empty. `previous_aspects` is **mandatory and must be non-empty** — it carries the full prior-state snapshot being removed. `is_leaf` is still mandatory (reflects the state being removed). `renamed_from` must be absent.
 
 > **Reserved key:** `"name"` is forbidden in `aspects` on property events — signal renames via `renamed_from`.
 
-> **`is_leaf` and `instantiate` are forbidden on `ENUM_VALUE` events.** Vocabulary member properties (`kind: "ENUM_VALUE"`) never receive bindings or instances regardless of shape, so both fields must be omitted (or `null`) on those events — see [Vocabulary and governed elements](#vocabulary-and-governed-elements).
+> **`is_leaf`, `instantiate`, and `binding_eligible` are forbidden on `ENUM_VALUE` events.** Vocabulary member properties (`kind: "ENUM_VALUE"`) never receive bindings or instances regardless of shape, so all three fields must be omitted (or `null`/`false`) on those events — see [Vocabulary and governed elements](#vocabulary-and-governed-elements).
+
+### Example: struct-typed property with `binding_eligible`
+
+vspec `Structs` are read and written as one atomic unit, unlike ordinary branches. A property whose `output_type` resolves to a struct is still non-leaf (`is_leaf: false`, since the type names another entity), but the struct root itself is runtime-addressable and should receive its own binding alongside the bindings already minted for its child properties:
+
+```json
+{
+  "label":            "Object.Position",
+  "parent_label":     "Object",
+  "kind":              "PROPERTY",
+  "change_type":       "ADDED",
+  "is_leaf":           false,
+  "binding_eligible":  true,
+  "aspects":           { "output_type": "Structs.Position" }
+}
+```
+
+`Object.Position.Vertical` and `Object.Position.Horizontal` are reported as separate leaf `PROPERTY` events (`is_leaf: true`) under `parent_label: "Object.Position"` and receive their own bindings unconditionally — `binding_eligible` is not needed on them. The struct root's binding and its children's bindings are independent rows in `bindings.csv`; minting one has no effect on the other.
 
 ---
 
@@ -145,6 +165,8 @@ The `changes` array is an ordered list of change events. Order does not affect c
 > `is_leaf` is **not** an aspect — it is a first-class field on property events (see [Property event](#property-event)). It is never subject to the breaking-change config in the usual sense (there is no `is_leaf` config key), though a change in its value always forces `breaking = True` unconditionally. It is also not persisted as its own column anywhere in the ledger — `modl` derives the equivalent fact from whether any binding row was ever minted for the property's contract.
 
 > `instantiate` is likewise **not** an aspect — it is a first-class, optional field on property events (see [Property event](#property-event)), analogous to `is_leaf`. It is never subject to the breaking-change config (there is no `instantiate` config key), though a change in the effective instantiation outcome always forces `breaking = True` unconditionally. It is not persisted as its own column — `modl` derives the equivalent fact from whether the property concept's own `instances` column is populated.
+
+> `binding_eligible` is likewise **not** an aspect — it is a first-class, optional field on property events (see [Property event](#property-event)), analogous to `is_leaf`. It is never subject to the breaking-change config (there is no `binding_eligible` config key), though a change in the *effective* outcome (`is_leaf OR binding_eligible`) always forces `breaking = True` unconditionally. It is not persisted as its own column — `modl` derives the equivalent fact from whether any binding row was ever minted for the property's contract, same as `is_leaf`. Unlike `is_leaf`, it is purely additive: it can never cause a leaf property to lose its binding.
 
 Widely-used conventions for typed modeling languages:
 

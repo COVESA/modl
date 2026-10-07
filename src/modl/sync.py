@@ -340,6 +340,18 @@ def _resolve_property_instances(parent_instances: list[str] | None, instantiate:
     return parent_instances
 
 
+def _binding_eligible(event: PropertyChanged) -> bool:
+    """Resolve whether a PROPERTY event should mint a binding.
+
+    A binding is minted when the property is a leaf (``is_leaf``, the structural default)
+    OR when the adapter explicitly marks it eligible via ``binding_eligible`` — e.g. a
+    struct-typed property that is read/written as one atomic unit despite referencing
+    another entity. This is purely additive: ``binding_eligible`` can never suppress the
+    binding a leaf property already receives.
+    """
+    return bool(event.is_leaf) or event.binding_eligible
+
+
 def _property_added(
     tables: dict[str, pd.DataFrame],
     event: PropertyChanged,
@@ -370,9 +382,10 @@ def _property_added(
     _record_added_aspects(tables, revision_uri, event.aspects)
     contract_uri = _mint_contract(tables, metadata, concept_uri=concept_uri, revision_uri=revision_uri)
 
-    # Mint bindings for leaf PROPERTY concepts only — a property whose output type
-    # references another entity (is_leaf=False) never receives a binding.
-    if event.kind == ElementKind.PROPERTY and event.is_leaf:
+    # Mint bindings for binding-eligible PROPERTY concepts only — a leaf property always
+    # qualifies; a non-leaf property qualifies only when explicitly marked binding_eligible
+    # (e.g. a struct-typed property read/written as one atomic unit) — see _binding_eligible.
+    if event.kind == ElementKind.PROPERTY and _binding_eligible(event):
         _mint_bindings_for_instances(tables, metadata, contract_uri=contract_uri, instances=resolved_instances)
 
     log.info(
@@ -394,13 +407,14 @@ def _property_modified(
     concept_row_idx, concept_uri = _require_concept(tables, lookup_label, parent_label=event.parent_label)
     aspect_ops = _aspect_ops_for_event(event)
 
-    # A leaf/reference transition is always breaking, regardless of the config — it changes
-    # whether the concept is binding-eligible at all. "Was this concept previously leaf" is
-    # derived from binding-row existence rather than a stored flag, since the ledger is
-    # append-only and never deletes binding rows (see _contract_has_any_bindings).
+    # A binding-eligibility transition (is_leaf OR binding_eligible) is always breaking,
+    # regardless of the config — it changes whether the concept receives a binding at all.
+    # "Was this concept previously binding-eligible" is derived from binding-row existence
+    # rather than a stored flag, since the ledger is append-only and never deletes binding
+    # rows (see _contract_has_any_bindings).
     old_contract_uri = _active_contract_uri(tables, concept_uri) if event.kind == ElementKind.PROPERTY else None
-    old_is_leaf = old_contract_uri is not None and _contract_has_any_bindings(tables, old_contract_uri)
-    is_leaf_changed = event.kind == ElementKind.PROPERTY and old_is_leaf != bool(event.is_leaf)
+    old_binding_eligible = old_contract_uri is not None and _contract_has_any_bindings(tables, old_contract_uri)
+    binding_eligible_changed = event.kind == ElementKind.PROPERTY and old_binding_eligible != _binding_eligible(event)
 
     # An instantiate transition is likewise always breaking, regardless of the config — it
     # changes whether the property is per-instance-addressable at all. The new resolved
@@ -416,7 +430,9 @@ def _property_modified(
         instances_changed = new_instances != old_instances
 
     breaking = (
-        cfg.is_breaking(event.kind, aspect_ops, renamed_from=event.renamed_from) or is_leaf_changed or instances_changed
+        cfg.is_breaking(event.kind, aspect_ops, renamed_from=event.renamed_from)
+        or binding_eligible_changed
+        or instances_changed
     )
 
     if event.renamed_from is not None:
@@ -437,11 +453,11 @@ def _property_modified(
             if instances_changed:
                 _set_instances(tables, concept_row_idx, new_instances)
             # Supersede any existing bindings (a safe no-op if the concept never had any),
-            # then mint fresh bindings under the new contract only if still leaf.
+            # then mint fresh bindings under the new contract only if still binding-eligible.
             instances_json: str | None = tables["concepts"].at[concept_row_idx, "instances"]
             instances = _parse_instances(instances_json)
             _supersede_bindings_by_concept(tables, concept_uri)
-            if event.is_leaf:
+            if _binding_eligible(event):
                 _mint_bindings_for_instances(tables, metadata, contract_uri=contract_uri, instances=instances)
 
         log.info(

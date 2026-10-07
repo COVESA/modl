@@ -440,6 +440,68 @@ class TestPropertyChangedInstantiate:
         assert event.instantiate is None
 
 
+class TestPropertyChangedBindingEligible:
+    """``binding_eligible`` is optional (default False) for PROPERTY events and forbidden for ENUM_VALUE events."""
+
+    def test_binding_eligible_omitted_defaults_to_false(self) -> None:
+        """Omitting binding_eligible on a PROPERTY event defaults to False."""
+        event = PropertyChanged(
+            label="Container.Member",
+            parent_label="Container",
+            change_type=ChangeType.ADDED,
+            is_leaf=False,
+            aspects={"output_type": "Container"},
+        )
+        assert event.binding_eligible is False
+
+    def test_binding_eligible_true_accepted_for_non_leaf_property(self) -> None:
+        """binding_eligible=True is accepted on a non-leaf PROPERTY event (e.g. a struct root)."""
+        event = PropertyChanged(
+            label="Object.Position",
+            parent_label="Object",
+            change_type=ChangeType.ADDED,
+            is_leaf=False,
+            binding_eligible=True,
+            aspects={"output_type": "Structs.Position"},
+        )
+        assert event.binding_eligible is True
+
+    def test_binding_eligible_true_accepted_for_leaf_property(self) -> None:
+        """binding_eligible=True is accepted (redundant but harmless) on a leaf PROPERTY event."""
+        event = PropertyChanged(
+            label="Vehicle.Speed",
+            parent_label="Vehicle",
+            change_type=ChangeType.ADDED,
+            is_leaf=True,
+            binding_eligible=True,
+            aspects={"output_type": "Float"},
+        )
+        assert event.binding_eligible is True
+
+    def test_binding_eligible_true_forbidden_on_enum_value(self) -> None:
+        """Setting binding_eligible=True on an ENUM_VALUE event fails validation."""
+        with pytest.raises(ValidationError, match="'binding_eligible' must be False"):
+            PropertyChanged(
+                label="MyEnum.VALUE_A",
+                parent_label="MyEnum",
+                kind=ElementKind.ENUM_VALUE,
+                change_type=ChangeType.ADDED,
+                binding_eligible=True,
+                aspects={"symbol": "a"},
+            )
+
+    def test_binding_eligible_omitted_accepted_for_enum_value(self) -> None:
+        """Omitting binding_eligible (default False) is valid for an ENUM_VALUE event."""
+        event = PropertyChanged(
+            label="MyEnum.VALUE_A",
+            parent_label="MyEnum",
+            kind=ElementKind.ENUM_VALUE,
+            change_type=ChangeType.ADDED,
+            aspects={"symbol": "a"},
+        )
+        assert event.binding_eligible is False
+
+
 # ── DiffReport ────────────────────────────────────────────────────────────────
 
 
