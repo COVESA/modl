@@ -171,6 +171,8 @@ For a property whose parent entity has no instances (e.g., `Battery.StateOfCharg
 | 42 | `http://namespace.example/bindings/16` | `Battery.StateOfCharge` |
 
 > **Note:** Bindings are assigned to **`PROPERTY` concepts only**. `ENTITY` concepts are not directly addressable at runtime and therefore never receive bindings. Vocabulary kinds (`ENUMERATION_SET`, `ENUM_VALUE`) never receive bindings either. The engine reads the `kind` column of the concept row to enforce all three rules.
+>
+> By default, a property only receives a binding when it resolves to a primitive/scalar type (`is_leaf: true`) — a property that references another entity is normally not directly addressable. Some modeling languages break that assumption for specific constructs: a vspec `Struct`, for instance, is read and written as one atomic unit even though it is composed of child properties that already have their own bindings. For that case, the adapter can mark the non-leaf property `binding_eligible: true` in the diff event, which additively mints a binding for it as well — this can never suppress a binding a leaf property would otherwise receive. See [`diff_report_template.md`](diff_report_template.md#property-event) for the full field semantics.
 
 #### Instance expansion behavior
 

@@ -9,9 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - `modl export` outputs VSPEC bindings in a separate file
 - `modl export bindings` accepts `--binding-key` to export bindings under an arbitrary key instead of the default `binding`.
+- Added optional `binding_eligible` metadata to `PROPERTY` diff events. It defaults to `false` and is purely additive: setting it `true` mints a binding for a non-leaf property that is nonetheless read/written as one atomic unit (e.g. a vspec `Struct`), without ever being able to suppress the binding a leaf property already receives.
 
 ### Changed
 ### Tests
+- Added coverage for `binding_eligible` IR validation (default, non-leaf override, `ENUM_VALUE` rejection) and sync behavior (binding minted for a non-leaf property when eligible, binding-eligibility transitions forcing a new contract/binding lifecycle, and no spurious transitions when `is_leaf` already covers eligibility).
 
 ## [0.5.0] - 2026-10-09
 ### Added

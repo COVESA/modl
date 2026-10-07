@@ -80,6 +80,7 @@ def _prop_added(
     kind: ElementKind = ElementKind.PROPERTY,
     is_leaf: bool | None = None,
     instantiate: bool | None = None,
+    binding_eligible: bool = False,
     **aspects,
 ) -> PropertyChanged:
     if kind == ElementKind.PROPERTY and is_leaf is None:
@@ -91,6 +92,7 @@ def _prop_added(
         change_type=ChangeType.ADDED,
         is_leaf=is_leaf,
         instantiate=instantiate,
+        binding_eligible=binding_eligible,
         aspects=dict(aspects),
     )
 
@@ -101,6 +103,7 @@ def _prop_modified(
     renamed_from: str | None = None,
     is_leaf: bool = True,
     instantiate: bool | None = None,
+    binding_eligible: bool = False,
     **aspects,
 ) -> PropertyChanged:
     return PropertyChanged(
@@ -110,16 +113,20 @@ def _prop_modified(
         renamed_from=renamed_from,
         is_leaf=is_leaf,
         instantiate=instantiate,
+        binding_eligible=binding_eligible,
         aspects=_wrap_modified_aspects(aspects),
     )
 
 
-def _prop_removed(label: str, parent: str, is_leaf: bool = True, **previous_aspects) -> PropertyChanged:
+def _prop_removed(
+    label: str, parent: str, is_leaf: bool = True, binding_eligible: bool = False, **previous_aspects
+) -> PropertyChanged:
     return PropertyChanged(
         label=label,
         parent_label=parent,
         change_type=ChangeType.REMOVED,
         is_leaf=is_leaf,
+        binding_eligible=binding_eligible,
         previous_aspects=previous_aspects or {"output_type": "Float"},
     )
 
@@ -323,6 +330,32 @@ class TestPropertyAdded:
         )
         tables = sync(empty_ledger(), report, _meta(), _cfg())
         assert len(tables["bindings"]) == 0
+
+    def test_non_leaf_property_gets_no_binding_by_default(self) -> None:
+        """A non-leaf property (is_leaf=False) gets no binding when binding_eligible is left at its default."""
+        report = _report(
+            _entity_added("Object"),
+            _prop_added("Object.Position", parent="Object", is_leaf=False, output_type="Structs.Position"),
+        )
+        tables = sync(empty_ledger(), report, _meta(), _cfg())
+        assert len(tables["bindings"]) == 0
+
+    def test_non_leaf_property_with_binding_eligible_gets_binding(self) -> None:
+        """A non-leaf property marked binding_eligible=True still mints a binding (e.g. a struct root)."""
+        report = _report(
+            _entity_added("Object"),
+            _prop_added(
+                "Object.Position",
+                parent="Object",
+                is_leaf=False,
+                binding_eligible=True,
+                output_type="Structs.Position",
+            ),
+        )
+        tables = sync(empty_ledger(), report, _meta(), _cfg())
+        assert len(tables["bindings"]) == 1
+        b = tables["bindings"].iloc[0]
+        assert b["instance_label"] is None or str(b["instance_label"]) == "nan"
 
     def test_property_added_raises_on_unknown_parent(self) -> None:
         """Property ADDED for an unknown parent label raises SyncError."""
@@ -778,6 +811,70 @@ class TestPropertyModifiedInstantiateTransition:
             _entity_added("Container", instances=["A", "B"]),
             _prop_added("Container.Member", parent="Container", instantiate=False),
             _prop_modified("Container.Member", parent="Container", instantiate=True),
+        )
+        validate_ledger(sync(empty_ledger(), report, _meta(), _cfg()))
+
+
+class TestPropertyModifiedBindingEligibleTransition:
+    """A change in the effective binding-eligibility outcome (is_leaf OR binding_eligible) is
+    always breaking, independent of config, and binding_eligible can never suppress a leaf's binding.
+    """
+
+    def test_non_eligible_to_eligible_forces_new_contract_and_mints_binding(self) -> None:
+        """binding_eligible flipping False->True on a non-leaf property mints a new contract and a binding."""
+        report = _report(
+            _entity_added("Object"),
+            _prop_added("Object.Position", parent="Object", is_leaf=False, output_type="Structs.Position"),
+            _prop_modified(
+                "Object.Position", parent="Object", is_leaf=False, binding_eligible=True, output_type="Structs.Position"
+            ),
+        )
+        tables = sync(empty_ledger(), report, _meta(), _cfg())
+        prop_uri = tables["concepts"][tables["concepts"]["current_label"] == "Object.Position"].iloc[0]["concept_uri"]
+        contracts = tables["contracts"][tables["contracts"]["concept_uri"] == prop_uri]
+        assert len(contracts) == 2
+        active = tables["bindings"][tables["bindings"]["status"] == ElementStatus.ACTIVE]
+        assert len(active) == 1
+
+    def test_eligible_to_non_eligible_forces_new_contract_and_supersedes_binding(self) -> None:
+        """binding_eligible flipping True->False on a non-leaf property supersedes the binding and mints none."""
+        report = _report(
+            _entity_added("Object"),
+            _prop_added(
+                "Object.Position", parent="Object", is_leaf=False, binding_eligible=True, output_type="Structs.Position"
+            ),
+            _prop_modified("Object.Position", parent="Object", is_leaf=False, output_type="Structs.Position"),
+        )
+        tables = sync(empty_ledger(), report, _meta(), _cfg())
+        prop_uri = tables["concepts"][tables["concepts"]["current_label"] == "Object.Position"].iloc[0]["concept_uri"]
+        contracts = tables["contracts"][tables["contracts"]["concept_uri"] == prop_uri]
+        assert len(contracts) == 2
+        assert (tables["bindings"]["status"] == ElementStatus.SUPERSEDED).sum() == 1
+        assert (tables["bindings"]["status"] == ElementStatus.ACTIVE).sum() == 0
+
+    def test_leaf_property_binding_eligible_flip_is_not_a_transition(self) -> None:
+        """On a leaf property (is_leaf=True), flipping binding_eligible never changes the effective
+        outcome (already eligible via is_leaf), so it must not force a new contract on its own.
+        """
+        report = _report(
+            _entity_added("Vehicle"),
+            _prop_added("Vehicle.Speed", parent="Vehicle", is_leaf=True, output_type="Float"),
+            _prop_modified("Vehicle.Speed", parent="Vehicle", is_leaf=True, binding_eligible=True, output_type="Float"),
+        )
+        tables = sync(empty_ledger(), report, _meta(), _cfg())
+        prop_uri = tables["concepts"][tables["concepts"]["current_label"] == "Vehicle.Speed"].iloc[0]["concept_uri"]
+        contracts = tables["contracts"][tables["contracts"]["concept_uri"] == prop_uri]
+        assert len(contracts) == 1
+        assert len(tables["bindings"]) == 1
+
+    def test_ledger_validates_after_binding_eligible_transition(self) -> None:
+        """Full ledger validation passes after a binding_eligible transition on a non-leaf property."""
+        report = _report(
+            _entity_added("Object"),
+            _prop_added("Object.Position", parent="Object", is_leaf=False, output_type="Structs.Position"),
+            _prop_modified(
+                "Object.Position", parent="Object", is_leaf=False, binding_eligible=True, output_type="Structs.Position"
+            ),
         )
         validate_ledger(sync(empty_ledger(), report, _meta(), _cfg()))
 

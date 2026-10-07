@@ -286,6 +286,20 @@ class PropertyChanged(BaseModel):
     a binding lifecycle transition, independent of the breaking-change config — mirroring
     the ``is_leaf`` transition rule.
 
+    ``binding_eligible`` (``PROPERTY`` only) is an optional, purely *additive* override that
+    defaults to ``False``.  The effective binding-eligibility outcome is ``is_leaf or
+    binding_eligible`` — a plain OR with no precedence to reason about, since ``is_leaf=True``
+    always mints a binding regardless of this flag.  Setting ``binding_eligible=True`` mints a
+    binding for a non-leaf property whose runtime representation is nonetheless addressed and
+    read/written as a single atomic unit — e.g. a vspec ``Struct``-typed property, where the
+    granular child properties already receive their own bindings but the struct root also needs
+    one.  This flag can never *suppress* a binding a leaf property would otherwise receive;
+    there is no way to set ``is_leaf=True`` and end up without a binding.  Forbidden (must be
+    ``False``) when ``kind`` is ``ENUM_VALUE``, since enum values never receive bindings either
+    way.  A change in the *effective* outcome (``is_leaf or binding_eligible``) between
+    snapshots always forces a new contract and a binding lifecycle transition, independent of
+    the breaking-change config — mirroring the ``is_leaf`` transition rule.
+
     Payload rules by ``change_type``:
 
     - ``ADDED``: ``aspects`` holds the full initial-state snapshot.  ``renamed_from`` must
@@ -306,6 +320,7 @@ class PropertyChanged(BaseModel):
     renamed_from: str | None = None
     is_leaf: bool | None = None
     instantiate: bool | None = None
+    binding_eligible: bool = False
     aspects: dict[str, Any] = {}
     previous_aspects: dict[str, Any] = {}
 
@@ -319,6 +334,10 @@ class PropertyChanged(BaseModel):
             raise ValueError(f"PropertyChanged '{self.label}': 'is_leaf' must be omitted when kind is ENUM_VALUE")
         if self.kind == ElementKind.ENUM_VALUE and self.instantiate is not None:
             raise ValueError(f"PropertyChanged '{self.label}': 'instantiate' must be omitted when kind is ENUM_VALUE")
+        if self.kind == ElementKind.ENUM_VALUE and self.binding_eligible:
+            raise ValueError(
+                f"PropertyChanged '{self.label}': 'binding_eligible' must be False when kind is ENUM_VALUE"
+            )
         if self.change_type == ChangeType.ADDED and self.previous_aspects:
             raise ValueError("ADDED events must not carry previous_aspects — there is no prior state")
         if self.change_type == ChangeType.REMOVED and self.aspects:
