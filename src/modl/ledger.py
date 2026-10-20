@@ -17,7 +17,7 @@ log = logging.getLogger(__name__)
 
 # ── Schema constants ──────────────────────────────────────────────────────────
 
-TABLES = ("concepts", "revisions", "contracts", "bindings", "revision_aspects")
+TABLES = ("concepts", "revisions", "contracts", "bindings", "revision_aspects", "contract_references")
 
 EXPECTED_COLUMNS: dict[str, list[str]] = {
     "concepts": [
@@ -33,7 +33,8 @@ EXPECTED_COLUMNS: dict[str, list[str]] = {
     "revisions": ["serial", "revision_uri", "concept_uri", "previous_revision_uri", "status"],
     "contracts": ["serial", "contract_uri", "concept_uri", "revision_uri", "status"],
     "bindings": ["serial", "binding_uri", "contract_uri", "instance_label", "status"],
-    "revision_aspects": ["revision_uri", "aspect_key", "operation", "previous_value", "newer_value"],
+    "revision_aspects": ["revision_uri", "aspect_key", "operation", "previous_value", "newer_value", "reason"],
+    "contract_references": ["contract_uri", "role", "target_contract_uri"],
 }
 
 UNIQUE_COLUMNS: dict[str, list[str]] = {
@@ -46,6 +47,7 @@ UNIQUE_COLUMNS: dict[str, list[str]] = {
 # Tables with no own serial/URI — identity is the composite key below instead.
 COMPOSITE_KEY_COLUMNS: dict[str, list[str]] = {
     "revision_aspects": ["revision_uri", "aspect_key"],
+    "contract_references": ["contract_uri", "role"],
 }
 
 # (child_table, child_column, parent_table, parent_column)
@@ -57,6 +59,8 @@ FK_CONSTRAINTS: list[tuple[str, str, str, str]] = [
     ("contracts", "revision_uri", "revisions", "revision_uri"),
     ("bindings", "contract_uri", "contracts", "contract_uri"),
     ("revision_aspects", "revision_uri", "revisions", "revision_uri"),
+    ("contract_references", "contract_uri", "contracts", "contract_uri"),
+    ("contract_references", "target_contract_uri", "contracts", "contract_uri"),
 ]
 
 VALID_STATUSES = {s.value for s in ElementStatus}
@@ -70,6 +74,7 @@ REQUIRED_COLUMNS: dict[str, list[str]] = {
     "contracts": ["serial", "concept_uri", "contract_uri", "revision_uri", "status"],
     "bindings": ["serial", "contract_uri", "binding_uri", "status"],
     "revision_aspects": ["revision_uri", "aspect_key", "operation"],
+    "contract_references": ["contract_uri", "role", "target_contract_uri"],
 }
 
 # ── Exception ─────────────────────────────────────────────────────────────────
@@ -106,7 +111,7 @@ def b36decode(s: str) -> int:
 
 
 def empty_ledger() -> dict[str, pd.DataFrame]:
-    """Return five empty DataFrames with the correct columns for each ledger table."""
+    """Return empty DataFrames with the correct columns for each ledger table."""
     return {name: pd.DataFrame(columns=cols) for name, cols in EXPECTED_COLUMNS.items()}
 
 
@@ -138,14 +143,20 @@ def validate_ledger(tables: dict[str, pd.DataFrame]) -> None:
             if df[col].isnull().any():
                 raise LedgerValidationError(f"[{name}] Column '{col}' contains null values")
 
-        # revision_aspects has no own serial/URI — identity is the composite key, and value
-        # nullability is governed by 'operation' rather than a single required-columns check.
+        # Composite-key tables have no own serial/URI — identity is the composite key.
         if name in COMPOSITE_KEY_COLUMNS:
             key_cols = COMPOSITE_KEY_COLUMNS[name]
             if df.duplicated(subset=key_cols).any():
                 bad = df[df.duplicated(subset=key_cols)][key_cols].values.tolist()
                 raise LedgerValidationError(f"[{name}] Duplicate {tuple(key_cols)} pairs: {bad}")
 
+            if name == "contract_references":
+                if (df["role"].astype(str).str.strip() == "").any():
+                    raise LedgerValidationError(f"[{name}] Column 'role' contains empty values")
+                continue  # kind rules need the FK-checked tables; see the end of this function
+
+            # revision_aspects: value nullability is governed by 'operation' rather than a
+            # single required-columns check.
             invalid_ops = set(df["operation"].dropna().unique()) - VALID_REVISION_ASPECT_OPERATIONS
             if invalid_ops:
                 raise LedgerValidationError(f"[{name}] Invalid operation values: {sorted(invalid_ops)}")
@@ -353,6 +364,26 @@ def validate_ledger(tables: dict[str, pd.DataFrame]) -> None:
                         f"ENTITY, ENUMERATION_SET, and ENUM_VALUE must not: {bad}"
                     )
 
+    # contract_references: the referencing contract must belong to a PROPERTY concept and the
+    # referenced contract to an ENTITY or ENUMERATION_SET concept (container namespace).
+    refs_df = tables["contract_references"]
+    if not refs_df.empty:
+        concept_by_contract = tables["contracts"].set_index("contract_uri")["concept_uri"]
+        kind_by_concept = tables["concepts"].set_index("concept_uri")["kind"]
+        source_kinds = refs_df["contract_uri"].map(concept_by_contract).map(kind_by_concept)
+        bad_source = refs_df[source_kinds != ElementKind.PROPERTY.value]
+        if not bad_source.empty:
+            bad = sorted(bad_source["contract_uri"].tolist())
+            raise LedgerValidationError(f"[contract_references] Only PROPERTY contracts may hold references: {bad}")
+        container_kinds = {ElementKind.ENTITY.value, ElementKind.ENUMERATION_SET.value}
+        target_kinds = refs_df["target_contract_uri"].map(concept_by_contract).map(kind_by_concept)
+        bad_target = refs_df[~target_kinds.isin(container_kinds)]
+        if not bad_target.empty:
+            bad = sorted(bad_target["target_contract_uri"].tolist())
+            raise LedgerValidationError(
+                f"[contract_references] References must target ENTITY or ENUMERATION_SET contracts: {bad}"
+            )
+
 
 def next_serial(table: pd.DataFrame) -> int:
     """Return the next available serial integer for a ledger table."""
@@ -362,7 +393,7 @@ def next_serial(table: pd.DataFrame) -> int:
 
 
 def validate_ledger_dir(ledger_dir: Path) -> None:
-    """Validate that an existing directory contains exactly the five expected ledger CSV files and nothing else."""
+    """Validate that an existing directory contains exactly the expected ledger CSV files and nothing else."""
     if not ledger_dir.is_dir():
         raise LedgerValidationError(f"Ledger path is not a directory: {ledger_dir}")
     expected = {f"{name}.csv" for name in TABLES}
@@ -376,7 +407,7 @@ def validate_ledger_dir(ledger_dir: Path) -> None:
 
 
 def read_ledger(ledger_dir: Path) -> dict[str, pd.DataFrame]:
-    """Read the five ledger CSVs from a directory, validating both directory contents and table schemas."""
+    """Read the ledger CSVs from a directory, validating both directory contents and table schemas."""
     validate_ledger_dir(ledger_dir)
     tables: dict[str, pd.DataFrame] = {}
     for name in TABLES:
@@ -386,9 +417,9 @@ def read_ledger(ledger_dir: Path) -> dict[str, pd.DataFrame]:
 
 
 def write_ledger(tables: dict[str, pd.DataFrame], ledger_dir: Path) -> None:
-    """Write the five ledger DataFrames to CSV files in the given directory.
+    """Write the ledger DataFrames to CSV files in the given directory.
 
-    All five files are written to a temporary directory on the same filesystem first,
+    All files are written to a temporary directory on the same filesystem first,
     then atomically renamed into place.  A crash or disk-full error during writing
     leaves any pre-existing ledger intact.
     """

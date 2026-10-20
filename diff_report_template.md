@@ -109,6 +109,7 @@ The `changes` array is an ordered list of change events. Order does not affect c
   "is_leaf":           true | false,
   "instantiate":       true | false | null,
   "binding_eligible":  true | false,
+  "references":       { "<role>": "<entity or enumeration-set label>" } | null,
   "renamed_from":      "<string>" | null,
   "aspects":           { "<key>": <value>, ... },
   "previous_aspects":  { "<key>": <value>, ... }
@@ -124,6 +125,7 @@ The `changes` array is an ordered list of change events. Order does not affect c
 | `is_leaf` | always, `PROPERTY` only | `true` when `output_type` resolves to a primitive/scalar (the property is a leaf, and thus binding-eligible); `false` when `output_type` names another entity (a reference — no bindings are ever minted for it). Required on every `PROPERTY` event, all `change_type`s. A change in `is_leaf` between snapshots always forces a new contract and a binding-lifecycle transition, independent of the breaking-change config. Not an aspect — see [Aspect keys](#aspect-keys). |
 | `instantiate` | optional, `PROPERTY` only | `false` pins the property to a single non-instantiated path — it never mirrors the parent entity's instance list, regardless of how many instances the parent declares, and receives exactly one singleton binding. Omitted or `null` (the default) means "inherit the parent's instances" — the property is expanded once per parent instance, same as if the field didn't exist. Forbidden (must be `null`/absent) on `ENUM_VALUE` events. A change in the *effective* instantiation outcome between snapshots always forces a new contract and a binding-lifecycle transition, independent of the breaking-change config — same treatment as `is_leaf`. Not an aspect — see [Aspect keys](#aspect-keys). |
 | `binding_eligible` | optional, `PROPERTY` only | Purely *additive* override — defaults to `false`. The effective binding-eligibility outcome is `is_leaf OR binding_eligible`, so this flag can never suppress a binding that `is_leaf: true` would already produce. Set `true` to mint a binding for a non-leaf property whose runtime representation is nonetheless read/written as one atomic unit — e.g. a vspec `Struct`-typed property, where each child property already receives its own binding but the struct root also needs one. Forbidden (must be `false`/absent) on `ENUM_VALUE` events. A change in the *effective* outcome (`is_leaf OR binding_eligible`) between snapshots always forces a new contract and a binding-lifecycle transition, independent of the breaking-change config — same treatment as `is_leaf`. Not an aspect — see [Aspect keys](#aspect-keys). |
+| `references` | optional, `PROPERTY` only | Declares which `ENTITY`/`ENUMERATION_SET` this property's contract depends on: a map from a role (the aspect key carrying the reference, e.g. `output_type`) to the target's current label. Lets `modl` cascade a new target contract onto this property — see [Propagating definition changes to referencing properties](#propagating-definition-changes-to-referencing-properties). `ADDED`: the full set. `MODIFIED`: omitted/`null` keeps the stored edges, `{}` clears them, a map replaces them. Forbidden on `ENUM_VALUE` and `REMOVED` events. Not an aspect — it is never classified by the breaking-change config itself; the cascade policy is the property config key named after the role. |
 | `renamed_from` | `MODIFIED` only | Previous label. Must be `null` or absent on `ADDED` and `REMOVED`. |
 | `aspects` | `ADDED` | Full initial-state snapshot on `ADDED`. Empty on `REMOVED`. Delta on `MODIFIED` — every value must be wrapped with both `_value` and `_previous` (see [Operation annotation](#operation-annotation-modified-events)). |
 | `previous_aspects` | `REMOVED` | The full aspects snapshot as it existed immediately before removal. **Mandatory and non-empty on `REMOVED` events.** Must be absent on `ADDED`. Accepted but ignored on `MODIFIED` — the sync engine never reads `previous_aspects` for `MODIFIED` events. |
@@ -300,9 +302,50 @@ The link lives in the property's `aspects` snapshot. Emit the unit as the value 
 }
 ```
 
-Using the concept URI makes the reference unambiguous and stable across renames. When `unit: true` in the breaking-change config, a change to the referenced unit triggers a new property contract — the old contract permanently records the previous unit URI.
+Using the concept URI makes the reference unambiguous and stable across renames. When `unit: true` in the breaking-change config, a change to **this property's own `unit` aspect value** (e.g. pointing it at a different unit concept) triggers a new property contract — the old contract permanently records the previous unit URI. A change to the *definition* of the referenced unit re-contracts the property only when the property declares the dependency in `references` (e.g. `"references": { "unit": "SpeedUnit" }`); see [Propagating definition changes to referencing properties](#propagating-definition-changes-to-referencing-properties).
 
 The `unit` aspect value is treated as an opaque string by `modl`. Use a plain label (`"km/h"`) or a concept URI — whichever convention your project adopts. `modl` does not resolve or validate the value; it is stored verbatim and compared on future syncs to detect changes.
+
+### Propagating definition changes to referencing properties
+
+A property's contract depends on its `output_type`, so it also depends on what that type *means*. If the referenced `ENTITY` or `ENUMERATION_SET` gets a new contract while the property itself stays the same (same label, same `output_type` string), the property's effective contract has changed too.
+
+`modl` handles this itself, but only for dependencies the adapter **declares**: the engine never interprets aspect values to find references. Declare them with the top-level `references` field on the property event — a map from a *role* (the aspect that carries the reference, usually `output_type`) to the label of the referenced `ENTITY` or `ENUMERATION_SET`:
+
+```json
+{
+  "label":        "Vehicle.Door",
+  "parent_label": "Vehicle",
+  "kind":         "PROPERTY",
+  "change_type":  "ADDED",
+  "is_leaf":      false,
+  "references":   { "output_type": "Door" },
+  "aspects":      { "output_type": "Door" }
+}
+```
+
+The ledger then stores a `contract_references` row from the property's contract to `Door`'s ACTIVE contract (see [The `contract_references.csv` table](#the-contract_referencescsv-table)). On every later sync, if `Door` receives a new contract, each property whose ACTIVE contract still points at the old one is handled by the **same config key that governs the aspect**:
+
+| Property config for the role (`output_type`) | Result on the dependent property when the target gets a new contract |
+|---|---|
+| `true` | New revision and contract; bindings superseded and re-minted; the new contract points at the target's new contract. A `revision_aspects` row for the role records the old and new target contract URIs with `reason = referenced-contract-changed`. |
+| `false` | Nothing is minted. The edge keeps pointing at the superseded contract (this marks the property as not re-contracted) and a warning is logged. |
+| *(absent)* | Same as `false`. |
+
+Rules for adapters:
+
+- **Emit `references` for every aspect whose value names an `ENTITY`/`ENUMERATION_SET`.** Resolution is by current label among active entity/enumeration-set concepts; an unknown label (or a property label) aborts the sync. If an aspect value equals such a label but no matching `references` entry exists, `modl sync` warns (error with `--strict`) because that dependency will not cascade.
+- On `ADDED` events `references` is the full set. On `MODIFIED` events, **omit it to keep the stored edges**, send `{}` to clear them, or send the full current map to replace them. Do not send a partial map.
+- Pointing a role at a *different* element (or adding/removing a role) always forces a new contract, independent of the config — the property's agreement has changed. Existing aspect changes are still reported in `aspects` as usual; the engine only adds its own `revision_aspects` row (`reason = reference-retargeted`) if the role has none in that revision.
+- Only targets that are `ENTITY` or `ENUMERATION_SET` are supported. `references` is forbidden on `ENUM_VALUE` and `REMOVED` events. Other roles (e.g. `unit` pointing at a unit element) work the same way — the role is just the aspect key, and its cascade policy is the property config key of the same name.
+- Do **not** compute content digests or emit helper aspects to propagate type changes — `references` does this.
+
+Limits of the cascade:
+
+- It is triggered only by a *new contract of the target*. Adding or removing a child of the target re-contracts it only when the target's `content` lists that child **and** the config marks the matching structural key (`properties.added`/`properties.removed`/`values.added`/`values.removed`) as breaking. An edit to a child's own aspects (e.g. an `ENUM_VALUE` `symbol`) does not re-contract the target, so it does not reach referencing properties.
+- It is a single hop: a re-contracted property is not itself a reference target, so a chain such as property → `Door` → property of `Door` → `Lock` stops at `Door`.
+
+The change to the type itself and the change to its dependents are independent events in the ledger: removing `SpeedUnit.KMH` is reported as a `REMOVED` event on `SpeedUnit.KMH` and a `MODIFIED` event on `SpeedUnit` (with `content`); every property that declares `references: { "output_type": "SpeedUnit" }` is re-contracted by `modl` without a further event.
 
 ### Ledger table assignment
 
@@ -330,6 +373,7 @@ Every revision minted by `modl sync` — for `ADDED`, `MODIFIED`, and `REMOVED` 
 | `operation` | One of `added`, `modified`, `removed` — mirrors the `_op` of the source aspect. |
 | `previous_value` | JSON-encoded old value. `null` when `operation` is `added`. |
 | `newer_value` | JSON-encoded new value. `null` when `operation` is `removed`. |
+| `reason` | Optional provenance. Empty for changes reported by the adapter; set by the engine for changes it derives itself — `referenced-contract-changed` (a referenced target got a new contract) or `reference-retargeted` (the property's `references` pointed at a different element). For both, `previous_value`/`newer_value` hold the old and new *target contract URIs* and `aspect_key` is the reference role. |
 
 The identity of a row is the composite key `(revision_uri, aspect_key)` — there is no separate serial or URI, since nothing external ever references an individual `revision_aspects` row.
 
@@ -340,6 +384,20 @@ Population rules, mirroring the event's payload:
 - **REMOVED** event → one row per key in `previous_aspects`, `operation="removed"`, `newer_value=null`.
 
 The instance-list keys (`instances` on `ADDED` events, `instances_added`/`instances_removed` on `MODIFIED` events) are excluded — they carry list payloads rather than single old/new values, and are tracked via the `concepts.instances` column instead of `revision_aspects.csv`.
+
+---
+
+## The `contract_references.csv` table
+
+Written by the engine from the `references` field of property events; adapters never emit rows directly.
+
+| Column | Notes |
+|---|---|
+| `contract_uri` | The referencing `PROPERTY` contract. Foreign key into `contracts.csv`. |
+| `role` | The aspect key carrying the reference (e.g. `output_type`). |
+| `target_contract_uri` | The `ENTITY`/`ENUMERATION_SET` contract the property was agreed against. Foreign key into `contracts.csv`. |
+
+Identity is the composite key `(contract_uri, role)`. Rows are immutable: they are written when the referencing contract is minted, pointing at the target's ACTIVE contract at that moment. An edge whose target contract is no longer ACTIVE marks a dependent that was not re-contracted (config `false`/absent for the role). Ledgers created before this table existed must be re-initialised.
 
 ---
 
@@ -478,6 +536,7 @@ Use this checklist when building an adapter for a new modeling language:
 - [ ] Map language-specific attribute names to consistent aspect key names (e.g., vspec `datatype` → `output_type`)
 - [ ] Ensure `output_type` carries the base type name only (no list brackets, no `!` suffix)
 - [ ] Set `is_list` and `is_required` separately for languages that express them (e.g., GraphQL `[Type]!`)
+- [ ] For each `PROPERTY` aspect whose value names an `ENTITY` or `ENUMERATION_SET` (usually `output_type`, possibly `unit`): emit it in the property's top-level `references` map (role → target label). On `MODIFIED` events omit `references` to keep the stored edges, send `{}` to clear, or send the full current map. `modl` then re-contracts dependents when the target gets a new contract, per the property config key of the same name — no digest aspects needed. See [Propagating definition changes to referencing properties](#propagating-definition-changes-to-referencing-properties).
 - [ ] Output valid JSON with a top-level `"changes"` array
 - [ ] Validate the output against `modl`'s schema before passing it to `modl sync`
 
@@ -510,7 +569,7 @@ entity:
 
 property:
   name.modified: false
-  output_type: true         # breaking — triggers a new contract
+  output_type: true         # breaking — triggers a new contract, and cascades onto properties that declare references.output_type when the target's contract changes
   unit: true                # breaking — triggers a new contract
   unit.removed: false       # override: dropping a unit annotation is non-breaking
   accuracy: true            # user-defined domain attribute; breaking

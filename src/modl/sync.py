@@ -1,9 +1,13 @@
-"""Sync engine — processes a DiffReport and updates the five ledger tables.
+"""Sync engine — processes a DiffReport and updates the six ledger tables.
 
 The engine iterates the ordered list of change events from a :class:`~modl.ir.DiffReport`,
 determines whether each change is breaking according to the :class:`~modl.config.BreakingChangeConfig`,
-and writes the appropriate rows to the concepts, revisions, contracts, bindings, and
-revision_aspects tables.
+and writes the appropriate rows to the concepts, revisions, contracts, bindings,
+revision_aspects, and contract_references tables.
+
+After the events are applied, a reference pass records the contract-to-contract dependency edges
+declared by ``PropertyChanged.references`` and cascades a new contract of a referenced
+entity/enumeration set onto the properties that reference it, according to the property config.
 
 Usage::
 
@@ -35,6 +39,12 @@ _INSTANCES_SNAPSHOT_KEY = "instances"
 # tracked via the concepts.instances column instead of revision_aspects.
 _INSTANCE_STRUCTURAL_KEYS = frozenset({_INSTANCES_SNAPSHOT_KEY, _INSTANCES_ADDED_KEY, _INSTANCES_REMOVED_KEY})
 
+# Kinds a property reference may target (the container namespace)
+_CONTAINER_KINDS = frozenset({ElementKind.ENTITY.value, ElementKind.ENUMERATION_SET.value})
+# revision_aspects.reason values for changes the engine derives from references
+_REASON_REFERENCED_CONTRACT_CHANGED = "referenced-contract-changed"
+_REASON_REFERENCE_RETARGETED = "reference-retargeted"
+
 
 class SyncError(Exception):
     """Raised when the diff report violates a consistency constraint the engine cannot resolve."""
@@ -48,6 +58,8 @@ def sync(
     report: DiffReport,
     metadata: ModelMetadata,
     cfg: BreakingChangeConfig,
+    *,
+    strict: bool = False,
 ) -> dict[str, pd.DataFrame]:
     """Apply a diff report to the ledger tables and return the updated tables.
 
@@ -55,10 +67,14 @@ def sync(
     changes applied.  The caller is responsible for writing the result to disk.
 
     Raises :exc:`SyncError` on structural consistency violations (e.g. entity removed
-    without corresponding child property REMOVED events).
+    without corresponding child property REMOVED events).  With *strict*, a property aspect
+    whose value names an entity/enumeration set without a matching ``references`` entry also
+    raises; otherwise it is logged as a warning.
     """
     # Work on copies so the caller's state is unaffected on error
     tables = {name: df.copy() for name, df in tables.items()}
+    contracts_before = set(tables["contracts"]["contract_uri"])
+    active_before = _active_contracts_by_concept(tables)
 
     # Build a set of all labels that appear as REMOVED events for fast consistency checks
     removed_labels: set[str] = {ev.label for ev in report.changes if ev.change_type == ChangeType.REMOVED}
@@ -86,6 +102,9 @@ def sync(
             _process_entity(tables, event, metadata, cfg, removed_labels)
         else:
             _process_property(tables, event, metadata, cfg)
+
+    _apply_references(tables, report, metadata, contracts_before, active_before, strict=strict)
+    _cascade_references(tables, metadata, cfg, contracts_before)
 
     return tables
 
@@ -707,6 +726,7 @@ def _append_revision_aspect_row(
     operation: str,
     previous_value: Any,
     newer_value: Any,
+    reason: str | None = None,
 ) -> None:
     """Mint one revision_aspects row for a single changed aspect key."""
     new_row: dict[str, Any] = {
@@ -715,6 +735,7 @@ def _append_revision_aspect_row(
         "operation": operation,
         "previous_value": _serialize_aspect_value(previous_value),
         "newer_value": _serialize_aspect_value(newer_value),
+        "reason": reason,
     }
     tables["revision_aspects"] = pd.concat([tables["revision_aspects"], pd.DataFrame([new_row])], ignore_index=True)
 
@@ -751,6 +772,243 @@ def _record_removed_aspects(
         _append_revision_aspect_row(
             tables, revision_uri, aspect_key=key, operation="removed", previous_value=value, newer_value=None
         )
+
+
+# ── Reference edges and cascade ───────────────────────────────────────────────
+
+
+def _active_contracts_by_concept(tables: dict[str, pd.DataFrame]) -> dict[str, str]:
+    """Map each concept_uri to its ACTIVE contract URI."""
+    df = tables["contracts"]
+    active = df[df["status"] == ElementStatus.ACTIVE]
+    return dict(zip(active["concept_uri"], active["contract_uri"], strict=True))
+
+
+def _concept_of_contract(tables: dict[str, pd.DataFrame], contract_uri: str) -> str:
+    df = tables["contracts"]
+    return str(df.loc[df["contract_uri"] == contract_uri, "concept_uri"].iloc[0])
+
+
+def _edges_for_contract(tables: dict[str, pd.DataFrame], contract_uri: str) -> dict[str, str]:
+    """Return ``{role: target_contract_uri}`` for the edges stored on a contract."""
+    df = tables["contract_references"]
+    rows = df[df["contract_uri"] == contract_uri]
+    return dict(zip(rows["role"], rows["target_contract_uri"], strict=True))
+
+
+def _write_edges(tables: dict[str, pd.DataFrame], contract_uri: str, edges: dict[str, str]) -> None:
+    if not edges:
+        return
+    rows = [{"contract_uri": contract_uri, "role": r, "target_contract_uri": t} for r, t in edges.items()]
+    tables["contract_references"] = pd.concat([tables["contract_references"], pd.DataFrame(rows)], ignore_index=True)
+
+
+def _resolve_reference_target(tables: dict[str, pd.DataFrame], label: str, owner: str) -> str:
+    """Return the concept_uri of the ACTIVE entity/enumeration set labelled *label*."""
+    df = tables["concepts"]
+    is_target = (
+        (df["current_label"] == label) & df["kind"].isin(_CONTAINER_KINDS) & (df["status"] == ElementStatus.ACTIVE)
+    )
+    match = df[is_target]
+    if match.empty:
+        raise SyncError(f"[{owner}] references target '{label}' is not an active ENTITY or ENUMERATION_SET")
+    return str(match.iloc[0]["concept_uri"])
+
+
+def _require_active_contract(tables: dict[str, pd.DataFrame], concept_uri: str, owner: str) -> str:
+    contract_uri = _active_contract_uri(tables, concept_uri)
+    if contract_uri is None:
+        raise SyncError(f"[{owner}] references a concept that has no active contract")
+    return contract_uri
+
+
+def _bump_property_contract(
+    tables: dict[str, pd.DataFrame], metadata: ModelMetadata, concept_uri: str, revision_uri: str
+) -> str:
+    """Supersede a property's contract and bindings, then mint a new contract (and bindings if it had any)."""
+    old_contract_uri = _active_contract_uri(tables, concept_uri)
+    had_bindings = old_contract_uri is not None and _contract_has_any_bindings(tables, old_contract_uri)
+    _supersede_contract(tables, concept_uri)
+    new_contract_uri = _mint_contract(tables, metadata, concept_uri, revision_uri)
+    _supersede_bindings_by_concept(tables, concept_uri)
+    if had_bindings:
+        instances = _instances_by_concept_uri(tables, concept_uri)
+        _mint_bindings_for_instances(tables, metadata, new_contract_uri, instances)
+    return new_contract_uri
+
+
+def _has_aspect_row(tables: dict[str, pd.DataFrame], revision_uri: str, aspect_key: str) -> bool:
+    df = tables["revision_aspects"]
+    return bool(((df["revision_uri"] == revision_uri) & (df["aspect_key"] == aspect_key)).any())
+
+
+def _missing_reference_warnings(event: PropertyChanged, declared: set[str], container_labels: set[str]) -> list[str]:
+    """Warn about aspects whose value names an entity/enumeration set but that declare no reference."""
+    out: list[str] = []
+    for key, value in event.aspects.items():
+        if key in _INSTANCE_STRUCTURAL_KEYS or key in declared:
+            continue
+        op, new_val, _ = extract_op_full(value)
+        if op != "removed" and isinstance(new_val, str) and new_val in container_labels:
+            out.append(
+                f"[{event.label}] aspect '{key}' names '{new_val}' but no references.{key} entry was declared; "
+                "a change to that type will not cascade"
+            )
+    return out
+
+
+def _apply_references(
+    tables: dict[str, pd.DataFrame],
+    report: DiffReport,
+    metadata: ModelMetadata,
+    contracts_before: set[str],
+    active_before: dict[str, str],
+    *,
+    strict: bool,
+) -> None:
+    """Record reference edges on contracts minted this run and force a contract when a reference is retargeted.
+
+    Declared ``references`` on ADDED/MODIFIED property events are authoritative.  Contracts minted
+    for any other reason (an aspect change, an instance cascade) carry their previous edges forward,
+    re-pointed at the current ACTIVE contract of each target.
+    """
+    minted = set(tables["contracts"]["contract_uri"]) - contracts_before
+    concepts = tables["concepts"]
+    container_mask = concepts["kind"].isin(_CONTAINER_KINDS) & (concepts["status"] == ElementStatus.ACTIVE)
+    container_labels = set(concepts[container_mask]["current_label"])
+    warnings: list[str] = []
+    handled: set[str] = set()
+
+    for event in report.changes:
+        if (
+            not isinstance(event, PropertyChanged)
+            or event.kind != ElementKind.PROPERTY
+            or event.change_type == ChangeType.REMOVED
+        ):
+            continue
+        try:
+            _, concept_uri = _require_concept(tables, event.label, parent_label=event.parent_label)
+        except SyncError:
+            continue  # superseded within the same report (e.g. renamed by a later event)
+        contract_uri = _active_contract_uri(tables, concept_uri)
+        if contract_uri is None:
+            continue
+        prev_contract_uri = active_before.get(concept_uri)
+        prev_edges = _edges_for_contract(tables, prev_contract_uri) if prev_contract_uri else {}
+        declared = set(prev_edges) if event.references is None else set(event.references)
+        warnings.extend(_missing_reference_warnings(event, declared, container_labels))
+
+        if event.references is None:
+            continue  # edges are carried forward below when the contract was re-minted
+
+        new_concepts = {
+            role: _resolve_reference_target(tables, label, event.label) for role, label in event.references.items()
+        }
+        old_concepts = {role: _concept_of_contract(tables, t) for role, t in prev_edges.items()}
+        retargeted = new_concepts != old_concepts
+        new_edges = {role: _require_active_contract(tables, c, event.label) for role, c in new_concepts.items()}
+
+        revision_uri = _active_revision_uri(tables, concept_uri)
+        if contract_uri not in minted and retargeted and revision_uri is not None:
+            contract_uri = _bump_property_contract(tables, metadata, concept_uri, revision_uri)
+            minted.add(contract_uri)
+        if contract_uri in minted:
+            _write_edges(tables, contract_uri, new_edges)
+        handled.add(concept_uri)
+
+        if event.change_type == ChangeType.MODIFIED and revision_uri is not None:
+            for role in old_concepts.keys() | new_concepts.keys():
+                if old_concepts.get(role) == new_concepts.get(role) or _has_aspect_row(tables, revision_uri, role):
+                    continue
+                old_edge, new_edge = prev_edges.get(role), new_edges.get(role)
+                operation = "added" if old_edge is None else "removed" if new_edge is None else "modified"
+                _append_revision_aspect_row(
+                    tables, revision_uri, role, operation, old_edge, new_edge, reason=_REASON_REFERENCE_RETARGETED
+                )
+
+    # Carry edges onto contracts re-minted for other reasons (aspect change, instance cascade).
+    for concept_uri, contract_uri in _active_contracts_by_concept(tables).items():
+        prev_contract_uri = active_before.get(concept_uri)
+        if contract_uri not in minted or concept_uri in handled or prev_contract_uri is None:
+            continue
+        carried: dict[str, str] = {}
+        for role, target_contract_uri in _edges_for_contract(tables, prev_contract_uri).items():
+            target_concept_uri = _concept_of_contract(tables, target_contract_uri)
+            carried[role] = _active_contract_uri(tables, target_concept_uri) or target_contract_uri
+        _write_edges(tables, contract_uri, carried)
+
+    if warnings:
+        if strict:
+            raise SyncError("\n".join(warnings))
+        for w in warnings:
+            log.warning("%s", w)
+
+
+def _cascade_references(
+    tables: dict[str, pd.DataFrame],
+    metadata: ModelMetadata,
+    cfg: BreakingChangeConfig,
+    contracts_before: set[str],
+) -> None:
+    """Re-contract properties whose referenced contract was replaced this run, per the property config.
+
+    A reference role cascades when the property config marks that key as breaking for ``modified``.
+    Targets are entities/enumeration sets only and a re-contracted property is never a target, so a
+    single pass reaches a fixed point.
+    """
+    if tables["contract_references"].empty:
+        return
+    contracts = tables["contracts"]
+    concept_by_contract = dict(zip(contracts["contract_uri"], contracts["concept_uri"], strict=True))
+    status_by_contract = dict(zip(contracts["contract_uri"], contracts["status"], strict=True))
+    minted = set(contracts["contract_uri"]) - contracts_before
+    active = _active_contracts_by_concept(tables)
+
+    stale: dict[str, list[tuple[str, str, str]]] = {}
+    edge_rows = tables["contract_references"]
+    for source, role, target in zip(
+        edge_rows["contract_uri"], edge_rows["role"], edge_rows["target_contract_uri"], strict=True
+    ):
+        if status_by_contract[source] != ElementStatus.ACTIVE:
+            continue
+        new_target = active.get(concept_by_contract[target])
+        if new_target is None or new_target == target or new_target not in minted:
+            continue
+        stale.setdefault(source, []).append((role, target, new_target))
+
+    concepts = tables["concepts"]
+    for contract_uri, changes in stale.items():
+        concept_uri = concept_by_contract[contract_uri]
+        label = str(concepts.loc[concepts["concept_uri"] == concept_uri, "current_label"].iloc[0])
+        if not any(cfg.is_breaking(ElementKind.PROPERTY, {role: "modified"}) for role, _, _ in changes):
+            log.warning(
+                "[%s] referenced contract changed for role(s) %s but the property config does not mark them "
+                "breaking; contract not re-minted",
+                label,
+                sorted(role for role, _, _ in changes),
+            )
+            continue
+
+        prev_revision_uri = _active_revision_uri(tables, concept_uri)
+        _supersede_revision(tables, concept_uri)
+        revision_uri = _mint_revision(
+            tables, metadata, concept_uri=concept_uri, prev_revision_uri=prev_revision_uri, status=ElementStatus.ACTIVE
+        )
+        for role, old_target, new_target in changes:
+            _append_revision_aspect_row(
+                tables,
+                revision_uri,
+                role,
+                "modified",
+                old_target,
+                new_target,
+                reason=_REASON_REFERENCED_CONTRACT_CHANGED,
+            )
+        new_contract_uri = _bump_property_contract(tables, metadata, concept_uri, revision_uri)
+        replaced = {role: new_target for role, _, new_target in changes}
+        edges = {role: replaced.get(role, t) for role, t in _edges_for_contract(tables, contract_uri).items()}
+        _write_edges(tables, new_contract_uri, edges)
+        log.info("[%s] re-contracted: referenced contract changed for %s", label, sorted(replaced))
 
 
 # ── Mutation helpers ──────────────────────────────────────────────────────────

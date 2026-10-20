@@ -4,6 +4,7 @@ from pydantic import ValidationError
 from modl.models import (
     BindingRow,
     ConceptRow,
+    ContractReferenceRow,
     ContractRow,
     ElementKind,
     ElementStatus,
@@ -201,6 +202,37 @@ class TestBindingRow:
             status=ElementStatus.ACTIVE,
         )
         assert row.instance_label is None
+
+
+class TestContractReferenceRow:
+    def test_valid_row(self) -> None:
+        """A row with role and target is accepted."""
+        row = ContractReferenceRow(contract_uri="c/0", role="output_type", target_contract_uri="c/1")
+        assert row.role == "output_type"
+
+    def test_empty_role_rejected(self) -> None:
+        """An empty role is rejected."""
+        with pytest.raises(ValidationError):
+            ContractReferenceRow(contract_uri="c/0", role="", target_contract_uri="c/1")
+
+
+class TestRevisionAspectRowReason:
+    def test_reason_defaults_to_none(self) -> None:
+        """reason is optional."""
+        row = RevisionAspectRow(revision_uri="r/0", aspect_key="unit", operation="added", newer_value="x")
+        assert row.reason is None
+
+    def test_reason_is_stored(self) -> None:
+        """reason carries engine-derived provenance."""
+        row = RevisionAspectRow(
+            revision_uri="r/0",
+            aspect_key="output_type",
+            operation="modified",
+            previous_value="a",
+            newer_value="b",
+            reason="referenced-contract-changed",
+        )
+        assert row.reason == "referenced-contract-changed"
 
 
 class TestRevisionAspectRow:

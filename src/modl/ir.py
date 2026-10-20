@@ -300,6 +300,15 @@ class PropertyChanged(BaseModel):
     snapshots always forces a new contract and a binding lifecycle transition, independent of
     the breaking-change config — mirroring the ``is_leaf`` transition rule.
 
+    ``references`` (``PROPERTY`` only) is an optional top-level field mapping a *role* — the name of
+    the aspect that carries the reference, usually ``output_type`` — to the label of the referenced
+    ``ENTITY`` or ``ENUMERATION_SET``.  It declares the dependency edge so the sync engine can
+    cascade a new contract of the referenced element onto this property; the engine never
+    interprets ``aspects`` values to find references.  On ``ADDED`` events it is the full set.  On
+    ``MODIFIED`` events ``None`` (omitted) keeps the stored edges, ``{}`` clears them, and a dict is
+    the full current set; pointing a role at a different element always forces a new contract.
+    Forbidden on ``REMOVED`` events (nothing to depend on) and on ``ENUM_VALUE`` events.
+
     Payload rules by ``change_type``:
 
     - ``ADDED``: ``aspects`` holds the full initial-state snapshot.  ``renamed_from`` must
@@ -321,6 +330,7 @@ class PropertyChanged(BaseModel):
     is_leaf: bool | None = None
     instantiate: bool | None = None
     binding_eligible: bool = False
+    references: dict[str, str] | None = None
     aspects: dict[str, Any] = {}
     previous_aspects: dict[str, Any] = {}
 
@@ -338,6 +348,15 @@ class PropertyChanged(BaseModel):
             raise ValueError(
                 f"PropertyChanged '{self.label}': 'binding_eligible' must be False when kind is ENUM_VALUE"
             )
+        if self.references is not None:
+            if self.kind == ElementKind.ENUM_VALUE:
+                raise ValueError(
+                    f"PropertyChanged '{self.label}': 'references' must be omitted when kind is ENUM_VALUE"
+                )
+            if self.change_type == ChangeType.REMOVED:
+                raise ValueError(f"PropertyChanged '{self.label}': 'references' must be omitted on REMOVED events")
+            if any(not role.strip() or not target.strip() for role, target in self.references.items()):
+                raise ValueError(f"PropertyChanged '{self.label}': 'references' roles and labels must be non-empty")
         if self.change_type == ChangeType.ADDED and self.previous_aspects:
             raise ValueError("ADDED events must not carry previous_aspects — there is no prior state")
         if self.change_type == ChangeType.REMOVED and self.aspects:

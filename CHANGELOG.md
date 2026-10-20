@@ -6,9 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.7.0] - 2026-10-20
 ### Added
+- `PROPERTY` diff events accept a top-level `references` map (role → label of the referenced `ENTITY`/`ENUMERATION_SET`). `modl sync` stores the dependency as contract-to-contract edges in the new `contract_references.csv` table and re-contracts dependent properties when the referenced contract changes, governed by the property config key named after the role (e.g. `output_type: true`). Changing a reference always forces a new contract.
+- `revision_aspects.csv` gains a nullable `reason` column (`referenced-contract-changed`, `reference-retargeted`) for changes derived by the engine.
+- A property aspect whose value names an entity/enumeration set without a matching `references` entry now warns (an error with `--strict`).
+- The cascade is single-hop and triggered only by a new contract of the referenced element. When the property config does not mark the role as breaking, the dependent keeps its contract and a warning is logged.
 ### Changed
-### Removed
+- The ledger now has six CSV files. Existing ledgers must be re-initialised.
+- `sync()` accepts a `strict` keyword argument and `modl sync --strict` passes it through, so the missing-`references` guard fails the run.
+- Updated `diff_report_template.md` to document `references`, `contract_references.csv` and `revision_aspects.reason`; adapters should declare `references` instead of the suggested `output_type_content` digest aspect, which is removed from the template.
+### Tests
+- Added coverage for `references` IR validation, `contract_references` ledger validation, the `reason` column, reference edges, the cascade and the missing-reference guard.
 
 ## [0.6.0] - 2026-10-07
 ### Added
