@@ -9,10 +9,10 @@
 | File | Tests | What it covers |
 |---|---|---|
 | `test_config.py` | 66 | Namespace validation, breaking-change classification |
-| `test_ir.py` | 88 | IR parsing, structural validation, aspect-key checking, mandatory MODIFIED value wrapping, mandatory REMOVED `previous_aspects` |
-| `test_ledger.py` | 64 | CSV schema, FK integrity, base-36 encoding, read/write, `revision_aspects` row validation |
-| `test_models.py` | 25 | Pydantic row models for the five ledger tables |
-| `test_sync.py` | 91 | Sync engine — every event type, every edge case, `revision_aspects` row minting |
+| `test_ir.py` | 112 | IR parsing, structural validation, aspect-key checking, mandatory MODIFIED value wrapping, mandatory REMOVED `previous_aspects`, `references` validation |
+| `test_ledger.py` | 94 | CSV schema, FK integrity, base-36 encoding, read/write, `revision_aspects` row validation, `contract_references` validation |
+| `test_models.py` | 29 | Pydantic row models for the six ledger tables |
+| `test_sync.py` | 130 | Sync engine — every event type, every edge case, `revision_aspects` row minting, reference edges and cascade |
 | `test_adapt.py` | 45 | `modl adapt` compatibility-plan engine |
 | `test_cli.py` | 18 | CLI surface — flags, error handling, clean exit messages |
 
@@ -84,7 +84,7 @@ Data-level constraints enforced by `validate_ledger()`:
 | Binding on non-PROPERTY concept | ENTITY or ENUMERATION_SET concept linked to a binding |
 
 ### `TestValidateLedgerDir`
-Directory-level checks: must be a directory, exactly the five CSVs, nothing else.
+Directory-level checks: must be a directory, exactly the six CSVs, nothing else.
 
 ### `TestReadWriteLedger` / `TestNextSerial` / `TestB36`
 Round-trip write → read → validate; `next_serial()` returns `max + 1`; `b36encode()` covers 0, 1–9, a–z, multi-digit values.
@@ -154,7 +154,7 @@ The largest file. Each test class exercises one engine path.
 
 **`TestRoundTrip`** — `sync → write_ledger → read_ledger → validate_ledger` round-trips without data loss. Two successive syncs accumulate rows correctly.
 
-**`TestThreeSuccessiveSyncs`** — three syncs produce gap-free, duplicate-free, monotonically-increasing serials across all five tables. A concept from run 1 can be looked up and broken in run 3 after an unrelated run 2.
+**`TestThreeSuccessiveSyncs`** — three syncs produce gap-free, duplicate-free, monotonically-increasing serials across all six tables. A concept from run 1 can be looked up and broken in run 3 after an unrelated run 2.
 
 ### `revision_aspects`
 

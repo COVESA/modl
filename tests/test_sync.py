@@ -81,6 +81,7 @@ def _prop_added(
     is_leaf: bool | None = None,
     instantiate: bool | None = None,
     binding_eligible: bool = False,
+    references: dict[str, str] | None = None,
     **aspects,
 ) -> PropertyChanged:
     if kind == ElementKind.PROPERTY and is_leaf is None:
@@ -93,6 +94,7 @@ def _prop_added(
         is_leaf=is_leaf,
         instantiate=instantiate,
         binding_eligible=binding_eligible,
+        references=references,
         aspects=dict(aspects),
     )
 
@@ -104,6 +106,7 @@ def _prop_modified(
     is_leaf: bool = True,
     instantiate: bool | None = None,
     binding_eligible: bool = False,
+    references: dict[str, str] | None = None,
     **aspects,
 ) -> PropertyChanged:
     return PropertyChanged(
@@ -114,6 +117,7 @@ def _prop_modified(
         is_leaf=is_leaf,
         instantiate=instantiate,
         binding_eligible=binding_eligible,
+        references=references,
         aspects=_wrap_modified_aspects(aspects),
     )
 
@@ -1661,3 +1665,212 @@ class TestInstanceDuplicateValidation:
         )
         with pytest.raises(SyncError, match="already present"):
             sync(tables, _report(bad), _meta(), _cfg())
+
+
+# ── Contract references and cascade ────────────────────────────────────────────────────────
+
+
+def _concept_uri(tables: dict, label: str) -> str:
+    df = tables["concepts"]
+    return str(df[df["current_label"] == label].iloc[0]["concept_uri"])
+
+
+def _contracts_of(tables: dict, label: str) -> list[tuple[str, str]]:
+    """Return ``(contract_uri, status)`` pairs for a concept, oldest first."""
+    df = tables["contracts"]
+    rows = df[df["concept_uri"] == _concept_uri(tables, label)]
+    return [(str(r["contract_uri"]), str(r["status"])) for _, r in rows.iterrows()]
+
+
+def _active_contract(tables: dict, label: str) -> str:
+    return next(uri for uri, status in _contracts_of(tables, label) if status == "ACTIVE")
+
+
+def _edges(tables: dict) -> list[tuple[str, str, str]]:
+    df = tables["contract_references"]
+    return [(str(r["contract_uri"]), str(r["role"]), str(r["target_contract_uri"])) for _, r in df.iterrows()]
+
+
+def _typed_property_report(**prop_kwargs) -> DiffReport:
+    """Entities Vehicle and Door plus property Vehicle.Door typed by Door."""
+    return _report(
+        _entity_added("Vehicle"),
+        _entity_added("Door", type="branch"),
+        _prop_added("Vehicle.Door", parent="Vehicle", output_type="Door", **prop_kwargs),
+    )
+
+
+class TestReferences:
+    def test_added_records_edge_to_active_target_contract(self) -> None:
+        """An ADDED property with references stores one edge to the target's active contract."""
+        report = _typed_property_report(references={"output_type": "Door"})
+        tables = sync(empty_ledger(), report, _meta(), _cfg())
+        assert _edges(tables) == [
+            (_active_contract(tables, "Vehicle.Door"), "output_type", _active_contract(tables, "Door"))
+        ]
+        validate_ledger(tables)
+
+    def test_no_references_no_edges(self) -> None:
+        """A property without references stores no edges."""
+        tables = sync(empty_ledger(), _typed_property_report(), _meta(), _cfg())
+        assert _edges(tables) == []
+
+    def test_enumeration_set_is_a_valid_target(self) -> None:
+        """An ENUMERATION_SET may be referenced."""
+        report = _report(
+            _entity_added("Vehicle"),
+            _entity_added("SpeedUnit", kind=ElementKind.ENUMERATION_SET),
+            _prop_added("Vehicle.Unit", parent="Vehicle", references={"unit": "SpeedUnit"}),
+        )
+        tables = sync(empty_ledger(), report, _meta(), _cfg())
+        assert len(_edges(tables)) == 1
+        validate_ledger(tables)
+
+    def test_unresolvable_label_raises(self) -> None:
+        """A references label that names no active entity/enumeration set raises SyncError."""
+        report = _report(
+            _entity_added("Vehicle"),
+            _prop_added("Vehicle.Door", parent="Vehicle", references={"output_type": "Missing"}),
+        )
+        with pytest.raises(SyncError, match="Missing"):
+            sync(empty_ledger(), report, _meta(), _cfg())
+
+    def test_property_label_is_not_a_valid_target(self) -> None:
+        """Referencing a property label raises SyncError."""
+        report = _report(
+            _entity_added("Vehicle"),
+            _prop_added("Vehicle.Speed", parent="Vehicle"),
+            _prop_added("Vehicle.Door", parent="Vehicle", references={"output_type": "Vehicle.Speed"}),
+        )
+        with pytest.raises(SyncError, match="ENTITY or ENUMERATION_SET"):
+            sync(empty_ledger(), report, _meta(), _cfg())
+
+
+class TestReferenceCascade:
+    def _setup(self) -> dict:
+        report = _typed_property_report(references={"output_type": "Door"})
+        return sync(empty_ledger(), report, _meta(), _cfg())
+
+    def test_breaking_target_change_recontracts_dependent(self) -> None:
+        """A new target contract cascades a new contract, bindings, edge and audit row onto the dependent."""
+        tables = self._setup()
+        old_prop, old_door = _active_contract(tables, "Vehicle.Door"), _active_contract(tables, "Door")
+        cfg = _cfg(entity={"type": True}, property={"output_type": True})
+        tables = sync(tables, _report(_entity_modified("Door", type="struct")), _meta(), cfg)
+
+        new_prop, new_door = _active_contract(tables, "Vehicle.Door"), _active_contract(tables, "Door")
+        assert new_prop != old_prop and new_door != old_door
+        assert dict((u, s) for u, s in _contracts_of(tables, "Vehicle.Door"))[old_prop] == "SUPERSEDED"
+        assert (new_prop, "output_type", new_door) in _edges(tables)
+        active_bindings = tables["bindings"][tables["bindings"]["status"] == "ACTIVE"]
+        assert list(active_bindings["contract_uri"]) == [new_prop]
+
+        aspects = tables["revision_aspects"]
+        row = aspects[aspects["reason"] == "referenced-contract-changed"].iloc[0]
+        assert row["aspect_key"] == "output_type" and row["operation"] == "modified"
+        assert json.loads(row["previous_value"]) == old_door and json.loads(row["newer_value"]) == new_door
+        validate_ledger(tables)
+
+    def test_policy_false_does_not_cascade_and_warns(self, caplog: pytest.LogCaptureFixture) -> None:
+        """With the role marked non-breaking the dependent keeps its contract and a warning is logged."""
+        tables = self._setup()
+        old_prop = _active_contract(tables, "Vehicle.Door")
+        cfg = _cfg(entity={"type": True}, property={"output_type": False})
+        with caplog.at_level("WARNING"):
+            tables = sync(tables, _report(_entity_modified("Door", type="struct")), _meta(), cfg)
+        assert _active_contract(tables, "Vehicle.Door") == old_prop
+        assert "does not mark them breaking" in caplog.text
+        validate_ledger(tables)
+
+    def test_non_breaking_target_change_does_not_cascade(self) -> None:
+        """A target change that keeps its contract leaves dependents untouched."""
+        tables = self._setup()
+        old_prop = _active_contract(tables, "Vehicle.Door")
+        cfg = _cfg(entity={"type": False}, property={"output_type": True})
+        tables = sync(tables, _report(_entity_modified("Door", type="struct")), _meta(), cfg)
+        assert _active_contract(tables, "Vehicle.Door") == old_prop
+
+    def test_dependent_recontracted_in_same_run_is_not_cascaded_again(self) -> None:
+        """A dependent already re-minted this run points at the new target and gets no extra contract."""
+        tables = self._setup()
+        cfg = _cfg(entity={"type": True}, property={"output_type": True, "unit": True})
+        report = _report(
+            _entity_modified("Door", type="struct"),
+            _prop_modified("Vehicle.Door", parent="Vehicle", unit="m"),
+        )
+        tables = sync(tables, report, _meta(), cfg)
+        assert len(_contracts_of(tables, "Vehicle.Door")) == 2
+        assert (_active_contract(tables, "Vehicle.Door"), "output_type", _active_contract(tables, "Door")) in _edges(
+            tables
+        )
+        validate_ledger(tables)
+
+    def test_edges_carried_forward_on_unrelated_breaking_change(self) -> None:
+        """A property re-contracted for another aspect keeps its reference edge."""
+        tables = self._setup()
+        cfg = _cfg(property={"unit": True})
+        tables = sync(tables, _report(_prop_modified("Vehicle.Door", parent="Vehicle", unit="m")), _meta(), cfg)
+        assert (_active_contract(tables, "Vehicle.Door"), "output_type", _active_contract(tables, "Door")) in _edges(
+            tables
+        )
+        validate_ledger(tables)
+
+    def test_retarget_forces_new_contract_even_when_non_breaking(self) -> None:
+        """Pointing a role at a different element re-contracts regardless of the property config."""
+        report = _report(
+            _entity_added("Vehicle"),
+            _entity_added("Door"),
+            _entity_added("Window"),
+            _prop_added("Vehicle.Opening", parent="Vehicle", output_type="Door", references={"output_type": "Door"}),
+        )
+        tables = sync(empty_ledger(), report, _meta(), _cfg())
+        old = _active_contract(tables, "Vehicle.Opening")
+        modified = _prop_modified(
+            "Vehicle.Opening", parent="Vehicle", references={"output_type": "Window"}, description="x"
+        )
+        tables = sync(tables, _report(modified), _meta(), _cfg(property={"output_type": False, "description": False}))
+        new = _active_contract(tables, "Vehicle.Opening")
+        assert new != old
+        assert (new, "output_type", _active_contract(tables, "Window")) in _edges(tables)
+        retargeted = tables["revision_aspects"]
+        row = retargeted[retargeted["reason"] == "reference-retargeted"].iloc[0]
+        assert row["aspect_key"] == "output_type"
+        validate_ledger(tables)
+
+    def test_unchanged_references_keep_contract(self) -> None:
+        """Re-declaring identical references on a non-breaking MODIFIED event mints no contract."""
+        tables = self._setup()
+        old = _active_contract(tables, "Vehicle.Door")
+        modified = _prop_modified("Vehicle.Door", parent="Vehicle", references={"output_type": "Door"}, description="x")
+        tables = sync(tables, _report(modified), _meta(), _cfg(property={"description": False}))
+        assert _active_contract(tables, "Vehicle.Door") == old
+        assert len(_edges(tables)) == 1
+
+    def test_ledger_round_trips_through_csv(self, tmp_path) -> None:
+        """The contract_references table survives write and read."""
+        from modl.ledger import read_ledger, write_ledger
+
+        tables = self._setup()
+        write_ledger(tables, tmp_path)
+        reread = read_ledger(tmp_path)
+        assert _edges(reread) == _edges(tables)
+
+
+class TestMissingReferenceGuard:
+    def test_warns_when_aspect_names_a_container_without_reference(self, caplog: pytest.LogCaptureFixture) -> None:
+        """An aspect value equal to an entity label without a references entry logs a warning."""
+        with caplog.at_level("WARNING"):
+            sync(empty_ledger(), _typed_property_report(), _meta(), _cfg())
+        assert "no references.output_type entry" in caplog.text
+
+    def test_strict_raises(self) -> None:
+        """In strict mode the guard raises SyncError."""
+        with pytest.raises(SyncError, match="references.output_type"):
+            sync(empty_ledger(), _typed_property_report(), _meta(), _cfg(), strict=True)
+
+    def test_declared_reference_is_silent(self, caplog: pytest.LogCaptureFixture) -> None:
+        """No warning when the role is declared."""
+        report = _typed_property_report(references={"output_type": "Door"})
+        with caplog.at_level("WARNING"):
+            sync(empty_ledger(), report, _meta(), _cfg(), strict=True)
+        assert "references." not in caplog.text

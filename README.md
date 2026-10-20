@@ -217,6 +217,23 @@ Key observations:
 - `ENUMERATION_SET` and `ENUM_VALUE` events follow the same revision and contract rules as `ENTITY` and `PROPERTY` respectively, but **never produce bindings** regardless of configuration.
 - An `ENTITY`/`ENUMERATION_SET` `REMOVED` event requires every existing child `PROPERTY`/`ENUM_VALUE` concept to also have an explicit `REMOVED` event in the **same** diff report. `modl sync` aborts with an error (no ledger write) if any child concept is missing its `REMOVED` event.
 
+### Referencing properties and the cascade
+
+A property's contract can depend on the contract of an entity or enumeration set — typically its `output_type`. A `PROPERTY` event declares this with the top-level `references` field, a map from a *role* (the aspect that carries the reference) to the label of the referenced `ENTITY` or `ENUMERATION_SET`:
+
+```json
+{ "label": "Vehicle.Door", "parent_label": "Vehicle", "change_type": "ADDED", "is_leaf": false,
+  "references": { "output_type": "Door" }, "aspects": { "output_type": "Door" } }
+```
+
+`modl sync` records one row in `contract_references` per role, pointing at the target's ACTIVE contract. When a later sync gives the target a new contract, every property whose ACTIVE contract points at the superseded one is re-contracted **if the property config marks the role as breaking** (`output_type: true` — the same key that governs the aspect itself; no extra config). The new revision gets a `revision_aspects` row for the role with the old and new target contract URIs and `reason = referenced-contract-changed`. With the key set to `false` or absent, the dependent keeps its contract and a warning is logged.
+
+Also:
+- Pointing a role at a different element always re-contracts the property, regardless of config (`reason = reference-retargeted`).
+- On `MODIFIED` events, omitting `references` keeps the stored edges, `{}` clears them, and a map replaces them.
+- An aspect whose value equals an entity/enumeration set label but has no matching `references` entry produces a warning (an error with `--strict`).
+- Only a *new contract* of the target cascades. Adding or removing a child of the target re-contracts it only when the container's `content` lists the child and the config marks `properties.added`/`properties.removed`/`values.added`/`values.removed` as breaking; an edit to a child's own aspects (e.g. an `ENUM_VALUE` `symbol`) does not re-contract the container, so it does not reach properties typed by it. Cascading is a single hop: a re-contracted property is never itself a reference target.
+
 ## The Ledger Tables
 
 ### Serial and URI minting
@@ -278,7 +295,15 @@ The third row is a **singleton binding** — `Battery.StateOfCharge` whose paren
 | `http://namespace.example/revisions/2v` | unit | added | *(null)* | `"km/h"` |
 | `http://namespace.example/revisions/1l` | description | removed | `"legacy field"` | *(null)* |
 
-Unlike the other four tables, `revision_aspects` rows have **no serial or URI** — identity is the composite key `(revision_uri, aspect_key)`, since nothing external ever references an individual row. `previous_value` and `newer_value` are JSON-encoded so any value type round-trips unambiguously. `operation` mirrors the `_op` of the source aspect (`added`, `modified`, or `removed`); `previous_value` is null for `added` rows and `newer_value` is null for `removed` rows.
+Unlike the other four tables, `revision_aspects` rows have **no serial or URI** — identity is the composite key `(revision_uri, aspect_key)`, since nothing external ever references an individual row. `previous_value` and `newer_value` are JSON-encoded so any value type round-trips unambiguously. `operation` mirrors the `_op` of the source aspect (`added`, `modified`, or `removed`); `previous_value` is null for `added` rows and `newer_value` is null for `removed` rows. `reason` is null for changes reported by the adapter and set by the engine for changes it derives itself (`referenced-contract-changed`, `reference-retargeted`).
+
+### `contract_references.csv`
+
+| contract_uri | role | target_contract_uri |
+|---|---|---|
+| `http://namespace.example/contracts/14` | output_type | `http://namespace.example/contracts/9` |
+
+Each row says that a `PROPERTY` contract was agreed against a specific `ENTITY`/`ENUMERATION_SET` contract under a role. Like `revision_aspects`, rows have **no serial or URI** (composite key `(contract_uri, role)`) and are written when the referencing contract is minted, never edited. An edge pointing at a non-ACTIVE target contract identifies a dependent that was not re-contracted.
 
 ### Table relationships
 
@@ -289,6 +314,7 @@ erDiagram
     revisions ||--o{ contracts : "triggers"
     revisions ||--o{ revision_aspects : "records changes in"
     contracts ||--o{ bindings : "expanded into"
+    contracts ||--o{ contract_references : "depends on"
 
     concepts {
         int serial PK
@@ -325,6 +351,12 @@ erDiagram
         string operation
         string previous_value
         string newer_value
+        string reason
+    }
+    contract_references {
+        string contract_uri FK
+        string role
+        string target_contract_uri FK
     }
 ```
 
@@ -344,7 +376,7 @@ modl sync --ledger-dir PATH --model-metadata PATH --breaking-aspects PATH [--dif
 | Option | Description |
 |---|---|
 | `-d`, `--diff-report` | Path to the diff report JSON file (optional). Omit to initialise an empty ledger. |
-| `-o`, `--ledger-dir` | Directory where the five ledger CSV files are read from and written to. |
+| `-o`, `--ledger-dir` | Directory where the six ledger CSV files are read from and written to. |
 | `-m`, `--model-metadata` | Path to the model metadata YAML file (`name`, `id`, `preferred_prefix`). |
 | `-b`, `--breaking-aspects` | Path to the breaking aspects config YAML file. |
 | `-n`, `--dry-run` | Preview what would change without writing anything to disk. Exits with code `0` regardless of whether changes would have been made (a non-zero exit still occurs for unrelated errors, e.g. invalid config/diff-report, a sync error, or `--strict` warnings). |
@@ -877,7 +909,7 @@ On the first run, the ledger does not exist yet. `modl sync` creates it. For a f
 modl sync --ledger-dir ledger/ --model-metadata metadata.yaml --breaking-aspects breaking.yaml --diff-report initial_diff.json
 ```
 
-Persist (e.g., release) the five generated CSV files (`concepts.csv`, `revisions.csv`, `contracts.csv`, `bindings.csv`, `revision_aspects.csv`) alongside your model.
+Persist (e.g., release) the six generated CSV files (`concepts.csv`, `revisions.csv`, `contracts.csv`, `bindings.csv`, `revision_aspects.csv`, `contract_references.csv`) alongside your model.
 
 ### 7. Sync on every subsequent release
 
@@ -914,15 +946,16 @@ See [here](CONTRIBUTING.md) if you would like to contribute.
 
 This section documents the rationale behind key design decisions and the alternatives that were considered and rejected. It serves as a reference when the design is challenged.
 
-### Why five tables?
+### Why six tables?
 
-One could argue that concepts and contracts are sufficient: concepts capture identity, contracts capture the data contract. This is true only if what constitutes a breaking change is known a priori and applies uniformly to all downstream consumers. In practice, different teams have different definitions of "breaking". The five-table split reflects this:
+One could argue that concepts and contracts are sufficient: concepts capture identity, contracts capture the data contract. This is true only if what constitutes a breaking change is known a priori and applies uniformly to all downstream consumers. In practice, different teams have different definitions of "breaking". The six-table split reflects this:
 
 - **concepts** — stable identity; what a thing *is*, regardless of how it changes
 - **revisions** — a complete, unfiltered audit log of every detected change; does not judge whether a change is breaking
 - **contracts** — derived from revisions using a user-configurable set of essential attributes; two rows share a contract only if nothing essential to *that project's* definition of "breaking" changed
 - **bindings** — some modeling languages define entity instances (e.g., `Door: [Left, Right]`), which expand fields into multiple individually addressable runtime paths; bindings assign a stable identity to each such path
 - **revision_aspects** — a detailed audit trail of exactly which aspect keys changed on each revision, and their old/new values; separated from `revisions` because a revision is a single unconditional event while the aspects it touched are a variable-length, key-value breakdown of that event
+- **contract_references** — the contract-to-contract dependency edges (e.g. a property contract agreed against an entity contract), which let a new target contract cascade onto its dependents; separated from `contracts` because a contract can hold several edges and edges are immutable once written
 
 Merging revisions and contracts would either force a single global breaking-change policy or lose the audit trail. Merging bindings into contracts would require contracts to know about instance expansion, coupling two independent concepts. Merging revision_aspects into revisions would require a wide, sparse schema (one column per possible aspect key) instead of a normalized key-value table.
 

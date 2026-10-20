@@ -299,6 +299,52 @@ class TestPropertyChanged:
             )
 
 
+class TestPropertyChangedReferences:
+    def test_references_default_none(self) -> None:
+        """references is optional and defaults to None."""
+        ev = PropertyChanged(label="V.P", parent_label="V", change_type=ChangeType.ADDED, is_leaf=True)
+        assert ev.references is None
+
+    def test_references_accepted_on_added_and_modified(self) -> None:
+        """A role-to-label mapping is accepted, including {} to clear."""
+        for refs in ({"output_type": "Door"}, {}):
+            ev = PropertyChanged(
+                label="V.P", parent_label="V", change_type=ChangeType.ADDED, is_leaf=True, references=refs
+            )
+            assert ev.references == refs
+
+    def test_references_forbidden_on_enum_value(self) -> None:
+        """Enum values cannot hold references."""
+        with pytest.raises(ValidationError, match="references"):
+            PropertyChanged(
+                label="U.KMH",
+                parent_label="U",
+                kind=ElementKind.ENUM_VALUE,
+                change_type=ChangeType.ADDED,
+                references={"x": "Y"},
+            )
+
+    def test_references_forbidden_on_removed(self) -> None:
+        """REMOVED events cannot carry references."""
+        with pytest.raises(ValidationError, match="references"):
+            PropertyChanged(
+                label="V.P",
+                parent_label="V",
+                change_type=ChangeType.REMOVED,
+                is_leaf=True,
+                previous_aspects={"output_type": "Door"},
+                references={"output_type": "Door"},
+            )
+
+    def test_references_reject_empty_role_or_label(self) -> None:
+        """Blank roles and labels are rejected."""
+        for refs in ({"": "Door"}, {"output_type": " "}):
+            with pytest.raises(ValidationError, match="non-empty"):
+                PropertyChanged(
+                    label="V.P", parent_label="V", change_type=ChangeType.ADDED, is_leaf=True, references=refs
+                )
+
+
 class TestPropertyChangedIsLeaf:
     """``is_leaf`` is mandatory for PROPERTY events and forbidden for ENUM_VALUE events."""
 

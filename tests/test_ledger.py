@@ -22,10 +22,17 @@ from modl.sync import sync
 
 
 class TestEmptyLedger:
-    def test_returns_five_tables(self) -> None:
-        """Returns exactly the five expected table keys."""
+    def test_returns_all_tables(self) -> None:
+        """Returns exactly the six expected table keys."""
         ledger = empty_ledger()
-        assert set(ledger.keys()) == {"concepts", "revisions", "contracts", "bindings", "revision_aspects"}
+        assert set(ledger.keys()) == {
+            "concepts",
+            "revisions",
+            "contracts",
+            "bindings",
+            "revision_aspects",
+            "contract_references",
+        }
 
     def test_tables_are_empty(self) -> None:
         """All tables start with zero rows."""
@@ -60,7 +67,9 @@ class TestEmptyLedger:
             "operation",
             "previous_value",
             "newer_value",
+            "reason",
         ]
+        assert list(ledger["contract_references"].columns) == ["contract_uri", "role", "target_contract_uri"]
 
     def test_empty_ledger_passes_validation(self) -> None:
         """Empty ledger satisfies all schema constraints."""
@@ -542,6 +551,7 @@ class TestRevisionAspectsValidation:
                 "operation": ["added", "modified", "removed"],
                 "previous_value": [None, '"Integer"', '"old text"'],
                 "newer_value": ['"km/h"', '"Float"', None],
+                "reason": [None, None, None],
             }
         )
         validate_ledger(ledger)  # must not raise
@@ -556,6 +566,7 @@ class TestRevisionAspectsValidation:
                 "operation": ["added", "added"],
                 "previous_value": [None, None],
                 "newer_value": ['"km/h"', '"km/h"'],
+                "reason": [None, None],
             }
         )
         with pytest.raises(LedgerValidationError, match="Duplicate"):
@@ -571,6 +582,7 @@ class TestRevisionAspectsValidation:
                 "operation": ["renamed"],
                 "previous_value": [None],
                 "newer_value": ['"km/h"'],
+                "reason": [None],
             }
         )
         with pytest.raises(LedgerValidationError, match="Invalid operation"):
@@ -586,6 +598,7 @@ class TestRevisionAspectsValidation:
                 "operation": ["modified"],
                 "previous_value": [None],
                 "newer_value": ['"km/h"'],
+                "reason": [None],
             }
         )
         with pytest.raises(LedgerValidationError):
@@ -601,6 +614,7 @@ class TestRevisionAspectsValidation:
                 "operation": ["modified"],
                 "previous_value": ['"mph"'],
                 "newer_value": [None],
+                "reason": [None],
             }
         )
         with pytest.raises(LedgerValidationError):
@@ -616,6 +630,7 @@ class TestRevisionAspectsValidation:
                 "operation": ["added"],
                 "previous_value": ['"mph"'],
                 "newer_value": ['"km/h"'],
+                "reason": [None],
             }
         )
         with pytest.raises(LedgerValidationError):
@@ -631,6 +646,7 @@ class TestRevisionAspectsValidation:
                 "operation": ["removed"],
                 "previous_value": ['"mph"'],
                 "newer_value": ['"km/h"'],
+                "reason": [None],
             }
         )
         with pytest.raises(LedgerValidationError):
@@ -646,9 +662,103 @@ class TestRevisionAspectsValidation:
                 "operation": ["added"],
                 "previous_value": [None],
                 "newer_value": ['"km/h"'],
+                "reason": [None],
             }
         )
         with pytest.raises(LedgerValidationError, match="References missing"):
+            validate_ledger(ledger)
+
+
+class TestContractReferencesValidation:
+    def _ledger(self, source_kind: str = "PROPERTY", target_kind: str = "ENTITY") -> dict[str, pd.DataFrame]:
+        ledger = empty_ledger()
+        ledger["concepts"] = pd.DataFrame(
+            {
+                "serial": [0, 1],
+                "concept_uri": ["http://ns.example/concepts/0", "http://ns.example/concepts/1"],
+                "current_label": ["Vehicle.Door", "Door"],
+                "previous_labels": [None, None],
+                "kind": [source_kind, target_kind],
+                "status": ["ACTIVE", "ACTIVE"],
+                "parent_uri": [None, None],
+                "instances": [None, None],
+            }
+        )
+        ledger["revisions"] = pd.DataFrame(
+            {
+                "serial": [0, 1],
+                "revision_uri": ["http://ns.example/revisions/0", "http://ns.example/revisions/1"],
+                "concept_uri": ["http://ns.example/concepts/0", "http://ns.example/concepts/1"],
+                "previous_revision_uri": [None, None],
+                "status": ["ACTIVE", "ACTIVE"],
+            }
+        )
+        ledger["contracts"] = pd.DataFrame(
+            {
+                "serial": [0, 1],
+                "contract_uri": ["http://ns.example/contracts/0", "http://ns.example/contracts/1"],
+                "concept_uri": ["http://ns.example/concepts/0", "http://ns.example/concepts/1"],
+                "revision_uri": ["http://ns.example/revisions/0", "http://ns.example/revisions/1"],
+                "status": ["ACTIVE", "ACTIVE"],
+            }
+        )
+        return ledger
+
+    @staticmethod
+    def _edge(contract: str = "0", role: str = "output_type", target: str = "1") -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "contract_uri": [f"http://ns.example/contracts/{contract}"],
+                "role": [role],
+                "target_contract_uri": [f"http://ns.example/contracts/{target}"],
+            }
+        )
+
+    def test_valid_edge_passes(self) -> None:
+        """A PROPERTY contract referencing an ENTITY contract passes validation."""
+        ledger = self._ledger()
+        ledger["contract_references"] = self._edge()
+        validate_ledger(ledger)
+
+    def test_enumeration_set_target_passes(self) -> None:
+        """An ENUMERATION_SET target is valid."""
+        ledger = self._ledger(target_kind="ENUMERATION_SET")
+        ledger["contract_references"] = self._edge()
+        validate_ledger(ledger)
+
+    def test_duplicate_contract_role_raises(self) -> None:
+        """Duplicate (contract_uri, role) pairs are rejected."""
+        ledger = self._ledger()
+        ledger["contract_references"] = pd.concat([self._edge(), self._edge()], ignore_index=True)
+        with pytest.raises(LedgerValidationError, match="Duplicate"):
+            validate_ledger(ledger)
+
+    def test_unknown_target_contract_raises(self) -> None:
+        """A target_contract_uri absent from contracts is a FK violation."""
+        ledger = self._ledger()
+        ledger["contract_references"] = self._edge(target="zz")
+        with pytest.raises(LedgerValidationError, match="References missing"):
+            validate_ledger(ledger)
+
+    def test_non_property_source_raises(self) -> None:
+        """Only PROPERTY contracts may hold references."""
+        ledger = self._ledger(source_kind="ENTITY")
+        ledger["contract_references"] = self._edge()
+        with pytest.raises(LedgerValidationError, match="Only PROPERTY contracts"):
+            validate_ledger(ledger)
+
+    def test_non_container_target_raises(self) -> None:
+        """References must target ENTITY or ENUMERATION_SET contracts."""
+        ledger = self._ledger(target_kind="PROPERTY")
+        ledger["contract_references"] = self._edge()
+        with pytest.raises(LedgerValidationError, match="must target ENTITY or ENUMERATION_SET"):
+            validate_ledger(ledger)
+
+    def test_empty_role_raises(self) -> None:
+        """A blank role is rejected."""
+        ledger = self._ledger()
+        ledger["contract_references"] = self._edge(role=" ")
+        with pytest.raises(LedgerValidationError, match="role"):
             validate_ledger(ledger)
 
 

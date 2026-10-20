@@ -177,7 +177,7 @@ def sync(
             raise SystemExit(1)
 
         try:
-            tables = run_sync(tables, report, metadata, cfg)
+            tables = run_sync(tables, report, metadata, cfg, strict=strict)
         except SyncError as exc:
             log.error("Sync error — %s", exc)
             raise SystemExit(1) from None

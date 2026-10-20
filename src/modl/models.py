@@ -1,4 +1,4 @@
-"""Pydantic row models and shared enums for the five ledger tables."""
+"""Pydantic row models and shared enums for the ledger tables."""
 
 from enum import StrEnum
 from typing import Any
@@ -100,6 +100,10 @@ class RevisionAspectRow(BaseModel):
     ``operation`` is ``"added"``, ``"modified"``, or ``"removed"``: ``"modified"`` requires both
     ``previous_value`` and ``newer_value`` to be non-null; ``"added"`` forbids ``previous_value``;
     ``"removed"`` forbids ``newer_value``.
+
+    ``reason`` is optional provenance metadata kept apart from the old/new values. It is ``None`` for
+    changes reported by the adapter, and set (e.g. ``"referenced-contract-changed"``) when the sync
+    engine derives the change itself.
     """
 
     revision_uri: str
@@ -107,6 +111,7 @@ class RevisionAspectRow(BaseModel):
     operation: str
     previous_value: Any | None = None
     newer_value: Any | None = None
+    reason: str | None = None
 
     @model_validator(mode="after")
     def _validate_operation_nullability(self) -> "RevisionAspectRow":
@@ -119,3 +124,18 @@ class RevisionAspectRow(BaseModel):
         if self.operation == "removed" and self.newer_value is not None:
             raise ValueError("operation='removed' requires newer_value to be null")
         return self
+
+
+class ContractReferenceRow(BaseModel):
+    """One row of contract_references.csv — a dependency of a property contract on another contract.
+
+    Records that ``contract_uri`` (a ``PROPERTY`` contract) was agreed against ``target_contract_uri``
+    (an ``ENTITY`` or ``ENUMERATION_SET`` contract) under the given ``role`` — the name of the aspect
+    that carries the reference, usually ``output_type``. Identity is the composite key
+    ``(contract_uri, role)``. Rows are written when the referencing contract is minted and never
+    edited; an edge whose target contract is no longer ACTIVE marks a dependent that was not re-contracted.
+    """
+
+    contract_uri: str
+    role: str = Field(min_length=1)
+    target_contract_uri: str
