@@ -5,9 +5,11 @@ determines whether each change is breaking according to the :class:`~modl.config
 and writes the appropriate rows to the concepts, revisions, contracts, bindings,
 revision_aspects, and contract_references tables.
 
-After the events are applied, a reference pass records the contract-to-contract dependency edges
-declared by ``PropertyChanged.references`` and cascades a new contract of a referenced
-entity/enumeration set onto the properties that reference it, according to the property config.
+After the events are applied, a reconciliation pass compares the report's ``property_paths`` with the
+ledger and mints, removes or refreshes bindings; the engine never derives bindings itself. A reference
+pass then records the contract-to-contract dependency edges declared by ``PropertyChanged.references``
+and cascades a new contract of a referenced entity/enumeration set onto the properties that reference
+it, according to the property config.
 
 Usage::
 
@@ -24,8 +26,17 @@ from typing import Any
 import pandas as pd
 
 from modl.config import BreakingChangeConfig, ModelMetadata
-from modl.ir import ChangeType, DiffReport, EntityChanged, PropertyChanged, _aspect_ops_for_event, extract_op_full
-from modl.ledger import b36encode, next_serial
+from modl.ir import (
+    ChangeType,
+    DiffReport,
+    EntityChanged,
+    PathChange,
+    PropertyChanged,
+    PropertyPaths,
+    _aspect_ops_for_event,
+    extract_op_full,
+)
+from modl.ledger import LedgerValidationError, b36encode, canonical_tags, next_serial, validate_ledger
 from modl.models import ElementKind, ElementStatus
 
 log = logging.getLogger(__name__)
@@ -75,6 +86,9 @@ def sync(
     tables = {name: df.copy() for name, df in tables.items()}
     contracts_before = set(tables["contracts"]["contract_uri"])
     active_before = _active_contracts_by_concept(tables)
+    bindings_before = _active_binding_index(tables)
+    delta_entity_uris = _entities_with_instance_delta(tables, report)
+    eligible_keys = _validate_report_paths(report)
 
     # Build a set of all labels that appear as REMOVED events for fast consistency checks
     removed_labels: set[str] = {ev.label for ev in report.changes if ev.change_type == ChangeType.REMOVED}
@@ -103,8 +117,16 @@ def sync(
         else:
             _process_property(tables, event, metadata, cfg)
 
+    _reconcile_property_paths(
+        tables, metadata, report, bindings_before, active_before, delta_entity_uris, eligible_keys
+    )
     _apply_references(tables, report, metadata, contracts_before, active_before, strict=strict)
     _cascade_references(tables, metadata, cfg, contracts_before)
+
+    try:
+        validate_ledger(tables)
+    except LedgerValidationError as exc:
+        raise SyncError(f"Diff report produces an invalid ledger: {exc}") from exc
 
     return tables
 
@@ -155,8 +177,8 @@ def _entity_added(
     cfg: BreakingChangeConfig,
 ) -> None:
     instances = event.aspects.get(_INSTANCES_SNAPSHOT_KEY)
-    if instances is not None:
-        _validate_instances(instances, event.label)
+    if instances is not None and event.kind != ElementKind.ENTITY:
+        raise SyncError(f"[{event.label}] 'instances' is only valid on ENTITY events")
     instances_json = _serialize_instances(instances)
 
     concept_uri = _mint_concept(
@@ -213,27 +235,15 @@ def _entity_modified(
         _apply_rename(tables, concept_row_idx, event.label, event.renamed_from)
 
     # Read directional instance deltas from the event
-    instances_added: list[str] = event.aspects.get(_INSTANCES_ADDED_KEY) or []
-    instances_removed: list[str] = event.aspects.get(_INSTANCES_REMOVED_KEY) or []
-    if instances_added:
-        _validate_instances(instances_added, event.label)
-    if instances_removed:
-        _validate_instances(instances_removed, event.label)
+    instances_added: dict[str, list[str]] = event.aspects.get(_INSTANCES_ADDED_KEY) or {}
+    instances_removed: dict[str, list[str]] = event.aspects.get(_INSTANCES_REMOVED_KEY) or {}
     instances_changed = bool(instances_added or instances_removed)
+    if instances_changed and event.kind != ElementKind.ENTITY:
+        raise SyncError(f"[{event.label}] instance deltas are only valid on ENTITY events")
 
-    # Derive the new complete instance list from the stored one + delta
-    old_instances_json: str | None = tables["concepts"].at[concept_row_idx, "instances"]
-    old_instances: list[str] = _parse_instances(old_instances_json) or []
-
-    # Reject instances_added values that overlap with the existing instance list
-    if instances_added and old_instances:
-        overlap = set(instances_added) & set(old_instances)
-        if overlap:
-            raise SyncError(
-                f"[{event.label}] 'instances_added' contains values already present "
-                f"in the stored instance list: {sorted(overlap)}"
-            )
-    new_instances: list[str] = [i for i in old_instances if i not in instances_removed] + instances_added
+    # Derive the new complete instance dictionary from the stored one + delta
+    old_instances: dict[str, list[str]] = _parse_instances(tables["concepts"].at[concept_row_idx, "instances"]) or {}
+    new_instances = _apply_instance_delta(event.label, old_instances, instances_added, instances_removed)
 
     # --- Entity revision ---
     prev_rev_uri = _active_revision_uri(tables, concept_uri)
@@ -261,17 +271,7 @@ def _entity_modified(
 
         if instances_changed:
             _set_instances(tables, concept_row_idx, new_instances or None)
-            # Instance cascade: update bindings only — child property contracts are NOT changed.
-            # Old bindings for removed instances are marked REMOVED; new bindings for added
-            # instances are appended to each child's existing active contract.
-            _cascade_instance_bindings(
-                tables,
-                metadata,
-                entity_concept_uri=concept_uri,
-                instances_added=instances_added,
-                instances_removed=instances_removed,
-            )
-        # else: non-instance breaking — entity contract updated; no child cascade
+        # Entity contract updated; bindings of dependent properties follow the report's property_paths.
     else:
         log.info(
             "Entity MODIFIED (non-breaking):\n  label=%s\n  concept_URI=%s\n  new_revision_URI=%s",
@@ -283,15 +283,6 @@ def _entity_modified(
         # Non-breaking
         if instances_changed:
             _set_instances(tables, concept_row_idx, new_instances or None)
-            # Same binding cascade regardless of breaking/non-breaking:
-            # child property contracts are never changed by an instance-list delta.
-            _cascade_instance_bindings(
-                tables,
-                metadata,
-                entity_concept_uri=concept_uri,
-                instances_added=instances_added,
-                instances_removed=instances_removed,
-            )
 
 
 def _entity_removed(
@@ -337,28 +328,6 @@ def _entity_removed(
 # ── Property handlers ─────────────────────────────────────────────────────────
 
 
-def _effective_instantiate(instantiate: bool | None) -> bool:
-    """Resolve a property event's optional ``instantiate`` field to its effective boolean.
-
-    ``None`` (omitted by the adapter) means "inherit the parent's instances" — the
-    default, backward-compatible behaviour.  ``False`` means the property exists exactly
-    once and must never receive the parent's per-instance expansion.
-    """
-    return True if instantiate is None else instantiate
-
-
-def _resolve_property_instances(parent_instances: list[str] | None, instantiate: bool | None) -> list[str] | None:
-    """Return the instance list a property concept should store, honouring ``instantiate``.
-
-    Mirrors the parent entity's instance list only when the property is instantiated
-    (the default). When ``instantiate`` is explicitly ``False``, the property is pinned
-    to a single non-instantiated path and must never inherit the parent's instances.
-    """
-    if not _effective_instantiate(instantiate):
-        return None
-    return parent_instances
-
-
 def _binding_eligible(event: PropertyChanged) -> bool:
     """Resolve whether a PROPERTY event should mint a binding.
 
@@ -377,15 +346,8 @@ def _property_added(
     metadata: ModelMetadata,
     cfg: BreakingChangeConfig,
 ) -> None:
-    # Look up parent entity concept for parent_uri and instance list
-    parent_idx, parent_uri = _require_concept(tables, event.parent_label)
-    parent_instances_json: str | None = tables["concepts"].at[parent_idx, "instances"]
-    parent_instances: list[str] | None = _parse_instances(parent_instances_json)
-
-    # A property with instantiate=False is pinned to a single non-instantiated path and
-    # must never inherit the parent entity's instance list — see _resolve_property_instances.
-    resolved_instances = _resolve_property_instances(parent_instances, event.instantiate)
-    resolved_instances_json = _serialize_instances(resolved_instances)
+    # Look up parent entity concept for parent_uri
+    _, parent_uri = _require_concept(tables, event.parent_label)
 
     concept_uri = _mint_concept(
         tables,
@@ -393,19 +355,14 @@ def _property_added(
         label=event.label,
         kind=event.kind,
         parent_uri=parent_uri,
-        instances_json=resolved_instances_json,
+        instances_json=None,
     )
     revision_uri = _mint_revision(
         tables, metadata, concept_uri=concept_uri, prev_revision_uri=None, status=ElementStatus.ACTIVE
     )
     _record_added_aspects(tables, revision_uri, event.aspects)
     contract_uri = _mint_contract(tables, metadata, concept_uri=concept_uri, revision_uri=revision_uri)
-
-    # Mint bindings for binding-eligible PROPERTY concepts only — a leaf property always
-    # qualifies; a non-leaf property qualifies only when explicitly marked binding_eligible
-    # (e.g. a struct-typed property read/written as one atomic unit) — see _binding_eligible.
-    if event.kind == ElementKind.PROPERTY and _binding_eligible(event):
-        _mint_bindings_for_instances(tables, metadata, contract_uri=contract_uri, instances=resolved_instances)
+    # Bindings are minted later from the report's property_paths.
 
     log.info(
         "Property ADDED:\n  label=%s\n  concept_URI=%s\n  revision_URI=%s\n  contract_URI=%s",
@@ -435,24 +392,7 @@ def _property_modified(
     old_binding_eligible = old_contract_uri is not None and _contract_has_any_bindings(tables, old_contract_uri)
     binding_eligible_changed = event.kind == ElementKind.PROPERTY and old_binding_eligible != _binding_eligible(event)
 
-    # An instantiate transition is likewise always breaking, regardless of the config — it
-    # changes whether the property is per-instance-addressable at all. The new resolved
-    # instance list is derived from the *current* parent instances plus the event's
-    # instantiate field, then compared against what is currently stored on this concept.
-    new_instances: list[str] | None = None
-    instances_changed = False
-    if event.kind == ElementKind.PROPERTY:
-        parent_uri = tables["concepts"].at[concept_row_idx, "parent_uri"]
-        parent_instances = _instances_by_concept_uri(tables, parent_uri) if parent_uri is not None else None
-        new_instances = _resolve_property_instances(parent_instances, event.instantiate)
-        old_instances = _parse_instances(tables["concepts"].at[concept_row_idx, "instances"])
-        instances_changed = new_instances != old_instances
-
-    breaking = (
-        cfg.is_breaking(event.kind, aspect_ops, renamed_from=event.renamed_from)
-        or binding_eligible_changed
-        or instances_changed
-    )
+    breaking = cfg.is_breaking(event.kind, aspect_ops, renamed_from=event.renamed_from) or binding_eligible_changed
 
     if event.renamed_from is not None:
         _apply_rename(tables, concept_row_idx, event.label, event.renamed_from)
@@ -469,16 +409,9 @@ def _property_modified(
         contract_uri = _mint_contract(tables, metadata, concept_uri=concept_uri, revision_uri=revision_uri)
 
         if event.kind == ElementKind.PROPERTY:
-            if instances_changed:
-                _set_instances(tables, concept_row_idx, new_instances)
-            # Supersede any existing bindings (a safe no-op if the concept never had any),
-            # then mint fresh bindings under the new contract only if still binding-eligible.
-            instances_json: str | None = tables["concepts"].at[concept_row_idx, "instances"]
-            instances = _parse_instances(instances_json)
+            # Supersede existing bindings (a safe no-op if the concept never had any); the
+            # report's property_paths re-mint them under the new contract.
             _supersede_bindings_by_concept(tables, concept_uri)
-            if _binding_eligible(event):
-                _mint_bindings_for_instances(tables, metadata, contract_uri=contract_uri, instances=instances)
-
         log.info(
             "Property MODIFIED (breaking):\n  label=%s\n  concept_URI=%s\n  new_revision_URI=%s\n  new_contract_URI=%s",
             event.label,
@@ -529,83 +462,226 @@ def _property_removed(
 # ── Instance cascade helpers ──────────────────────────────────────────────────
 
 
-def _cascade_instance_bindings(
+_PropertyKey = tuple[str, str]  # (parent_label, label)
+
+
+def _active_binding_index(tables: dict[str, pd.DataFrame]) -> dict[str, dict[str, str]]:
+    """Map each property concept_uri to ``{canonical instance_tags: binding_uri}`` of its ACTIVE bindings."""
+    bindings = tables["bindings"]
+    active = bindings[bindings["status"] == ElementStatus.ACTIVE]
+    contracts = tables["contracts"]
+    concept_by_contract = dict(zip(contracts["contract_uri"], contracts["concept_uri"], strict=True))
+    index: dict[str, dict[str, str]] = {}
+    for contract_uri, tags, binding_uri in zip(
+        active["contract_uri"], active["instance_tags"], active["binding_uri"], strict=True
+    ):
+        index.setdefault(concept_by_contract[contract_uri], {})[tags] = binding_uri
+    return index
+
+
+def _entities_with_instance_delta(tables: dict[str, pd.DataFrame], report: DiffReport) -> set[str]:
+    """Return the concept_uris of existing entities whose MODIFIED event reports an instance delta."""
+    uris: set[str] = set()
+    for ev in report.changes:
+        if not isinstance(ev, EntityChanged) or ev.change_type != ChangeType.MODIFIED:
+            continue
+        if not (ev.aspects.get(_INSTANCES_ADDED_KEY) or ev.aspects.get(_INSTANCES_REMOVED_KEY)):
+            continue
+        try:
+            _, uri = _require_concept(tables, ev.renamed_from or ev.label)
+        except SyncError:
+            continue
+        uris.add(uri)
+    return uris
+
+
+def _validate_report_paths(report: DiffReport) -> dict[_PropertyKey, bool]:
+    """Check the ``property_paths`` of a report in isolation; return binding eligibility per property event.
+
+    Raises :exc:`SyncError` when a binding-eligible ADDED/MODIFIED property has no entry, an entry
+    targets a property its event declares not binding-eligible, entries or runtime paths repeat, or
+    tags repeat within an entry.
+    """
+    eligibility: dict[_PropertyKey, bool] = {}
+    for ev in report.changes:
+        if isinstance(ev, PropertyChanged) and ev.kind == ElementKind.PROPERTY and ev.change_type != ChangeType.REMOVED:
+            eligibility[(ev.parent_label, ev.label)] = _binding_eligible(ev)
+
+    seen: set[_PropertyKey] = set()
+    owner_by_path: dict[str, str] = {}
+    for pp in report.property_paths:
+        key = (pp.parent_label, pp.label)
+        if key in seen:
+            raise SyncError(f"[{pp.label}] duplicate property_paths entry under parent '{pp.parent_label}'")
+        seen.add(key)
+        if eligibility.get(key) is False:
+            raise SyncError(f"[{pp.label}] has property_paths but its event is not binding-eligible")
+        tag_sets: set[str] = set()
+        for entry in pp.paths:
+            canon = canonical_tags(entry.tags)
+            if canon in tag_sets:
+                raise SyncError(f"[{pp.label}] duplicate instance tags in property_paths: {canon}")
+            tag_sets.add(canon)
+            if entry.change != PathChange.REMOVED:
+                if entry.path in owner_by_path:
+                    raise SyncError(
+                        f"[{pp.label}] runtime_path '{entry.path}' is also reported for '{owner_by_path[entry.path]}'"
+                    )
+                owner_by_path[entry.path] = pp.label
+
+    missing = sorted(
+        label for (parent, label), eligible in eligibility.items() if eligible and (parent, label) not in seen
+    )
+    if missing:
+        raise SyncError(f"Binding-eligible properties have no property_paths entry: {missing}")
+    return eligibility
+
+
+def _resolve_entry_tags(
+    tables: dict[str, pd.DataFrame], tags: dict[str, dict[str, str]], owner: str, *, check_instances: bool
+) -> dict[str, dict[str, str]]:
+    """Translate report tags keyed by entity label into tags keyed by entity concept_uri.
+
+    With *check_instances*, every dimension/instance must also exist on the entity's stored instances.
+    """
+    concepts = tables["concepts"]
+    resolved: dict[str, dict[str, str]] = {}
+    for label, dims in tags.items():
+        match = concepts[
+            (concepts["current_label"] == label)
+            & (concepts["kind"] == ElementKind.ENTITY.value)
+            & (concepts["status"] == ElementStatus.ACTIVE.value)
+        ]
+        if match.empty:
+            raise SyncError(f"[{owner}] tags reference unknown or inactive entity '{label}'")
+        if check_instances:
+            known = _parse_instances(match.iloc[0]["instances"]) or {}
+            for dim, value in dims.items():
+                if value not in known.get(dim, []):
+                    raise SyncError(f"[{owner}] tag {label}.{dim}='{value}' is not an instance declared by the entity")
+        resolved[str(match.iloc[0]["concept_uri"])] = dict(dims)
+    return resolved
+
+
+def _shape(tags: dict[str, dict[str, str]]) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """Return the dimension signature of one binding's tags (entity -> dimension names)."""
+    return tuple(sorted((uri, tuple(sorted(dims))) for uri, dims in tags.items()))
+
+
+def _reconcile_property_paths(
     tables: dict[str, pd.DataFrame],
     metadata: ModelMetadata,
-    entity_concept_uri: str,
-    instances_added: list[str],
-    instances_removed: list[str],
+    report: DiffReport,
+    bindings_before: dict[str, dict[str, str]],
+    active_before: dict[str, str],
+    delta_entity_uris: set[str],
+    event_eligibility: dict[_PropertyKey, bool],
 ) -> None:
-    """Update child property bindings for an instance-list change.
+    """Cross-check the reported paths against the ledger and mint, remove or refresh bindings."""
+    reported: set[str] = set()
+    for pp in report.property_paths:
+        uri = _reconcile_one(tables, metadata, pp, bindings_before, active_before, event_eligibility)
+        reported.add(uri)
 
-    Child property **contracts are never changed** by an instance-list delta — only bindings
-    are affected.  This holds regardless of whether the parent entity change is classified as
-    breaking or non-breaking:
-
-    - Bindings for *removed* instances are marked ``REMOVED``.
-    - New bindings for *added* instances are appended to each child's active contract.
-    """
-    child_df = _child_concepts(tables, entity_concept_uri)
-    if child_df.empty:
-        return
-
-    removed_set = set(instances_removed)
-
-    for child_idx in child_df.index.tolist():
-        child_idx = int(child_idx)
-        child_uri: str = tables["concepts"].at[child_idx, "concept_uri"]
-        child_kind: str = tables["concepts"].at[child_idx, "kind"]
-
-        if child_kind != ElementKind.PROPERTY:
+    # An instance delta on an entity requires a fresh path set for every property tagged with it.
+    concepts = tables["concepts"].set_index("concept_uri")
+    for prop_uri, index in bindings_before.items():
+        if prop_uri in reported or concepts.at[prop_uri, "status"] != ElementStatus.ACTIVE.value:
             continue
-
-        # A non-instantiated property (its own stored instances is null — e.g. instantiate=False
-        # was set when it was added) never mirrors the parent's instance list and never receives
-        # per-instance bindings — it keeps its single singleton binding regardless of how the
-        # parent's instance list changes.
-        if _parse_instances(tables["concepts"].at[child_idx, "instances"]) is None:
-            continue
-
-        # Mark bindings for removed instances as REMOVED
-        if removed_set:
-            active_contracts = set(
-                tables["contracts"][
-                    (tables["contracts"]["concept_uri"] == child_uri)
-                    & (tables["contracts"]["status"] == ElementStatus.ACTIVE)
-                ]["contract_uri"]
-            )
-            mask = (
-                tables["bindings"]["contract_uri"].isin(active_contracts)
-                & tables["bindings"]["instance_label"].isin(removed_set)
-                & (tables["bindings"]["status"] == ElementStatus.ACTIVE)
-            )
-            tables["bindings"].loc[mask, "status"] = ElementStatus.REMOVED
-            child_label: str = tables["concepts"].at[child_idx, "current_label"]
-            log.info(
-                "  Bindings REMOVED (instance cascade):\n    child=%s\n    instances=%s",
-                child_label,
-                sorted(removed_set),
+        used = {entity for canon in index for entity in json.loads(canon)}
+        if used & delta_entity_uris:
+            raise SyncError(
+                f"[{concepts.at[prop_uri, 'current_label']}] depends on an entity with an instance change "
+                "but has no property_paths entry"
             )
 
-        # Append bindings for added instances to the existing active contract — only for
-        # leaf properties (a reference property never had bindings, so it gets none here).
-        if instances_added:
-            active_contract = _active_contract_uri(tables, child_uri)
-            if active_contract and _contract_has_any_bindings(tables, active_contract):
-                for instance in instances_added:
-                    _mint_binding(tables, metadata, contract_uri=active_contract, instance_label=instance)
-                child_label = tables["concepts"].at[child_idx, "current_label"]
-                log.info(
-                    "  Bindings ADDED (instance cascade):\n    child=%s\n    contract_URI=%s\n    instances=%s",
-                    child_label,
-                    active_contract,
-                    instances_added,
-                )
 
-        # Keep child concept instances column in sync with the updated parent list
-        old_child_instances = _parse_instances(tables["concepts"].at[child_idx, "instances"]) or []
-        new_child_instances = [i for i in old_child_instances if i not in removed_set] + instances_added
-        _set_instances(tables, child_idx, new_child_instances or None)
+def _reconcile_one(
+    tables: dict[str, pd.DataFrame],
+    metadata: ModelMetadata,
+    pp: PropertyPaths,
+    bindings_before: dict[str, dict[str, str]],
+    active_before: dict[str, str],
+    event_eligibility: dict[_PropertyKey, bool],
+) -> str:
+    """Reconcile one property's reported paths; return its concept_uri."""
+    _, uri = _require_concept(tables, pp.label, parent_label=pp.parent_label)
+    concepts = tables["concepts"]
+    row = concepts[concepts["concept_uri"] == uri].iloc[0]
+    if row["kind"] != ElementKind.PROPERTY.value or row["status"] != ElementStatus.ACTIVE.value:
+        raise SyncError(f"[{pp.label}] property_paths target is not an ACTIVE PROPERTY")
+
+    old = bindings_before.get(uri, {})
+    if not old and not event_eligibility.get((pp.parent_label, pp.label), False):
+        raise SyncError(f"[{pp.label}] has property_paths but is not binding-eligible")
+
+    groups: dict[PathChange, dict[str, tuple[dict[str, dict[str, str]], str]]] = {c: {} for c in PathChange}
+    for entry in pp.paths:
+        tags = _resolve_entry_tags(tables, entry.tags, pp.label, check_instances=entry.change != PathChange.REMOVED)
+        groups[entry.change][canonical_tags(tags)] = (tags, entry.path)
+
+    reported_old = set(groups[PathChange.UNCHANGED]) | set(groups[PathChange.REMOVED])
+    if reported_old != set(old):
+        raise SyncError(
+            f"[{pp.label}] reported unchanged/removed paths do not match the ledger's ACTIVE bindings: "
+            f"missing from report={sorted(set(old) - reported_old)}, "
+            f"unknown to ledger={sorted(reported_old - set(old))}"
+        )
+
+    keep = {**groups[PathChange.UNCHANGED], **groups[PathChange.ADDED]}
+    old_shapes = {_shape(json.loads(c)) for c in old}
+    new_shapes = {_shape(tags) for tags, _ in keep.values()}
+
+    contract_uri = _active_contract_uri(tables, uri)
+    if contract_uri is None:
+        raise SyncError(f"[{pp.label}] has no active contract")
+    bumped = active_before.get(uri) != contract_uri
+    if not bumped and old_shapes and new_shapes and old_shapes != new_shapes:
+        revision_uri = _active_revision_uri(tables, uri)
+        if revision_uri is None:
+            raise SyncError(f"[{pp.label}] has no active revision")
+        contract_uri = _bump_property_contract(tables, metadata, uri, revision_uri, rebind=False)
+        bumped = True
+        log.info("Property paths changed dimensions:\n  label=%s\n  new_contract_URI=%s", pp.label, contract_uri)
+
+    if bumped:
+        for tags, path in keep.values():
+            _mint_binding(tables, metadata, contract_uri, tags, path)
+        return uri
+
+    for tags, path in groups[PathChange.ADDED].values():
+        _mint_binding(tables, metadata, contract_uri, tags, path)
+    removed_uris = {old[canon] for canon in groups[PathChange.REMOVED]}
+    bindings = tables["bindings"]
+    bindings.loc[bindings["binding_uri"].isin(removed_uris), "status"] = ElementStatus.REMOVED.value
+    for canon, (_, path) in groups[PathChange.UNCHANGED].items():
+        mask = bindings["binding_uri"] == old[canon]
+        if (bindings.loc[mask, "runtime_path"] != path).any():
+            bindings.loc[mask, "runtime_path"] = path
+    return uri
+
+
+def _apply_instance_delta(
+    label: str,
+    old: dict[str, list[str]],
+    added: dict[str, list[str]],
+    removed: dict[str, list[str]],
+) -> dict[str, list[str]]:
+    """Apply a directional instance delta to a stored dimension dictionary."""
+    new = {dim: list(values) for dim, values in old.items()}
+    for dim, values in removed.items():
+        current = new.get(dim, [])
+        missing = [v for v in values if v not in current]
+        if missing:
+            raise SyncError(f"[{label}] 'instances_removed' dimension '{dim}' has values not stored: {missing}")
+        new[dim] = [v for v in current if v not in values]
+    for dim, values in added.items():
+        current = new.get(dim, [])
+        overlap = sorted(set(values) & set(current))
+        if overlap:
+            raise SyncError(f"[{label}] 'instances_added' dimension '{dim}' has values already stored: {overlap}")
+        new[dim] = current + values
+    return {dim: values for dim, values in new.items() if values}
 
 
 # ── Minting helpers ───────────────────────────────────────────────────────────
@@ -683,7 +759,8 @@ def _mint_binding(
     tables: dict[str, pd.DataFrame],
     metadata: ModelMetadata,
     contract_uri: str,
-    instance_label: str | None,
+    instance_tags: dict[str, dict[str, str]],
+    runtime_path: str,
 ) -> str:
     serial = next_serial(tables["bindings"])
     uri = _mint_uri(metadata, "bindings", serial)
@@ -691,25 +768,12 @@ def _mint_binding(
         "serial": serial,
         "binding_uri": uri,
         "contract_uri": contract_uri,
-        "instance_label": instance_label,
+        "instance_tags": canonical_tags(instance_tags),
+        "runtime_path": runtime_path,
         "status": ElementStatus.ACTIVE.value,
     }
     tables["bindings"] = pd.concat([tables["bindings"], pd.DataFrame([new_row])], ignore_index=True)
     return uri
-
-
-def _mint_bindings_for_instances(
-    tables: dict[str, pd.DataFrame],
-    metadata: ModelMetadata,
-    contract_uri: str,
-    instances: list[str] | None,
-) -> None:
-    """Mint one binding per instance, or a single singleton binding when there are no instances."""
-    if instances:
-        for inst in instances:
-            _mint_binding(tables, metadata, contract_uri=contract_uri, instance_label=inst)
-    else:
-        _mint_binding(tables, metadata, contract_uri=contract_uri, instance_label=None)
 
 
 def _serialize_aspect_value(value: Any) -> str | None:
@@ -823,17 +887,29 @@ def _require_active_contract(tables: dict[str, pd.DataFrame], concept_uri: str, 
 
 
 def _bump_property_contract(
-    tables: dict[str, pd.DataFrame], metadata: ModelMetadata, concept_uri: str, revision_uri: str
+    tables: dict[str, pd.DataFrame],
+    metadata: ModelMetadata,
+    concept_uri: str,
+    revision_uri: str,
+    *,
+    rebind: bool = True,
 ) -> str:
-    """Supersede a property's contract and bindings, then mint a new contract (and bindings if it had any)."""
+    """Supersede a property's contract and bindings, then mint a new contract.
+
+    With *rebind*, the superseded ACTIVE bindings are re-minted unchanged (same tags and runtime path)
+    under the new contract.
+    """
     old_contract_uri = _active_contract_uri(tables, concept_uri)
-    had_bindings = old_contract_uri is not None and _contract_has_any_bindings(tables, old_contract_uri)
+    carried: list[tuple[str, str]] = []
+    if rebind and old_contract_uri is not None:
+        b = tables["bindings"]
+        live = b[(b["contract_uri"] == old_contract_uri) & (b["status"] == ElementStatus.ACTIVE)]
+        carried = list(zip(live["instance_tags"], live["runtime_path"], strict=True))
     _supersede_contract(tables, concept_uri)
     new_contract_uri = _mint_contract(tables, metadata, concept_uri, revision_uri)
     _supersede_bindings_by_concept(tables, concept_uri)
-    if had_bindings:
-        instances = _instances_by_concept_uri(tables, concept_uri)
-        _mint_bindings_for_instances(tables, metadata, new_contract_uri, instances)
+    for tags_json, path in carried:
+        _mint_binding(tables, metadata, new_contract_uri, json.loads(tags_json), path)
     return new_contract_uri
 
 
@@ -1072,7 +1148,7 @@ def _apply_rename(
 def _set_instances(
     tables: dict[str, pd.DataFrame],
     concept_idx: int,
-    instances: list[str] | None,
+    instances: dict[str, list[str]] | None,
 ) -> None:
     col = "instances"
     # An all-null column starts as float64; cast to object so strings can be stored.
@@ -1147,55 +1223,23 @@ def _child_concepts(tables: dict[str, pd.DataFrame], parent_uri: str) -> pd.Data
     return df[df["parent_uri"] == parent_uri]
 
 
-def _instances_by_concept_uri(tables: dict[str, pd.DataFrame], concept_uri: str) -> list[str] | None:
-    """Return the parsed instance list stored on the concept row with the given concept_uri."""
-    df = tables["concepts"]
-    match = df[df["concept_uri"] == concept_uri]
-    if match.empty:
-        return None
-    return _parse_instances(match.iloc[0]["instances"])
-
-
 # ── Serialisation helpers ─────────────────────────────────────────────────────
 
 
-def _parse_instances(value: Any) -> list[str] | None:
-    """Deserialise a JSON-encoded instance list from the CSV; returns None for missing/null values."""
+def _parse_instances(value: Any) -> dict[str, list[str]] | None:
+    """Deserialise a JSON-encoded dimension dictionary from the CSV; returns None for missing/null values."""
     if value is None or (isinstance(value, float) and math.isnan(value)):
         return None
-    if isinstance(value, list):
+    if isinstance(value, dict):
         return value
     return json.loads(value)  # type: ignore[no-any-return]
 
 
-def _serialize_instances(instances: list[str] | None) -> str | None:
-    """Serialise an instance list to a JSON string for storage in the CSV."""
+def _serialize_instances(instances: dict[str, list[str]] | None) -> str | None:
+    """Serialise a dimension dictionary to canonical JSON for the CSV; None when empty."""
     if not instances:
         return None
-    return json.dumps(instances)
-
-
-def _validate_instances(instances: Any, label: str) -> None:
-    """Raise :exc:`SyncError` when *instances* is not a flat, duplicate-free list of strings.
-
-    Catches nested lists, dicts, numbers, and other non-string elements that indicate
-    a non-compliant diff adapter (e.g. multi-dimensional instance arrays).  Also rejects
-    duplicate values within the list.
-    """
-    if not isinstance(instances, list):
-        raise SyncError(f"[{label}] 'instances' must be a list of strings, got {type(instances).__name__!r}")
-    bad = [i for i, v in enumerate(instances) if not isinstance(v, str)]
-    if bad:
-        bad_types = [type(instances[i]).__name__ for i in bad]
-        raise SyncError(
-            f"[{label}] 'instances' must be a flat list of strings — "
-            f"element(s) at index {bad} are not strings (got {bad_types}). "
-            "Multi-dimensional instances must be flattened by the adapter before reaching the diff report."
-        )
-    seen: set[str] = set()
-    dupes = [v for v in instances if v in seen or seen.add(v)]  # type: ignore[func-returns-value]
-    if dupes:
-        raise SyncError(f"[{label}] 'instances' contains duplicate values: {sorted(set(dupes))}")
+    return json.dumps(instances, sort_keys=True)
 
 
 def _parse_previous_labels(value: Any) -> list[str]:

@@ -22,7 +22,7 @@ from modl.models import ElementKind
 #   name.modified          — rename (renamed_from set on the event)
 #   properties.added/removed — child property added/removed under an ENTITY
 #   values.added/removed   — ENUM_VALUE added/removed under an ENUMERATION_SET
-#   instances.added/removed — instance label added/removed on an ENTITY
+#   instances.added/removed — instance value added/removed on an ENTITY
 
 # Directional instance keys emitted by _aspect_ops_for_event → canonical config key ("instances")
 _INSTANCE_KEY_TRANSLATIONS: dict[str, tuple[str, str]] = {
@@ -178,9 +178,9 @@ class BreakingChangeConfig(BaseModel):
     +---------------------------+----------------------------------------------+
     | ``values.removed``        | ENUM_VALUE removed from an ENUMERATION_SET   |
     +---------------------------+----------------------------------------------+
-    | ``instances.added``       | Instance label added to an ENTITY            |
+    | ``instances.added``       | Instance value added to an ENTITY            |
     +---------------------------+----------------------------------------------+
-    | ``instances.removed``     | Instance label removed from an ENTITY        |
+    | ``instances.removed``     | Instance value removed from an ENTITY        |
     +---------------------------+----------------------------------------------+
 
     ``name.added`` and ``name.removed`` are forbidden — those operations do not exist at

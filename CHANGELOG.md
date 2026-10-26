@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+- Binding paths: the diff report gains a top-level `property_paths` list. For every binding-eligible property the adapter reports the literal runtime paths and the instances (`tags`, keyed by entity label) each belongs to, with a `change` of `unchanged`, `added` or `removed`. This fixes leaf properties under nested instanced entities receiving wrong bindings, because bindings are no longer derived from the parent entity's instances.
+- `bindings.csv` stores `instance_tags` (canonical JSON keyed by the owning entity's concept URI, `{}` for a singleton) and `runtime_path`.
+- Sync cross-checks `property_paths` against the ledger: every binding-eligible `ADDED`/`MODIFIED` property needs an entry, an instance delta requires every property tagged with that entity to be re-reported, `unchanged` + `removed` tags must equal the ACTIVE binding tags, tag values must be declared instances, and runtime paths must be unique.
+- A change in the dimension shape of a property's tags forces a new contract and re-mints its bindings.
+- Entity `instances`, `instances_added` and `instances_removed` are dimension maps (`{"side": ["Left", "Right"]}`) so an entity can be indexed along several dimensions.
+### Changed
+- **Breaking:** the `bindings.csv` schema changed (`instance_label` replaced by `instance_tags` and `runtime_path`) and entity instances are dimension maps; existing ledgers and diff reports must be regenerated.
+- **Breaking:** the `instantiate` field on property events is removed; paths are reported explicitly instead.
+- `modl export bindings`: the `json` format lists, per property, one item per binding with `instance_tags` (entity labels) and `runtime_path`, sorted by `runtime_path`; the `vspec` format is keyed by each binding's literal `runtime_path`.
+- Updated `diff_report_template.md` and the README to document `property_paths`.
+### Tests
+- Added coverage for the path-based binding model: IR validation of `property_paths` and dimension-map instances, binding row validation, nested instanced entities (e.g. Axle/Wheel/Tire), instance deltas, path-only changes, tag-shape changes, cross-check failures and the new export shape.
 
 ## [0.7.0] - 2026-10-20
 ### Added

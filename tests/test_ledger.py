@@ -4,7 +4,7 @@ import pandas as pd
 import pytest
 
 from modl.config import BreakingChangeConfig, ModelMetadata
-from modl.ir import ChangeType, DiffReport, EntityChanged, PropertyChanged
+from modl.ir import ChangeType, DiffReport, EntityChanged, PathChange, PathEntry, PropertyChanged, PropertyPaths
 from modl.ledger import (
     LedgerValidationError,
     b36decode,
@@ -60,7 +60,14 @@ class TestEmptyLedger:
             "status",
         ]
         assert list(ledger["contracts"].columns) == ["serial", "contract_uri", "concept_uri", "revision_uri", "status"]
-        assert list(ledger["bindings"].columns) == ["serial", "binding_uri", "contract_uri", "instance_label", "status"]
+        assert list(ledger["bindings"].columns) == [
+            "serial",
+            "binding_uri",
+            "contract_uri",
+            "instance_tags",
+            "runtime_path",
+            "status",
+        ]
         assert list(ledger["revision_aspects"].columns) == [
             "revision_uri",
             "aspect_key",
@@ -146,8 +153,8 @@ class TestValidateLedger:
         with pytest.raises(LedgerValidationError, match="duplicate"):
             validate_ledger(ledger)
 
-    def test_null_instance_label_in_bindings_is_valid(self) -> None:
-        """Null instance_label in bindings is permitted (singleton binding)."""
+    def test_empty_tags_in_bindings_is_valid(self) -> None:
+        """Empty instance_tags in bindings is permitted (singleton binding)."""
         ledger = empty_ledger()
         ledger["concepts"] = pd.DataFrame(
             {
@@ -184,7 +191,8 @@ class TestValidateLedger:
                 "serial": [0],
                 "contract_uri": ["http://ns.example/contracts/0"],
                 "binding_uri": ["http://ns.example/bindings/0"],
-                "instance_label": [None],  # singleton — no instance label
+                "instance_tags": ["{}"],  # singleton — no tags
+                "runtime_path": ["Battery.StateOfCharge"],
                 "status": ["ACTIVE"],
             }
         )
@@ -414,7 +422,8 @@ class TestValidateLedger:
                 "serial": [0],
                 "contract_uri": ["http://ns.example/contracts/0"],
                 "binding_uri": ["http://ns.example/bindings/0"],
-                "instance_label": ["Left"],
+                "instance_tags": ["{}"],
+                "runtime_path": ["Vehicle"],
                 "status": ["ACTIVE"],
             }
         )
@@ -458,7 +467,8 @@ class TestValidateLedger:
                 "serial": [0],
                 "contract_uri": ["http://ns.example/contracts/0"],
                 "binding_uri": ["http://ns.example/bindings/0"],
-                "instance_label": [None],
+                "instance_tags": ["{}"],
+                "runtime_path": ["Vehicle.Door"],
                 "status": ["ACTIVE"],
             }
         )
@@ -503,7 +513,8 @@ class TestValidateLedger:
                 "serial": [0],
                 "contract_uri": ["http://ns.example/contracts/0"],
                 "binding_uri": ["http://ns.example/bindings/0"],
-                "instance_label": [None],
+                "instance_tags": ["{}"],
+                "runtime_path": ["Vehicle.Door"],
                 "status": ["ACTIVE"],
             }
         )
@@ -1305,44 +1316,88 @@ def _prop_added(label: str, parent: str, is_leaf: bool = True, **aspects) -> Pro
     )
 
 
+def _paths(label: str, parent: str, *entries: tuple[dict, str, str]) -> PropertyPaths:
+    """Build a PropertyPaths from (tags, path, change) tuples."""
+    return PropertyPaths(
+        label=label,
+        parent_label=parent,
+        paths=[PathEntry(tags=t, path=p, change=PathChange(c)) for t, p, c in entries],
+    )
+
+
+def _vehicle_speed_report() -> DiffReport:
+    return DiffReport(
+        changes=[_entity_added("Vehicle"), _prop_added("Vehicle.Speed", parent="Vehicle")],
+        property_paths=[_paths("Vehicle.Speed", "Vehicle", ({}, "Vehicle.Speed", "added"))],
+    )
+
+
+def _door_report() -> DiffReport:
+    return DiffReport(
+        changes=[
+            _entity_added("Door", instances={"side": ["Left", "Right"]}),
+            _prop_added("Door.IsOpen", parent="Door"),
+        ],
+        property_paths=[
+            _paths(
+                "Door.IsOpen",
+                "Door",
+                ({"Door": {"side": "Left"}}, "Door.Left.IsOpen", "added"),
+                ({"Door": {"side": "Right"}}, "Door.Right.IsOpen", "added"),
+            )
+        ],
+    )
+
+
 class TestExportBindings:
-    def test_json_singleton_binding_is_flat(self) -> None:
-        """A property on an entity with no instances exports as {current_label: {binding: ...}}."""
-        report = DiffReport(changes=[_entity_added("Vehicle"), _prop_added("Vehicle.Speed", parent="Vehicle")])
-        tables = sync(empty_ledger(), report, _export_meta(), _export_cfg())
+    def test_json_singleton_binding(self) -> None:
+        """A singleton binding exports with empty tags and its literal runtime path."""
+        tables = sync(empty_ledger(), _vehicle_speed_report(), _export_meta(), _export_cfg())
         mapping = export_bindings(tables, format="json")
         binding_uri = tables["bindings"].iloc[0]["binding_uri"]
-        assert mapping == {"Vehicle.Speed": {"binding": binding_uri.rsplit("/", 1)[-1]}}
-
-    def test_json_per_instance_binding_is_nested(self) -> None:
-        """Per-instance bindings nest under the property label, keyed by instance_label."""
-        report = DiffReport(
-            changes=[
-                _entity_added("Door", instances=["Left", "Right"]),
-                _prop_added("Door.IsOpen", parent="Door"),
+        assert mapping == {
+            "Vehicle.Speed": [
+                {"binding": binding_uri.rsplit("/", 1)[-1], "instance_tags": {}, "runtime_path": "Vehicle.Speed"}
             ]
+        }
+
+    def test_json_per_instance_bindings_are_listed_with_tags(self) -> None:
+        """Per-instance bindings are a list sorted by runtime_path; tags are keyed by entity label."""
+        tables = sync(empty_ledger(), _door_report(), _export_meta(), _export_cfg())
+        items = export_bindings(tables, format="json")["Door.IsOpen"]
+        assert [i["runtime_path"] for i in items] == ["Door.Left.IsOpen", "Door.Right.IsOpen"]
+        assert [i["instance_tags"] for i in items] == [{"Door": {"side": "Left"}}, {"Door": {"side": "Right"}}]
+
+    def test_json_tags_follow_entity_rename(self) -> None:
+        """Exported tag keys use the entity's current label, not the label at mint time."""
+        tables = sync(empty_ledger(), _door_report(), _export_meta(), _export_cfg())
+        rename = DiffReport(
+            changes=[EntityChanged(label="Hatch", change_type=ChangeType.MODIFIED, renamed_from="Door")],
+            property_paths=[
+                _paths(
+                    "Door.IsOpen",
+                    "Hatch",
+                    ({"Hatch": {"side": "Left"}}, "Door.Left.IsOpen", "unchanged"),
+                    ({"Hatch": {"side": "Right"}}, "Door.Right.IsOpen", "unchanged"),
+                )
+            ],
         )
-        tables = sync(empty_ledger(), report, _export_meta(), _export_cfg())
-        mapping = export_bindings(tables, format="json")
-        assert set(mapping.keys()) == {"Door.IsOpen"}
-        assert set(mapping["Door.IsOpen"].keys()) == {"Left", "Right"}
-        for entry in mapping["Door.IsOpen"].values():
-            assert set(entry.keys()) == {"binding"}
+        tables = sync(tables, rename, _export_meta(), _export_cfg())
+        items = export_bindings(tables, format="json")["Door.IsOpen"]
+        assert all(set(i["instance_tags"]) == {"Hatch"} for i in items)
 
     def test_json_complete_adds_binding_uri(self) -> None:
         """complete=True adds the full binding_uri alongside binding."""
-        report = DiffReport(changes=[_entity_added("Vehicle"), _prop_added("Vehicle.Speed", parent="Vehicle")])
-        tables = sync(empty_ledger(), report, _export_meta(), _export_cfg())
-        mapping = export_bindings(tables, format="json", complete=True)
+        tables = sync(empty_ledger(), _vehicle_speed_report(), _export_meta(), _export_cfg())
+        item = export_bindings(tables, format="json", complete=True)["Vehicle.Speed"][0]
         binding_uri = tables["bindings"].iloc[0]["binding_uri"]
-        assert mapping["Vehicle.Speed"] == {"binding": binding_uri.rsplit("/", 1)[-1], "binding_uri": binding_uri}
+        assert item["binding"] == binding_uri.rsplit("/", 1)[-1]
+        assert item["binding_uri"] == binding_uri
 
     def test_json_default_omits_binding_uri(self) -> None:
         """complete=False (default) only includes binding, not binding_uri."""
-        report = DiffReport(changes=[_entity_added("Vehicle"), _prop_added("Vehicle.Speed", parent="Vehicle")])
-        tables = sync(empty_ledger(), report, _export_meta(), _export_cfg())
-        mapping = export_bindings(tables, format="json")
-        assert "binding_uri" not in mapping["Vehicle.Speed"]
+        tables = sync(empty_ledger(), _vehicle_speed_report(), _export_meta(), _export_cfg())
+        assert "binding_uri" not in export_bindings(tables, format="json")["Vehicle.Speed"][0]
 
     def test_json_label_collision_across_concepts_raises(self) -> None:
         """Two distinct property concepts sharing a current_label raise LedgerValidationError."""
@@ -1352,89 +1407,56 @@ class TestExportBindings:
                 _entity_added("Trailer"),
                 _prop_added("Speed", parent="Vehicle"),
                 _prop_added("Speed", parent="Trailer"),
-            ]
+            ],
+            property_paths=[
+                _paths("Speed", "Vehicle", ({}, "Vehicle.Speed", "added")),
+                _paths("Speed", "Trailer", ({}, "Trailer.Speed", "added")),
+            ],
         )
         tables = sync(empty_ledger(), report, _export_meta(), _export_cfg())
         with pytest.raises(LedgerValidationError, match="collision"):
             export_bindings(tables, format="json")
 
-    def test_vspec_singleton_binding_key_is_property_label(self) -> None:
-        """A property on an entity with no instances exports as {current_label: {binding: ...}}."""
-        report = DiffReport(changes=[_entity_added("Vehicle"), _prop_added("Vehicle.Speed", parent="Vehicle")])
-        tables = sync(empty_ledger(), report, _export_meta(), _export_cfg())
+    def test_vspec_keyed_by_runtime_path(self) -> None:
+        """vspec keys are the literal runtime paths, one per binding."""
+        tables = sync(empty_ledger(), _door_report(), _export_meta(), _export_cfg())
         mapping = export_bindings(tables, format="vspec")
-        assert set(mapping.keys()) == {"Vehicle.Speed"}
-        assert "instance" not in mapping["Vehicle.Speed"]
-
-    def test_vspec_per_instance_binding_key_splices_instance(self) -> None:
-        """Per-instance bindings splice the instance label between parent and leaf."""
-        report = DiffReport(
-            changes=[
-                _entity_added("Door", instances=["Left", "Right"]),
-                _prop_added("Door.IsOpen", parent="Door"),
-            ]
-        )
-        tables = sync(empty_ledger(), report, _export_meta(), _export_cfg())
-        mapping = export_bindings(tables, format="vspec")
-        assert set(mapping.keys()) == {"Door.Left.IsOpen", "Door.Right.IsOpen"}
+        assert set(mapping) == {"Door.Left.IsOpen", "Door.Right.IsOpen"}
 
     def test_vspec_default_omits_binding_uri(self) -> None:
         """By default, entries only carry binding, not the full binding_uri."""
-        report = DiffReport(changes=[_entity_added("Vehicle"), _prop_added("Vehicle.Speed", parent="Vehicle")])
-        tables = sync(empty_ledger(), report, _export_meta(), _export_cfg())
+        tables = sync(empty_ledger(), _vehicle_speed_report(), _export_meta(), _export_cfg())
         mapping = export_bindings(tables, format="vspec")
         binding_uri = tables["bindings"].iloc[0]["binding_uri"]
-        expected_suffix = binding_uri.rsplit("/", 1)[-1]
-        assert mapping["Vehicle.Speed"] == {"binding": expected_suffix}
-        assert not mapping["Vehicle.Speed"]["binding"].startswith("http")
+        assert mapping["Vehicle.Speed"] == {"binding": binding_uri.rsplit("/", 1)[-1]}
 
     def test_vspec_complete_uses_full_binding_uri(self) -> None:
         """complete=True adds the full binding_uri alongside the base-36 binding suffix."""
-        report = DiffReport(changes=[_entity_added("Vehicle"), _prop_added("Vehicle.Speed", parent="Vehicle")])
-        tables = sync(empty_ledger(), report, _export_meta(), _export_cfg())
+        tables = sync(empty_ledger(), _vehicle_speed_report(), _export_meta(), _export_cfg())
         mapping = export_bindings(tables, format="vspec", complete=True)
-        binding_uri = tables["bindings"].iloc[0]["binding_uri"]
-        assert mapping["Vehicle.Speed"]["binding_uri"] == binding_uri
+        assert mapping["Vehicle.Speed"]["binding_uri"] == tables["bindings"].iloc[0]["binding_uri"]
 
     def test_vspec_removed_binding_excluded(self) -> None:
         """A binding for a removed instance is excluded from the export."""
-        setup = DiffReport(
-            changes=[
-                _entity_added("Door", instances=["Left", "Right"]),
-                _prop_added("Door.IsOpen", parent="Door"),
-            ]
+        tables = sync(empty_ledger(), _door_report(), _export_meta(), _export_cfg())
+        removal = DiffReport(
+            changes=[_entity_modified("Door", instances_removed={"side": ["Right"]})],
+            property_paths=[
+                _paths(
+                    "Door.IsOpen",
+                    "Door",
+                    ({"Door": {"side": "Left"}}, "Door.Left.IsOpen", "unchanged"),
+                    ({"Door": {"side": "Right"}}, "Door.Right.IsOpen", "removed"),
+                )
+            ],
         )
-        tables = sync(empty_ledger(), setup, _export_meta(), _export_cfg())
-        removal = DiffReport(changes=[_entity_modified("Door", instances_removed=["Right"])])
         tables = sync(tables, removal, _export_meta(), _export_cfg())
-        mapping = export_bindings(tables, format="vspec")
-        assert set(mapping.keys()) == {"Door.Left.IsOpen"}
-
-    def test_vspec_prefix_mismatch_falls_back_and_warns(self, caplog: pytest.LogCaptureFixture) -> None:
-        """A property label that doesn't follow '<parent>.<leaf>' falls back and logs a warning."""
-        report = DiffReport(
-            changes=[
-                _entity_added("Door", instances=["Left", "Right"]),
-                _prop_added("IsOpen", parent="Door"),  # not prefixed with "Door."
-            ]
-        )
-        tables = sync(empty_ledger(), report, _export_meta(), _export_cfg())
-        with caplog.at_level("WARNING"):
-            mapping = export_bindings(tables, format="vspec")
-        assert set(mapping.keys()) == {"IsOpen.Left", "IsOpen.Right"}
-        assert any("does not follow" in rec.message for rec in caplog.records)
+        assert set(export_bindings(tables, format="vspec")) == {"Door.Left.IsOpen"}
 
     def test_vspec_duplicate_key_raises(self) -> None:
-        """Two singleton bindings resolving to the same key raise LedgerValidationError."""
-        report = DiffReport(
-            changes=[
-                _entity_added("Vehicle"),
-                _entity_added("Trailer"),
-                _prop_added("Speed", parent="Vehicle"),
-                _prop_added("Speed", parent="Trailer"),
-            ]
-        )
-        tables = sync(empty_ledger(), report, _export_meta(), _export_cfg())
+        """Two bindings resolving to the same runtime_path raise LedgerValidationError."""
+        tables = sync(empty_ledger(), _door_report(), _export_meta(), _export_cfg())
+        tables["bindings"]["runtime_path"] = "Door.IsOpen"
         with pytest.raises(LedgerValidationError, match="collision"):
             export_bindings(tables, format="vspec")
 
@@ -1445,38 +1467,33 @@ class TestExportBindings:
 
     def test_invalid_format_raises(self) -> None:
         """An unrecognized format value raises ValueError."""
-        report = DiffReport(changes=[_entity_added("Vehicle"), _prop_added("Vehicle.Speed", parent="Vehicle")])
-        tables = sync(empty_ledger(), report, _export_meta(), _export_cfg())
+        tables = sync(empty_ledger(), _vehicle_speed_report(), _export_meta(), _export_cfg())
         with pytest.raises(ValueError, match="format must be one of"):
             export_bindings(tables, format="xml")
 
     def test_json_custom_key_renames_leaf_field(self) -> None:
         """key='value' renames the leaf field from 'binding' to 'value' in the json shape."""
-        report = DiffReport(changes=[_entity_added("Vehicle"), _prop_added("Vehicle.Speed", parent="Vehicle")])
-        tables = sync(empty_ledger(), report, _export_meta(), _export_cfg())
-        mapping = export_bindings(tables, format="json", key="value")
-        binding_uri = tables["bindings"].iloc[0]["binding_uri"]
-        assert mapping == {"Vehicle.Speed": {"value": binding_uri.rsplit("/", 1)[-1]}}
+        tables = sync(empty_ledger(), _vehicle_speed_report(), _export_meta(), _export_cfg())
+        item = export_bindings(tables, format="json", key="value")["Vehicle.Speed"][0]
+        assert item["value"] == tables["bindings"].iloc[0]["binding_uri"].rsplit("/", 1)[-1]
+        assert "binding" not in item
 
     def test_json_custom_key_with_complete_keeps_binding_uri_name(self) -> None:
         """The secondary 'binding_uri' field name is unaffected by a custom key."""
-        report = DiffReport(changes=[_entity_added("Vehicle"), _prop_added("Vehicle.Speed", parent="Vehicle")])
-        tables = sync(empty_ledger(), report, _export_meta(), _export_cfg())
-        mapping = export_bindings(tables, format="json", complete=True, key="value")
-        assert set(mapping["Vehicle.Speed"].keys()) == {"value", "binding_uri"}
+        tables = sync(empty_ledger(), _vehicle_speed_report(), _export_meta(), _export_cfg())
+        item = export_bindings(tables, format="json", complete=True, key="value")["Vehicle.Speed"][0]
+        assert {"value", "binding_uri"} <= set(item)
 
     def test_vspec_custom_key_renames_leaf_field(self) -> None:
         """key='value' renames the leaf field from 'binding' to 'value' in the vspec shape."""
-        report = DiffReport(changes=[_entity_added("Vehicle"), _prop_added("Vehicle.Speed", parent="Vehicle")])
-        tables = sync(empty_ledger(), report, _export_meta(), _export_cfg())
+        tables = sync(empty_ledger(), _vehicle_speed_report(), _export_meta(), _export_cfg())
         mapping = export_bindings(tables, format="vspec", key="value")
         binding_uri = tables["bindings"].iloc[0]["binding_uri"]
         assert mapping == {"Vehicle.Speed": {"value": binding_uri.rsplit("/", 1)[-1]}}
 
     def test_empty_key_raises(self) -> None:
         """An empty or whitespace-only key raises ValueError."""
-        report = DiffReport(changes=[_entity_added("Vehicle"), _prop_added("Vehicle.Speed", parent="Vehicle")])
-        tables = sync(empty_ledger(), report, _export_meta(), _export_cfg())
+        tables = sync(empty_ledger(), _vehicle_speed_report(), _export_meta(), _export_cfg())
         with pytest.raises(ValueError, match="non-empty"):
             export_bindings(tables, format="json", key="")
         with pytest.raises(ValueError, match="non-empty"):
@@ -1484,7 +1501,68 @@ class TestExportBindings:
 
     def test_key_reserved_word_raises(self) -> None:
         """key='binding_uri' collides with the --complete field name and raises ValueError."""
-        report = DiffReport(changes=[_entity_added("Vehicle"), _prop_added("Vehicle.Speed", parent="Vehicle")])
-        tables = sync(empty_ledger(), report, _export_meta(), _export_cfg())
+        tables = sync(empty_ledger(), _vehicle_speed_report(), _export_meta(), _export_cfg())
         with pytest.raises(ValueError, match="reserved"):
             export_bindings(tables, format="json", key="binding_uri")
+
+
+# ── Binding validation (instance_tags / runtime_path) ─────────────────────────
+
+
+class TestBindingValidation:
+    @staticmethod
+    def _door_tables() -> dict:
+        return sync(empty_ledger(), _door_report(), _export_meta(), _export_cfg())
+
+    def test_valid_instanced_ledger_passes(self) -> None:
+        """A ledger produced by sync from an instanced report validates."""
+        validate_ledger(self._door_tables())
+
+    def test_invalid_tags_json_raises(self) -> None:
+        """instance_tags that is not JSON raises LedgerValidationError."""
+        tables = self._door_tables()
+        tables["bindings"].loc[0, "instance_tags"] = "not-json"
+        with pytest.raises(LedgerValidationError, match="invalid JSON"):
+            validate_ledger(tables)
+
+    def test_tags_with_wrong_shape_raise(self) -> None:
+        """instance_tags that is a JSON list raises LedgerValidationError."""
+        tables = self._door_tables()
+        tables["bindings"].loc[0, "instance_tags"] = "[]"
+        with pytest.raises(LedgerValidationError, match="must map entity concept_uri"):
+            validate_ledger(tables)
+
+    def test_tag_key_must_be_entity_concept(self) -> None:
+        """A tag key that is not an ENTITY concept_uri raises LedgerValidationError."""
+        tables = self._door_tables()
+        tables["bindings"].loc[0, "instance_tags"] = '{"http://nowhere/concepts/99":{"side":"Left"}}'
+        with pytest.raises(LedgerValidationError, match="non-ENTITY"):
+            validate_ledger(tables)
+
+    def test_duplicate_active_runtime_path_raises(self) -> None:
+        """Two ACTIVE bindings with the same runtime_path raise LedgerValidationError."""
+        tables = self._door_tables()
+        tables["bindings"].loc[1, "runtime_path"] = tables["bindings"].loc[0, "runtime_path"]
+        with pytest.raises(LedgerValidationError, match="runtime_path must be unique"):
+            validate_ledger(tables)
+
+    def test_duplicate_tags_per_contract_raise(self) -> None:
+        """Two ACTIVE bindings on one contract with identical tags raise LedgerValidationError."""
+        tables = self._door_tables()
+        tables["bindings"].loc[1, "instance_tags"] = tables["bindings"].loc[0, "instance_tags"]
+        with pytest.raises(LedgerValidationError, match="unique per contract"):
+            validate_ledger(tables)
+
+    def test_superseded_duplicate_runtime_path_is_allowed(self) -> None:
+        """A non-ACTIVE binding may reuse the runtime_path of an ACTIVE one."""
+        tables = self._door_tables()
+        tables["bindings"].loc[1, "runtime_path"] = tables["bindings"].loc[0, "runtime_path"]
+        tables["bindings"].loc[1, "status"] = "SUPERSEDED"
+        validate_ledger(tables)
+
+    def test_empty_runtime_path_raises(self) -> None:
+        """A blank runtime_path raises LedgerValidationError."""
+        tables = self._door_tables()
+        tables["bindings"].loc[0, "runtime_path"] = " "
+        with pytest.raises(LedgerValidationError, match="Empty runtime_path"):
+            validate_ledger(tables)

@@ -39,6 +39,12 @@ Label uniqueness
     name is just its path segment like a leaf's — avoid artificial renaming to dodge
     collisions between unrelated branches and signals.
 
+Property paths
+    Bindings are never derived by the engine. ``DiffReport.property_paths`` lists, per binding-eligible
+    property, every literal runtime path with its instance tags and a ``change`` of ``unchanged``,
+    ``added`` or ``removed``. Tags are keyed by entity label. The sync cross-checks them against the
+    ledger and fails without changes on any inconsistency.
+
 Aspect
     Any named attribute of a model element that can change.  Every change is reported in the
     ``aspects`` dict.  The engine uses this dict together with the breaking-change config to
@@ -46,9 +52,9 @@ Aspect
 
     One canonical aspect key exists for entity events:
 
-    - ``instances`` — full list of instance labels on **ADDED** events.
-      On **MODIFIED** events use the directional split:
-      ``instances_added`` and ``instances_removed`` (lists of labels that appeared or disappeared).
+    - ``instances`` — full dimension dictionary (``{"dimension1": ["Row1", "Row2"]}``) on **ADDED**
+      events. On **MODIFIED** events use the directional split: ``instances_added`` and
+      ``instances_removed`` (dimension dictionaries of the labels that appeared or disappeared).
 
     For property events no canonical keys are prescribed — ``output_type``, ``is_list``, and
     ``is_required`` are widely used conventions for typed modeling languages but are treated
@@ -199,6 +205,19 @@ def extract_aspect_ops(aspects: dict[str, Any]) -> dict[str, str]:
     return {key: extract_op(val)[0] for key, val in aspects.items()}
 
 
+def _validate_instance_dict(key: str, value: Any) -> None:
+    """Require a non-empty ``{dimension: [labels]}`` dictionary with unique, non-empty string labels."""
+    if not isinstance(value, dict) or not value:
+        raise ValueError(f"'{key}' must be a non-empty dictionary of dimension -> list of instance labels")
+    for dim, labels in value.items():
+        if not isinstance(dim, str) or not dim.strip():
+            raise ValueError(f"'{key}' dimension names must be non-empty strings")
+        if not isinstance(labels, list) or not labels or not all(isinstance(v, str) and v for v in labels):
+            raise ValueError(f"'{key}' dimension '{dim}' must be a non-empty list of non-empty strings")
+        if len(set(labels)) != len(labels):
+            raise ValueError(f"'{key}' dimension '{dim}' contains duplicate values")
+
+
 class EntityChanged(BaseModel):
     """A detected change on an entity or enumeration set.
 
@@ -251,6 +270,9 @@ class EntityChanged(BaseModel):
                 "The key 'instances' is not valid on MODIFIED entity events. "
                 "Use 'instances_added' and 'instances_removed' to report directional instance changes."
             )
+        for key in (_INSTANCES_SNAPSHOT_KEY, *sorted(_INSTANCE_DELTA_KEYS)):
+            if key in self.aspects:
+                _validate_instance_dict(key, self.aspects[key])
         if self.change_type == ChangeType.MODIFIED:
             _validate_modified_aspect_values(self.aspects)
         return self
@@ -273,18 +295,6 @@ class PropertyChanged(BaseModel):
     lifecycle transition, independent of the breaking-change config.  Note this is
     distinct from the "vocabulary leaf elements" phrase above, which describes
     ``ENUM_VALUE`` as a terminal vocabulary node — ``is_leaf`` never applies to that kind.
-
-    ``instantiate`` (``PROPERTY`` only) is an optional top-level field — analogous to
-    ``is_leaf`` rather than an ``aspects`` key — that overrides whether this property
-    inherits its parent entity's instance list.  ``None`` (the default, omitted by
-    adapters that have no such concept) means "inherit the parent's instances", which is
-    the previous unconditional behaviour.  ``False`` means the property exists exactly
-    once and must never receive the parent's per-instance expansion, regardless of how
-    many instances the parent declares.  Forbidden (must be ``None``) when ``kind`` is
-    ``ENUM_VALUE``, since enum values never carry instances either way.  A change in the
-    *effective* instantiation outcome between snapshots always forces a new contract and
-    a binding lifecycle transition, independent of the breaking-change config — mirroring
-    the ``is_leaf`` transition rule.
 
     ``binding_eligible`` (``PROPERTY`` only) is an optional, purely *additive* override that
     defaults to ``False``.  The effective binding-eligibility outcome is ``is_leaf or
@@ -328,7 +338,6 @@ class PropertyChanged(BaseModel):
     change_type: ChangeType
     renamed_from: str | None = None
     is_leaf: bool | None = None
-    instantiate: bool | None = None
     binding_eligible: bool = False
     references: dict[str, str] | None = None
     aspects: dict[str, Any] = {}
@@ -342,8 +351,6 @@ class PropertyChanged(BaseModel):
             raise ValueError(f"PropertyChanged '{self.label}': 'is_leaf' is required when kind is PROPERTY")
         if self.kind == ElementKind.ENUM_VALUE and self.is_leaf is not None:
             raise ValueError(f"PropertyChanged '{self.label}': 'is_leaf' must be omitted when kind is ENUM_VALUE")
-        if self.kind == ElementKind.ENUM_VALUE and self.instantiate is not None:
-            raise ValueError(f"PropertyChanged '{self.label}': 'instantiate' must be omitted when kind is ENUM_VALUE")
         if self.kind == ElementKind.ENUM_VALUE and self.binding_eligible:
             raise ValueError(
                 f"PropertyChanged '{self.label}': 'binding_eligible' must be False when kind is ENUM_VALUE"
@@ -372,10 +379,44 @@ class PropertyChanged(BaseModel):
         return self
 
 
+class PathChange(StrEnum):
+    """Relation of a reported runtime path to the previous snapshot."""
+
+    UNCHANGED = "unchanged"
+    ADDED = "added"
+    REMOVED = "removed"
+
+
+class PathEntry(BaseModel):
+    """One literal runtime path of a property with its instance tags (keyed by entity label)."""
+
+    tags: dict[str, dict[str, str]] = {}
+    path: str
+    change: PathChange
+
+    @model_validator(mode="after")
+    def _validate_entry(self) -> PathEntry:
+        if not self.path.strip():
+            raise ValueError("path must be non-empty")
+        for entity, dims in self.tags.items():
+            if not entity.strip() or any(not d.strip() or not v.strip() for d, v in dims.items()):
+                raise ValueError(f"malformed tags for entity '{entity}'")
+        return self
+
+
+class PropertyPaths(BaseModel):
+    """All reported runtime paths of one binding-eligible property."""
+
+    label: str
+    parent_label: str
+    paths: list[PathEntry]
+
+
 class DiffReport(BaseModel):
     """Ordered list of all changes detected between two model snapshots."""
 
     changes: list[EntityChanged | PropertyChanged]
+    property_paths: list[PropertyPaths] = []
 
     @classmethod
     def from_json(cls, json_str: str) -> DiffReport:

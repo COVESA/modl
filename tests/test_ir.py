@@ -10,7 +10,10 @@ from modl.ir import (
     DiffReport,
     DiffReportValidationError,
     EntityChanged,
+    PathChange,
+    PathEntry,
     PropertyChanged,
+    PropertyPaths,
     _aspect_ops_for_event,
     extract_aspect_ops,
     extract_op,
@@ -112,10 +115,10 @@ class TestEntityChanged:
         event = EntityChanged(
             label="Vehicle.Door",
             change_type=ChangeType.MODIFIED,
-            aspects={"instances_added": ["Center"], "instances_removed": ["Front"]},
+            aspects={"instances_added": {"side": ["Center"]}, "instances_removed": {"side": ["Front"]}},
             content=[ContentItem(label="Vehicle.Door.IsLocked", change_type=ChangeType.ADDED)],
         )
-        assert event.aspects == {"instances_added": ["Center"], "instances_removed": ["Front"]}
+        assert event.aspects == {"instances_added": {"side": ["Center"]}, "instances_removed": {"side": ["Front"]}}
         assert len(event.content) == 1
         assert event.content[0].label == "Vehicle.Door.IsLocked"
 
@@ -134,7 +137,7 @@ class TestEntityChanged:
             EntityChanged(
                 label="Vehicle.Door",
                 change_type=ChangeType.MODIFIED,
-                aspects={"instances": ["Left", "Right", "Center"]},
+                aspects={"instances": {"side": ["Left", "Right", "Center"]}},
             )
 
     def test_name_key_in_aspects_rejected_entity(self) -> None:
@@ -424,66 +427,74 @@ class TestPropertyChangedIsLeaf:
         assert event.is_leaf is None
 
 
-class TestPropertyChangedInstantiate:
-    """``instantiate`` is optional for PROPERTY events and forbidden for ENUM_VALUE events."""
+class TestInstanceDimensions:
+    """Entity instance payloads are non-empty dimension dictionaries of unique, non-empty labels."""
 
-    def test_instantiate_omitted_defaults_to_none(self) -> None:
-        """Omitting instantiate on a PROPERTY event leaves it as None (inherit parent instances)."""
-        event = PropertyChanged(
-            label="Container.Member",
-            parent_label="Container",
+    def test_added_accepts_dimension_dict(self) -> None:
+        """ADDED entity accepts a multi-dimension 'instances' dictionary."""
+        event = EntityChanged(
+            label="Seat",
             change_type=ChangeType.ADDED,
-            is_leaf=True,
-            aspects={"output_type": "Float"},
+            aspects={"instances": {"row": ["R1", "R2"], "side": ["L", "R"]}},
         )
-        assert event.instantiate is None
+        assert event.aspects["instances"] == {"row": ["R1", "R2"], "side": ["L", "R"]}
 
-    def test_instantiate_true_accepted_for_property(self) -> None:
-        """instantiate=True is accepted on a PROPERTY event."""
-        event = PropertyChanged(
-            label="Container.Member",
-            parent_label="Container",
-            change_type=ChangeType.ADDED,
-            is_leaf=True,
-            instantiate=True,
-            aspects={"output_type": "Float"},
-        )
-        assert event.instantiate is True
+    @pytest.mark.parametrize(
+        "value",
+        [["Left", "Right"], {}, {"d": []}, {"d": ["a", "a"]}, {"d": [""]}, {"": ["a"]}, {"d": "a"}, {"d": [1]}],
+    )
+    @pytest.mark.parametrize("key", ["instances", "instances_added", "instances_removed"])
+    def test_invalid_payloads_rejected(self, key: str, value: object) -> None:
+        """Lists, empty dicts, empty/duplicate/non-string values are rejected."""
+        change = ChangeType.ADDED if key == "instances" else ChangeType.MODIFIED
+        with pytest.raises(ValidationError, match=key):
+            EntityChanged(label="Seat", change_type=change, aspects={key: value})
 
-    def test_instantiate_false_accepted_for_property(self) -> None:
-        """instantiate=False is accepted on a PROPERTY event (pinned to a single non-instantiated path)."""
-        event = PropertyChanged(
-            label="Container.Member",
-            parent_label="Container",
-            change_type=ChangeType.ADDED,
-            is_leaf=True,
-            instantiate=False,
-            aspects={"output_type": "Float"},
-        )
-        assert event.instantiate is False
+    def test_property_instantiate_field_removed(self) -> None:
+        """The legacy 'instantiate' flag is no longer a field on property events."""
+        assert "instantiate" not in PropertyChanged.model_fields
 
-    def test_instantiate_forbidden_on_enum_value(self) -> None:
-        """Setting instantiate on an ENUM_VALUE event fails validation."""
-        with pytest.raises(ValidationError, match="'instantiate' must be omitted"):
-            PropertyChanged(
-                label="MyEnum.VALUE_A",
-                parent_label="MyEnum",
-                kind=ElementKind.ENUM_VALUE,
-                change_type=ChangeType.ADDED,
-                instantiate=False,
-                aspects={"symbol": "a"},
-            )
 
-    def test_instantiate_omitted_accepted_for_enum_value(self) -> None:
-        """Omitting instantiate (default None) is valid for an ENUM_VALUE event."""
-        event = PropertyChanged(
-            label="MyEnum.VALUE_A",
-            parent_label="MyEnum",
-            kind=ElementKind.ENUM_VALUE,
-            change_type=ChangeType.ADDED,
-            aspects={"symbol": "a"},
-        )
-        assert event.instantiate is None
+class TestPropertyPaths:
+    """``property_paths`` entries carry literal runtime paths and instance tags per property."""
+
+    def test_report_defaults_to_empty(self) -> None:
+        """A report without property_paths parses with an empty list."""
+        assert DiffReport.model_validate(VALID_REPORT_DICT).property_paths == []
+
+    def test_entry_round_trip(self) -> None:
+        """Entries parse and survive a JSON round-trip."""
+        raw = {
+            "label": "Wheel.Speed",
+            "parent_label": "Wheel",
+            "paths": [
+                {
+                    "tags": {"Axle": {"axle": "A1"}, "Wheel": {"pos": "L"}},
+                    "path": "Axle[A1].Wheel[L].Speed",
+                    "change": "unchanged",
+                },
+                {"tags": {}, "path": "Speed", "change": "removed"},
+            ],
+        }
+        pp = PropertyPaths.model_validate(raw)
+        assert pp.paths[0].change == PathChange.UNCHANGED
+        assert pp.paths[1].change == PathChange.REMOVED
+        assert PropertyPaths.model_validate_json(pp.model_dump_json()) == pp
+
+    def test_empty_path_rejected(self) -> None:
+        """A blank runtime path is rejected."""
+        with pytest.raises(ValidationError):
+            PathEntry(tags={}, path=" ", change=PathChange.ADDED)
+
+    def test_unknown_change_rejected(self) -> None:
+        """An unrecognised change value is rejected."""
+        with pytest.raises(ValidationError):
+            PathEntry.model_validate({"tags": {}, "path": "a", "change": "renamed"})
+
+    def test_missing_parent_label_rejected(self) -> None:
+        """parent_label is required because property labels are unique only per parent."""
+        with pytest.raises(ValidationError):
+            PropertyPaths.model_validate({"label": "Speed", "paths": []})
 
 
 class TestPropertyChangedBindingEligible:
@@ -1006,7 +1017,7 @@ class TestAspectOpsForEvent:
         event = EntityChanged(
             label="Door",
             change_type=ChangeType.MODIFIED,
-            aspects={"instances_added": ["Center"]},
+            aspects={"instances_added": {"side": ["Center"]}},
         )
         ops = _aspect_ops_for_event(event)
         assert ops.get("instances_added") == "added"
@@ -1017,7 +1028,7 @@ class TestAspectOpsForEvent:
         event = EntityChanged(
             label="Door",
             change_type=ChangeType.MODIFIED,
-            aspects={"instances_removed": ["Front"]},
+            aspects={"instances_removed": {"side": ["Front"]}},
         )
         ops = _aspect_ops_for_event(event)
         assert ops.get("instances_removed") == "removed"
@@ -1028,7 +1039,7 @@ class TestAspectOpsForEvent:
         event = EntityChanged(
             label="Door",
             change_type=ChangeType.MODIFIED,
-            aspects={"instances_added": ["Center"], "instances_removed": ["Rear"]},
+            aspects={"instances_added": {"side": ["Center"]}, "instances_removed": {"side": ["Rear"]}},
         )
         ops = _aspect_ops_for_event(event)
         assert ops.get("instances_added") == "added"
@@ -1098,7 +1109,7 @@ class TestStructuralKeys:
                             "label": "Vehicle.Door",
                             "kind": "ENTITY",
                             "change_type": "MODIFIED",
-                            "aspects": {"instances_added": ["Center"]},
+                            "aspects": {"instances_added": {"side": ["Center"]}},
                             "content": [],
                         }
                     ]

@@ -82,12 +82,19 @@ Data-level constraints enforced by `validate_ledger()`:
 | FK violation | revision references non-existent concept |
 | Cross-concept contract mismatch | contract's `revision_uri` belongs to a different concept |
 | Binding on non-PROPERTY concept | ENTITY or ENUMERATION_SET concept linked to a binding |
+| Duplicate `runtime_path` / tags | two ACTIVE bindings share a path, or share tags on one contract |
 
 ### `TestValidateLedgerDir`
 Directory-level checks: must be a directory, exactly the six CSVs, nothing else.
 
 ### `TestReadWriteLedger` / `TestNextSerial` / `TestB36`
 Round-trip write → read → validate; `next_serial()` returns `max + 1`; `b36encode()` covers 0, 1–9, a–z, multi-digit values.
+
+### `TestBindingValidation`
+Row-level constraints on `bindings.csv`: `instance_tags` must be canonical JSON keyed by existing ENTITY concept URIs, `runtime_path` must be non-empty, and ACTIVE bindings must have unique paths and unique tags per contract.
+
+### `TestExportBindings`
+Binding export: `json` lists one item per binding (`instance_tags` by entity label, `runtime_path`) sorted by path; `vspec` is keyed by `runtime_path`; `--complete` and custom binding keys.
 
 ### `TestRevisionAspectsValidation`
 Row-level constraints on `revision_aspects.csv`: valid ADDED/MODIFIED/REMOVED rows pass; duplicate `(revision_uri, aspect_key)` raises; invalid `operation` raises; `modified` rows with a null `previous_value` or `newer_value` raise; `added` rows with a non-null `previous_value` raise; `removed` rows with a non-null `newer_value` raise; FK violation on `revision_uri` raises.
@@ -96,7 +103,7 @@ Row-level constraints on `revision_aspects.csv`: valid ADDED/MODIFIED/REMOVED ro
 
 ## test_models.py
 
-Pydantic row models for the five tables (`ConceptRow`, `RevisionRow`, `ContractRow`, `BindingRow`, `RevisionAspectRow`). Checks required fields, defaults, value constraints (negative serial rejected), vocabulary kinds (`ENUMERATION_SET`, `ENUM_VALUE`), and `RevisionAspectRow`'s operation/value invariants (`modified` requires both values non-null, `added` forbids `previous_value`, `removed` forbids `newer_value`).
+Pydantic row models for the ledger tables (`ConceptRow`, `RevisionRow`, `ContractRow`, `BindingRow`, `RevisionAspectRow`, `ContractReferenceRow`). `BindingRow` carries `instance_tags` (canonical JSON) and `runtime_path`. Checks required fields, defaults, value constraints (negative serial rejected), vocabulary kinds (`ENUMERATION_SET`, `ENUM_VALUE`), and `RevisionAspectRow`'s operation/value invariants (`modified` requires both values non-null, `added` forbids `previous_value`, `removed` forbids `newer_value`).
 
 ---
 
@@ -106,9 +113,9 @@ The largest file. Each test class exercises one engine path.
 
 ### ADDED events
 
-**`TestEntityAdded`** — entity ADDED mints one concept + revision + contract, no bindings. Instances stored as JSON. Multiple entities get incrementing serials. Non-compliant adapter output (`instances` is a nested list or contains non-strings) raises `SyncError`.
+**`TestEntityAdded`** — entity ADDED mints one concept + revision + contract, no bindings. Instances stored as JSON. Multiple entities get incrementing serials. Instances must be a dimension map (`{dim: [values]}`); anything else raises `SyncError`.
 
-**`TestPropertyAdded`** — property ADDED links to its parent via `parent_uri` and copies the parent's instance list. One binding per instance; singleton binding (null `instance_label`) when the parent has no instances. `ENUM_VALUE` kind gets no bindings.
+**`TestPropertyAdded`** — property ADDED links to its parent via `parent_uri`. One binding per `added` entry of `property_paths`, storing its `instance_tags` and `runtime_path`; a missing entry for a binding-eligible property raises `SyncError`. `ENUM_VALUE` kind gets no bindings.
 
 **`TestEnumerationSetAdded`** — `ENUMERATION_SET` ADDED behaves like ENTITY: one concept/revision/contract, no bindings, correct `kind` stored. `ENUM_VALUE` children carry the set's `concept_uri` as `parent_uri`.
 
@@ -118,13 +125,13 @@ The largest file. Each test class exercises one engine path.
 
 **`TestEntityModifiedBreakingNonInstance`** — breaking non-instance change (e.g. `type`) mints a new entity contract but does not cascade to child properties.
 
-**`TestEntityModifiedInstanceNonBreaking`** — adding instances non-breakingly mints one new binding per new instance per child property; existing bindings stay ACTIVE; child properties get a new revision but no new contract.
+**`TestEntityModifiedInstanceNonBreaking`** — adding instances non-breakingly mints a binding for each `added` reported path of the tagged properties; existing bindings stay ACTIVE; child properties get no new contract.
 
-**`TestEntityModifiedInstanceBreaking`** — breaking instance change supersedes all old bindings and mints new bindings for every instance (old + new) anchored to a new child contract.
+**`TestEntityModifiedInstanceBreaking`** — a breaking instance change mints a new entity contract; child property contracts are unchanged and bindings follow the reported paths.
 
 **`TestEntityModifiedRenameAndBreaking`** — rename + breaking aspect in the same MODIFIED event: label updated AND new contract minted in one pass.
 
-**`TestEntityModifiedInstanceShrinks`** — shrinking the instance list (non-breaking): no new bindings minted, instances column updated, child still gets a new revision.
+**`TestEntityModifiedInstanceShrinks`** — shrinking the instances (non-breaking): bindings of `removed` paths become REMOVED, the instances column is updated.
 
 ### MODIFIED events (property)
 
@@ -148,7 +155,13 @@ The largest file. Each test class exercises one engine path.
 
 ### Multi-child cascade
 
-**`TestMultipleChildPropertiesCascade`** — two child properties under the same entity both get new contracts (breaking) or new bindings (non-breaking) when the parent's instance list changes.
+**`TestMultipleChildPropertiesCascade`** — an instance delta requires every property tagged with the entity to be re-reported; each reported property gets its own bindings.
+
+### Path-based bindings
+
+**`TestNestedInstanceBindings`** — leaf properties under nested instanced entities (Axle/Wheel/Tire): bindings per reported path with tags for every owning entity, cross-check failures (missing/extra tags, undeclared instance values, duplicate paths), entity renames keeping tags and URIs, and path-only refreshes writing no revisions.
+
+**`TestPropertyPathShapeChange`** — a change in the dimension shape of a property's tags forces a new contract; old bindings are SUPERSEDED and `unchanged` + `added` paths are minted on the new contract.
 
 ### Incremental syncs
 
