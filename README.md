@@ -35,7 +35,7 @@ The diff report describes changes using four element kinds:
 | Kind | Also known as | Receives bindings? |
 |---|---|---|
 | `ENTITY` | Container, branch, object type, class, feature of interest | No |
-| `PROPERTY` | Field, attribute, signal, characteristic | Yes — one per instance, or one singleton |
+| `PROPERTY` | Field, attribute, signal, characteristic | Yes — one per reported runtime path |
 | `ENUMERATION_SET` | Enum type, allowed values, expected values | No |
 | `ENUM_VALUE` | Enum member, allowed value, listed option | No |
 
@@ -155,35 +155,40 @@ Contracts apply to **both entities and fields**. An entity's essential metadata 
 
 Bindings assign a stable identity to every runtime-addressable path a property can appear on.
 
-For `Vehicle.Door` with `instances: [Left, Right]`, the field `Door.IsOpen` expands into:
+`modl` never derives these paths from the model hierarchy. The adapter reports, for every binding-eligible property, the literal runtime path of each occurrence together with the instances it belongs to (`property_paths`, see [`diff_report_template.md`](diff_report_template.md#property-paths)). Each binding stores that path (`runtime_path`) and its instance `instance_tags`, keyed by the owning entity's concept URI.
 
-| serial | binding_uri | Runtime path |
-|---|---|---|
-| 24 | `http://namespace.example/bindings/o` | `Vehicle.Door.Left.IsOpen` |
-| 25 | `http://namespace.example/bindings/p` | `Vehicle.Door.Right.IsOpen` |
+For `Vehicle.Door` with `instances: {side: [Left, Right]}`, the field `Door.IsOpen` is reported at two paths:
+
+| serial | binding_uri | Runtime path | Tags |
+|---|---|---|---|
+| 24 | `http://namespace.example/bindings/o` | `Vehicle.Door.Left.IsOpen` | `Door: {side: Left}` |
+| 25 | `http://namespace.example/bindings/p` | `Vehicle.Door.Right.IsOpen` | `Door: {side: Right}` |
 
 A system can then write a compact payload like `24: true` to mean *"the left door is open"*, without encoding the full path.
 
-For a property whose parent entity has no instances (e.g., `Battery.StateOfCharge`), one binding is still minted with no instance label:
+A property that is addressable only once (e.g., `Battery.StateOfCharge`) is reported with empty tags and gets a single binding:
 
-| serial | binding_uri | Runtime path |
-|---|---|---|
-| 42 | `http://namespace.example/bindings/16` | `Battery.StateOfCharge` |
+| serial | binding_uri | Runtime path | Tags |
+|---|---|---|---|
+| 42 | `http://namespace.example/bindings/16` | `Battery.StateOfCharge` | *(none)* |
+
+Instanced entities may be nested, and a leaf can sit under several of them. With `Axle` instanced by `row` (1, 2, 3) and `Wheel` instanced by `side` (L, R), `Wheel.Speed` is reported six times — once per `(row, side)` pair — each binding tagged with both entities (`Axle: {row: 1}`, `Wheel: {side: L}`) and carrying the adapter's literal path (e.g. `Axle1.WheelL.Speed`). Adding row 4 mints bindings for the new row only.
 
 > **Note:** Bindings are assigned to **`PROPERTY` concepts only**. `ENTITY` concepts are not directly addressable at runtime and therefore never receive bindings. Vocabulary kinds (`ENUMERATION_SET`, `ENUM_VALUE`) never receive bindings either. The engine reads the `kind` column of the concept row to enforce all three rules.
 >
 > By default, a property only receives a binding when it resolves to a primitive/scalar type (`is_leaf: true`) — a property that references another entity is normally not directly addressable. Some modeling languages break that assumption for specific constructs: a vspec `Struct`, for instance, is read and written as one atomic unit even though it is composed of child properties that already have their own bindings. For that case, the adapter can mark the non-leaf property `binding_eligible: true` in the diff event, which additively mints a binding for it as well — this can never suppress a binding a leaf property would otherwise receive. See [`diff_report_template.md`](diff_report_template.md#property-event) for the full field semantics.
 
-#### Instance expansion behavior
+#### Instance changes
 
-When instances change (e.g., `Center` is added), the behavior depends on the breaking change configuration for the entity:
+When the instances of an entity change (e.g., `Center` is added), the adapter reports the delta on the entity (`instances_added` / `instances_removed`) and re-reports every property tagged with that entity. The sync engine cross-checks the reported paths against the ledger and then:
 
-| Config | Entity revision | Entity contract | Child property contracts | New binding |
-|---|---|---|---|---|
-| **Breaking** | yes | yes (new) | unchanged | yes, added instance → new binding on existing contract; removed instance → binding marked REMOVED |
-| **Non-breaking** | yes | no (unchanged) | unchanged | yes, added instance → new binding on existing contract; removed instance → binding marked REMOVED |
+- mints bindings for `added` paths on the existing contract;
+- marks bindings of `removed` paths as REMOVED;
+- refreshes `runtime_path` on `unchanged` bindings (e.g. after a rename), without writing a revision.
 
-In both cases, child property **contracts are never changed** by an instance-list delta — only bindings are affected. Existing binding IDs remain stable for continuing instances.
+Whether the entity change is breaking is decided by the config (`instances.added` / `instances.removed`) and governs the **entity's** contract only. Child property **contracts are never changed** by an instance delta, and existing binding IDs remain stable for continuing instances.
+
+A property's contract is replaced (and its bindings re-minted) only when the *shape* of its tags changes — e.g. a singleton becoming per-instance, or tagged with another dimension — since that changes how consumers address it.
 
 ### What each event writes to the ledger
 
@@ -193,13 +198,13 @@ The table below shows which rows `modl sync` creates or updates for each type of
 |---|---|---|---|---|---|
 | ENTITY `ADDED` | new row | new row | new row (initial contract) | — | one row per aspect key excluding `instances`, `added` |
 | ENTITY `MODIFIED`, non-breaking (no instance change) | update `current_label` if renamed | new row | — (unchanged) | — | one row per changed aspect key |
-| ENTITY `MODIFIED`, non-breaking (instances changed) | update `current_label` if renamed | new row | — (unchanged) | added instances → new bindings on existing child contracts; removed instances → bindings marked REMOVED | one row per changed aspect key (excludes instance keys) |
+| ENTITY `MODIFIED`, non-breaking (instances changed) | update `current_label` if renamed | new row | — (unchanged) | reported `added` paths → new bindings on existing child contracts; `removed` paths → bindings marked REMOVED | one row per changed aspect key (excludes instance keys) |
 | ENTITY `MODIFIED`, breaking (non-instance) | update `current_label` if renamed | new row | new row | — | one row per changed aspect key |
-| ENTITY `MODIFIED`, breaking (instances changed) | update `current_label` if renamed | new row | new row (entity only) | added instances → new bindings on existing child contracts; removed instances → bindings marked REMOVED | one row per changed aspect key (excludes instance keys) |
+| ENTITY `MODIFIED`, breaking (instances changed) | update `current_label` if renamed | new row | new row (entity only) | reported `added` paths → new bindings on existing child contracts; `removed` paths → bindings marked REMOVED | one row per changed aspect key (excludes instance keys) |
 | ENTITY `REMOVED` | status → REMOVED | new row | status → REMOVED | status → REMOVED for child property bindings (via child REMOVED events) | one row per prior-state aspect key, `removed` |
-| Property `ADDED` | new row | new row | new row (initial contract) | new binding per instance; one singleton if no instances | one row per aspect key, `added` |
-| Property `MODIFIED`, non-breaking | update `current_label` if renamed | new row | — (unchanged) | — | one row per changed aspect key |
-| Property `MODIFIED`, breaking | update `current_label` if renamed | new row | new row | new bindings anchored to new contract (old bindings superseded) | one row per changed aspect key |
+| Property `ADDED` | new row | new row | new row (initial contract) | one binding per reported path (`added` entries) | one row per aspect key, `added` |
+| Property `MODIFIED`, non-breaking | update `current_label` if renamed | new row | — (unchanged) | path changes only: `added` → new, `removed` → REMOVED, `unchanged` → `runtime_path` refreshed | one row per changed aspect key |
+| Property `MODIFIED`, breaking | update `current_label` if renamed | new row | new row | old bindings superseded; `unchanged` + `added` paths re-minted on the new contract | one row per changed aspect key |
 | Property `REMOVED` | status → REMOVED | new row | status → REMOVED | status → REMOVED | one row per prior-state aspect key, `removed` |
 | `ENUMERATION_SET` `ADDED` | new row | new row | new row (initial contract) | — | one row per aspect key, `added` |
 | `ENUMERATION_SET` `MODIFIED` | update `current_label` if renamed | new row | new row if breaking, unchanged if not | — | one row per changed aspect key |
@@ -212,7 +217,7 @@ Key observations:
 - Every event produces a revision — the revision log is unconditional and unfiltered.
 - Every event also produces one `revision_aspects` row per changed aspect key (excluding the instance-list keys `instances`, `instances_added`, `instances_removed` — those are tracked via `concepts.instances` instead) — `ADDED` events record `operation="added"`, `MODIFIED` events record the wrapped `_op`, and `REMOVED` events record `operation="removed"` from `previous_aspects`.
 - A contract is only created or superseded when a change is classified as breaking by the config. Non-breaking changes leave the active contract untouched.
-- An instance-list change on an entity **never** creates or supersedes child property contracts — only bindings are affected. Added instances gain new bindings on the existing child contract; removed instances have their bindings marked REMOVED.
+- An instance-list change on an entity **never** creates or supersedes child property contracts — only bindings are affected. Reported `added` paths gain new bindings on the existing child contract; `removed` paths have their bindings marked REMOVED.
 - A rename never changes the concept URI. It updates `current_label` and appends the old label to `previous_labels` in the concept row.
 - `ENUMERATION_SET` and `ENUM_VALUE` events follow the same revision and contract rules as `ENTITY` and `PROPERTY` respectively, but **never produce bindings** regardless of configuration.
 - An `ENTITY`/`ENUMERATION_SET` `REMOVED` event requires every existing child `PROPERTY`/`ENUM_VALUE` concept to also have an explicit `REMOVED` event in the **same** diff report. `modl sync` aborts with an error (no ledger write) if any child concept is missing its `REMOVED` event.
@@ -279,13 +284,13 @@ The `kind` column records the structural kind of the concept permanently. Only `
 
 ### `bindings.csv`
 
-| serial | binding_uri | contract_uri | instance_label | status |
-|---|---|---|---|---|
-| 24 | `http://namespace.example/bindings/o` | `http://namespace.example/contracts/14` | Left | ACTIVE |
-| 25 | `http://namespace.example/bindings/p` | `http://namespace.example/contracts/14` | Right | ACTIVE |
-| 42 | `http://namespace.example/bindings/16` | `http://namespace.example/contracts/1e` | *(null)* | ACTIVE |
+| serial | binding_uri | contract_uri | instance_tags | runtime_path | status |
+|---|---|---|---|---|---|
+| 24 | `http://namespace.example/bindings/o` | `http://namespace.example/contracts/14` | `{"http://namespace.example/concepts/3":{"side":"Left"}}` | `Vehicle.Door.Left.IsOpen` | ACTIVE |
+| 25 | `http://namespace.example/bindings/p` | `http://namespace.example/contracts/14` | `{"http://namespace.example/concepts/3":{"side":"Right"}}` | `Vehicle.Door.Right.IsOpen` | ACTIVE |
+| 42 | `http://namespace.example/bindings/16` | `http://namespace.example/contracts/1e` | `{}` | `Battery.StateOfCharge` | ACTIVE |
 
-The third row is a **singleton binding** — `Battery.StateOfCharge` whose parent has no instances. `instance_label` is null; the binding still provides a stable, versioned identity for the runtime path.
+`instance_tags` is canonical JSON keyed by the concept URI of each owning `ENTITY` (stable across renames), mapping dimension → instance. The third row is a **singleton binding** with empty tags. `runtime_path` is the literal path reported by the adapter; it is unique among ACTIVE bindings, and tags are unique per contract among ACTIVE bindings.
 
 ### `revision_aspects.csv`
 
@@ -342,7 +347,8 @@ erDiagram
         int serial PK
         string binding_uri UK
         string contract_uri FK
-        string instance_label
+        string instance_tags
+        string runtime_path
         string status
     }
     revision_aspects {
@@ -801,19 +807,21 @@ Exports **ACTIVE** bindings as a lookup mapping. Superseded and removed bindings
 | `--binding-key` | Key name to use for the binding value in each exported entry, instead of the default `binding`. |
 | `-p`, `--struct-prefix` | Top-level label prefix (e.g. `Structs`) marking struct/type entries in vspec output. Only valid with `--format vspec`. |
 
-**`--format json`** (default) groups entries by the property's `current_label` — the abstract concept label. Singleton properties (no instances) map directly to the leaf fields; properties with per-instance bindings nest one level deeper, keyed by instance label:
+**`--format json`** (default) groups entries by the property's `current_label` — the abstract concept label. Each property maps to a list with one item per binding, sorted by `runtime_path`. Besides the leaf fields, every item carries the `instance_tags` (keyed by entity label, empty for a singleton) and the `runtime_path`:
 
 ```json
 {
-  "Vehicle.Speed": { "binding": "16" },
-  "Vehicle.Door.IsOpen": {
-    "Left": { "binding": "o" },
-    "Right": { "binding": "p" }
-  }
+  "Vehicle.Speed": [
+    { "binding": "16", "instance_tags": {}, "runtime_path": "Vehicle.Speed" }
+  ],
+  "Vehicle.Door.IsOpen": [
+    { "binding": "o", "instance_tags": { "Vehicle.Door": { "side": "Left" } }, "runtime_path": "Vehicle.Door.Left.IsOpen" },
+    { "binding": "p", "instance_tags": { "Vehicle.Door": { "side": "Right" } }, "runtime_path": "Vehicle.Door.Right.IsOpen" }
+  ]
 }
 ```
 
-**`--format vspec`** produces a flat mapping keyed by the realised runtime path — per-instance bindings splice the instance label into the path to match vspec's fully-qualified node naming:
+**`--format vspec`** produces a flat mapping keyed by each binding's literal `runtime_path`, exactly as reported by the adapter:
 
 ```yaml
 Vehicle.Speed:
@@ -953,11 +961,11 @@ One could argue that concepts and contracts are sufficient: concepts capture ide
 - **concepts** — stable identity; what a thing *is*, regardless of how it changes
 - **revisions** — a complete, unfiltered audit log of every detected change; does not judge whether a change is breaking
 - **contracts** — derived from revisions using a user-configurable set of essential attributes; two rows share a contract only if nothing essential to *that project's* definition of "breaking" changed
-- **bindings** — some modeling languages define entity instances (e.g., `Door: [Left, Right]`), which expand fields into multiple individually addressable runtime paths; bindings assign a stable identity to each such path
+- **bindings** — some modeling languages define entity instances (e.g., `Door: [Left, Right]`), which expand fields into multiple individually addressable runtime paths (possibly under several nested instanced entities); bindings assign a stable identity to each path the adapter reports
 - **revision_aspects** — a detailed audit trail of exactly which aspect keys changed on each revision, and their old/new values; separated from `revisions` because a revision is a single unconditional event while the aspects it touched are a variable-length, key-value breakdown of that event
 - **contract_references** — the contract-to-contract dependency edges (e.g. a property contract agreed against an entity contract), which let a new target contract cascade onto its dependents; separated from `contracts` because a contract can hold several edges and edges are immutable once written
 
-Merging revisions and contracts would either force a single global breaking-change policy or lose the audit trail. Merging bindings into contracts would require contracts to know about instance expansion, coupling two independent concepts. Merging revision_aspects into revisions would require a wide, sparse schema (one column per possible aspect key) instead of a normalized key-value table.
+Merging revisions and contracts would either force a single global breaking-change policy or lose the audit trail. Merging bindings into contracts would require contracts to know about runtime paths and instance tags, coupling two independent concepts. Merging revision_aspects into revisions would require a wide, sparse schema (one column per possible aspect key) instead of a normalized key-value table.
 
 ### Why URIs as identifiers?
 

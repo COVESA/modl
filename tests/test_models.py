@@ -121,17 +121,29 @@ class TestConceptRow:
         )
         assert row.instances is None
 
-    def test_instances_accepted_as_list(self) -> None:
-        """instances is accepted as a list of strings."""
+    def test_instances_accepted_as_dimension_dict(self) -> None:
+        """instances is accepted as a dimension -> list-of-strings dictionary."""
         row = ConceptRow(
             serial=2,
             concept_uri="ns-c:2",
             current_label="Door",
             kind=ElementKind.ENTITY,
             status=ElementStatus.ACTIVE,
-            instances=["Left", "Right"],
+            instances={"side": ["Left", "Right"]},
         )
-        assert row.instances == ["Left", "Right"]
+        assert row.instances == {"side": ["Left", "Right"]}
+
+    def test_instances_list_rejected(self) -> None:
+        """A flat list is no longer a valid instances value."""
+        with pytest.raises(ValidationError):
+            ConceptRow(
+                serial=2,
+                concept_uri="ns-c:2",
+                current_label="Door",
+                kind=ElementKind.ENTITY,
+                status=ElementStatus.ACTIVE,
+                instances=["Left", "Right"],  # ty: ignore[invalid-argument-type]
+            )
 
     def test_negative_id_rejected(self) -> None:
         """ID must be non-negative."""
@@ -183,25 +195,40 @@ class TestContractRow:
 
 class TestBindingRow:
     def test_valid(self) -> None:
-        """Binding attaches an instance label to a contract URI."""
+        """Binding attaches instance tags and a runtime path to a contract URI."""
         row = BindingRow(
             serial=24,
             contract_uri="ns-ct:40",
             binding_uri="ns-b:24",
-            instance_label="Left",
+            instance_tags={"ns-c:2": {"side": "Left"}},
+            runtime_path="Door[Left].IsOpen",
             status=ElementStatus.ACTIVE,
         )
-        assert row.instance_label == "Left"
+        assert row.instance_tags == {"ns-c:2": {"side": "Left"}}
+        assert row.runtime_path == "Door[Left].IsOpen"
 
-    def test_singleton_binding_no_instance_label(self) -> None:
-        """Binding with no instance label is valid (singleton — parent has no instances)."""
+    def test_singleton_binding_empty_tags(self) -> None:
+        """A singleton binding carries empty tags."""
         row = BindingRow(
             serial=42,
             contract_uri="ns-ct:40",
             binding_uri="ns-b:42",
+            instance_tags={},
+            runtime_path="Vehicle.Speed",
             status=ElementStatus.ACTIVE,
         )
-        assert row.instance_label is None
+        assert row.instance_tags == {}
+
+    def test_runtime_path_required(self) -> None:
+        """Omitting runtime_path fails validation."""
+        with pytest.raises(ValidationError):
+            BindingRow(  # ty: ignore[missing-argument]
+                serial=42,
+                contract_uri="ns-ct:40",
+                binding_uri="ns-b:42",
+                instance_tags={},
+                status=ElementStatus.ACTIVE,
+            )
 
 
 class TestContractReferenceRow:

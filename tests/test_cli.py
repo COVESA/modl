@@ -22,6 +22,51 @@ def _write_fixtures(tmp_path: Path) -> tuple[Path, Path]:
     return meta, aspects
 
 
+_DOOR_REPORT = {
+    "changes": [
+        {
+            "label": "Door",
+            "kind": "ENTITY",
+            "change_type": "ADDED",
+            "aspects": {"instances": {"side": ["Left", "Right"]}},
+        },
+        {"label": "Door.IsOpen", "parent_label": "Door", "kind": "PROPERTY", "is_leaf": True, "change_type": "ADDED"},
+    ],
+    "property_paths": [
+        {
+            "label": "Door.IsOpen",
+            "parent_label": "Door",
+            "paths": [
+                {"tags": {"Door": {"side": side}}, "path": f"Door.{side}.IsOpen", "change": "added"}
+                for side in ("Left", "Right")
+            ],
+        }
+    ],
+}
+
+_STRUCT_REPORT = {
+    "changes": [
+        *_DOOR_REPORT["changes"],
+        {"label": "Structs", "kind": "ENTITY", "change_type": "ADDED"},
+        {
+            "label": "Structs.Latitude",
+            "parent_label": "Structs",
+            "kind": "PROPERTY",
+            "is_leaf": True,
+            "change_type": "ADDED",
+        },
+    ],
+    "property_paths": [
+        *_DOOR_REPORT["property_paths"],
+        {
+            "label": "Structs.Latitude",
+            "parent_label": "Structs",
+            "paths": [{"tags": {}, "path": "Structs.Latitude", "change": "added"}],
+        },
+    ],
+}
+
+
 def _base_flags(ledger_dir: Path, meta: Path, aspects: Path) -> list[str]:
     return ["--ledger-dir", str(ledger_dir), "--model-metadata", str(meta), "--breaking-aspects", str(aspects)]
 
@@ -158,10 +203,11 @@ class TestCli:
         """SyncError from the engine exits non-zero with a single logged error line and no traceback."""
         meta, aspects = _write_fixtures(tmp_path)
         diff = tmp_path / "diff.json"
-        # nested list in instances triggers the _validate_instances guard
+        # a binding-eligible property without a property_paths entry is rejected by the engine
         diff.write_text(
-            '{"changes": [{"label": "Door", "kind": "ENTITY", "change_type": "ADDED",'
-            ' "aspects": {"instances": [["Front", "Rear"]]}}]}'
+            '{"changes": [{"label": "Door", "kind": "ENTITY", "change_type": "ADDED"},'
+            ' {"label": "Door.IsOpen", "parent_label": "Door", "kind": "PROPERTY", "is_leaf": true,'
+            ' "change_type": "ADDED"}]}'
         )
         result = CliRunner().invoke(
             cli,
@@ -285,13 +331,7 @@ class TestExportBindingsCli:
         meta, aspects = _write_fixtures(tmp_path)
         ledger_dir = tmp_path / "ledger"
         diff = tmp_path / "diff.json"
-        diff.write_text(
-            '{"changes": ['
-            '{"label": "Door", "kind": "ENTITY", "change_type": "ADDED", "aspects": {"instances": ["Left", "Right"]}},'
-            '{"label": "Door.IsOpen", "parent_label": "Door", "kind": "PROPERTY", "is_leaf": true,'
-            ' "change_type": "ADDED"}'
-            "]}"
-        )
+        diff.write_text(json.dumps(_DOOR_REPORT))
         result = CliRunner().invoke(cli, ["sync", "--diff-report", str(diff), *_base_flags(ledger_dir, meta, aspects)])
         assert result.exit_code == 0
         return ledger_dir
@@ -319,16 +359,18 @@ class TestExportBindingsCli:
             assert option in result.output
 
     def test_export_bindings_json_default(self, tmp_path: Path) -> None:
-        """Happy path: default format is json, nested by instance, binding suffix only."""
+        """Happy path: default format is json, one list item per binding with tags and runtime path."""
         ledger_dir = self._build_ledger(tmp_path)
         output = tmp_path / "bindings.json"
         result = CliRunner().invoke(cli, [*self._export_flags(ledger_dir, output), "bindings"])
         assert result.exit_code == 0
         mapping = json.loads(output.read_text())
         assert set(mapping.keys()) == {"Door.IsOpen"}
-        assert set(mapping["Door.IsOpen"].keys()) == {"Left", "Right"}
-        for entry in mapping["Door.IsOpen"].values():
-            assert set(entry.keys()) == {"binding"}
+        items = mapping["Door.IsOpen"]
+        assert [i["runtime_path"] for i in items] == ["Door.Left.IsOpen", "Door.Right.IsOpen"]
+        assert [i["instance_tags"] for i in items] == [{"Door": {"side": "Left"}}, {"Door": {"side": "Right"}}]
+        for entry in items:
+            assert set(entry.keys()) == {"binding", "instance_tags", "runtime_path"}
             assert not entry["binding"].startswith("http")
 
     def test_export_bindings_json_complete_flag(self, tmp_path: Path) -> None:
@@ -338,8 +380,8 @@ class TestExportBindingsCli:
         result = CliRunner().invoke(cli, [*self._export_flags(ledger_dir, output), "bindings", "--complete"])
         assert result.exit_code == 0
         mapping = json.loads(output.read_text())
-        for entry in mapping["Door.IsOpen"].values():
-            assert set(entry.keys()) == {"binding", "binding_uri"}
+        for entry in mapping["Door.IsOpen"]:
+            assert set(entry.keys()) == {"binding", "binding_uri", "instance_tags", "runtime_path"}
             assert entry["binding_uri"].startswith("http")
 
     def test_export_bindings_vspec_format(self, tmp_path: Path) -> None:
@@ -372,8 +414,8 @@ class TestExportBindingsCli:
         )
         assert result.exit_code == 0
         mapping = json.loads(output.read_text())
-        for entry in mapping["Door.IsOpen"].values():
-            assert set(entry.keys()) == {"value"}
+        for entry in mapping["Door.IsOpen"]:
+            assert set(entry.keys()) == {"value", "instance_tags", "runtime_path"}
 
     def test_export_bindings_invalid_binding_key_errors(self, tmp_path: Path) -> None:
         """--binding-key binding_uri collides with the --complete field name and causes non-zero exit."""
@@ -389,16 +431,7 @@ class TestExportBindingsCli:
         meta, aspects = _write_fixtures(tmp_path)
         ledger_dir = tmp_path / "ledger"
         diff = tmp_path / "diff.json"
-        diff.write_text(
-            '{"changes": ['
-            '{"label": "Door", "kind": "ENTITY", "change_type": "ADDED", "aspects": {"instances": ["Left", "Right"]}},'
-            '{"label": "Door.IsOpen", "parent_label": "Door", "kind": "PROPERTY", "is_leaf": true,'
-            ' "change_type": "ADDED"},'
-            '{"label": "Structs", "kind": "ENTITY", "change_type": "ADDED"},'
-            '{"label": "Structs.Latitude", "parent_label": "Structs", "kind": "PROPERTY", "is_leaf": true,'
-            ' "change_type": "ADDED"}'
-            "]}"
-        )
+        diff.write_text(json.dumps(_STRUCT_REPORT))
         result = CliRunner().invoke(cli, ["sync", "--diff-report", str(diff), *_base_flags(ledger_dir, meta, aspects)])
         assert result.exit_code == 0
         return ledger_dir

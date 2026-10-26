@@ -21,7 +21,7 @@ class ElementKind(StrEnum):
 
     - ``ENTITY``: top-level model container — receives concepts, revisions, contracts; **no bindings**.
     - ``PROPERTY``: field of an entity — receives concepts, revisions, contracts, and **bindings**
-      (one per instance when the parent entity declares instances; one singleton otherwise).
+      (one per runtime path the adapter reports; a singleton has empty ``instance_tags``).
     - ``ENUMERATION_SET`` / ``ENUM_VALUE``: vocabulary elements (enums, units, code lists)
       that receive concept URIs, revisions and contracts but **no bindings**.
 
@@ -53,7 +53,7 @@ class ConceptRow(BaseModel):
     kind: ElementKind
     status: ElementStatus
     parent_uri: str | None = None
-    instances: list[str] | None = None
+    instances: dict[str, list[str]] | None = None  # ENTITY only: dimension name -> instance labels
 
 
 class RevisionRow(BaseModel):
@@ -83,12 +83,17 @@ class ContractRow(BaseModel):
 
 
 class BindingRow(BaseModel):
-    """One row of bindings.csv — maps a property contract to a concrete runtime path via an instance label."""
+    """One row of bindings.csv — maps a property contract to a concrete runtime path.
+
+    ``instance_tags`` is canonical JSON keyed by entity ``concept_uri``, each value a
+    ``{dimension: instance}`` dictionary (``{}`` for a singleton). ``runtime_path`` is opaque text.
+    """
 
     serial: int = Field(ge=0)
     binding_uri: str
     contract_uri: str
-    instance_label: str | None = None
+    instance_tags: dict[str, dict[str, str]] = Field(default_factory=dict)
+    runtime_path: str
     status: ElementStatus
 
 

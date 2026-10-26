@@ -32,7 +32,7 @@ EXPECTED_COLUMNS: dict[str, list[str]] = {
     ],
     "revisions": ["serial", "revision_uri", "concept_uri", "previous_revision_uri", "status"],
     "contracts": ["serial", "contract_uri", "concept_uri", "revision_uri", "status"],
-    "bindings": ["serial", "binding_uri", "contract_uri", "instance_label", "status"],
+    "bindings": ["serial", "binding_uri", "contract_uri", "instance_tags", "runtime_path", "status"],
     "revision_aspects": ["revision_uri", "aspect_key", "operation", "previous_value", "newer_value", "reason"],
     "contract_references": ["contract_uri", "role", "target_contract_uri"],
 }
@@ -67,12 +67,12 @@ VALID_STATUSES = {s.value for s in ElementStatus}
 VALID_KINDS = {k.value for k in ElementKind}
 VALID_REVISION_ASPECT_OPERATIONS = {"added", "modified", "removed"}
 
-# Required (non-nullable) columns per table — previous_revision_uri and instance_label are nullable
+# Required (non-nullable) columns per table — previous_revision_uri, parent_uri and instances are nullable
 REQUIRED_COLUMNS: dict[str, list[str]] = {
     "concepts": ["serial", "concept_uri", "current_label", "kind", "status"],
     "revisions": ["serial", "concept_uri", "revision_uri", "status"],
     "contracts": ["serial", "concept_uri", "contract_uri", "revision_uri", "status"],
-    "bindings": ["serial", "contract_uri", "binding_uri", "status"],
+    "bindings": ["serial", "contract_uri", "binding_uri", "instance_tags", "runtime_path", "status"],
     "revision_aspects": ["revision_uri", "aspect_key", "operation"],
     "contract_references": ["contract_uri", "role", "target_contract_uri"],
 }
@@ -264,28 +264,33 @@ def validate_ledger(tables: dict[str, pd.DataFrame]) -> None:
                     f"[concepts] ENTITY and ENUMERATION_SET concepts must have null parent_uri: {bad}"
                 )
 
-            # ENUMERATION_SET and ENUM_VALUE must not have instances
-            no_instances_kinds = {ElementKind.ENUMERATION_SET.value, ElementKind.ENUM_VALUE.value}
+            # Only ENTITY concepts may have instances
+            no_instances_kinds = {
+                ElementKind.ENUMERATION_SET.value,
+                ElementKind.ENUM_VALUE.value,
+                ElementKind.PROPERTY.value,
+            }
             bad_instances = df[df["kind"].isin(no_instances_kinds) & df["instances"].notna()]
             if not bad_instances.empty:
                 bad = sorted(bad_instances["concept_uri"].tolist())
-                raise LedgerValidationError(
-                    f"[concepts] ENUMERATION_SET and ENUM_VALUE concepts must have null instances: {bad}"
-                )
+                raise LedgerValidationError(f"[concepts] Only ENTITY concepts may have instances: {bad}")
 
-            # Non-null instances must be a valid JSON array of strings
+            # Non-null instances must be a JSON object of dimension -> list of strings
             for _, row in df[df["instances"].notna()].iterrows():
                 raw = row["instances"]
                 try:
                     parsed = json.loads(raw)
                 except (json.JSONDecodeError, TypeError) as exc:
                     raise LedgerValidationError(
-                        f"[concepts] Column 'instances' contains invalid JSON at"
+                        f"[concepts] Column 'instances' contains invalid JSON at "
                         f"concept_uri '{row['concept_uri']}': {exc}"
                     ) from exc
-                if not isinstance(parsed, list) or not all(isinstance(v, str) for v in parsed):
+                if not isinstance(parsed, dict) or not all(
+                    isinstance(k, str) and isinstance(v, list) and all(isinstance(i, str) for i in v)
+                    for k, v in parsed.items()
+                ):
                     raise LedgerValidationError(
-                        f"[concepts] Column 'instances' must be a JSON array of strings at"
+                        f"[concepts] Column 'instances' must be a JSON object of dimension -> list of strings at "
                         f"concept_uri '{row['concept_uri']}'. Got: {raw}"
                     )
 
@@ -363,6 +368,48 @@ def validate_ledger(tables: dict[str, pd.DataFrame]) -> None:
                         f"[bindings] Only PROPERTY concepts may have bindings; "
                         f"ENTITY, ENUMERATION_SET, and ENUM_VALUE must not: {bad}"
                     )
+
+    # bindings: instance_tags must be a JSON object keyed by existing ENTITY concept_uris; the
+    # runtime_path is unique among ACTIVE bindings, and tags are unique per contract among ACTIVE ones.
+    if not bindings_df.empty:
+        entity_uris = set(concepts_df[concepts_df["kind"] == ElementKind.ENTITY.value]["concept_uri"])
+        for _, row in bindings_df.iterrows():
+            try:
+                tags = json.loads(row["instance_tags"])
+            except (json.JSONDecodeError, TypeError) as exc:
+                raise LedgerValidationError(
+                    f"[bindings] Column 'instance_tags' contains invalid JSON at binding_uri "
+                    f"'{row['binding_uri']}': {exc}"
+                ) from exc
+            if not isinstance(tags, dict) or not all(
+                isinstance(dims, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in dims.items())
+                for dims in tags.values()
+            ):
+                raise LedgerValidationError(
+                    f"[bindings] Column 'instance_tags' must map entity concept_uri -> {{dimension: instance}} at "
+                    f"binding_uri '{row['binding_uri']}'"
+                )
+            unknown = set(tags) - entity_uris
+            if unknown:
+                raise LedgerValidationError(
+                    f"[bindings] instance_tags of '{row['binding_uri']}' reference non-ENTITY concepts: "
+                    f"{sorted(unknown)}"
+                )
+            if not str(row["runtime_path"]).strip():
+                raise LedgerValidationError(f"[bindings] Empty runtime_path at binding_uri '{row['binding_uri']}'")
+        active = bindings_df[bindings_df["status"] == ElementStatus.ACTIVE]
+        dup_paths = active[active["runtime_path"].duplicated(keep=False)]
+        if not dup_paths.empty:
+            raise LedgerValidationError(
+                f"[bindings] runtime_path must be unique among ACTIVE bindings: "
+                f"{sorted(set(dup_paths['runtime_path']))}"
+            )
+        dup_tags = active[active.duplicated(subset=["contract_uri", "instance_tags"], keep=False)]
+        if not dup_tags.empty:
+            raise LedgerValidationError(
+                f"[bindings] instance_tags must be unique per contract among ACTIVE bindings: "
+                f"{sorted(dup_tags['binding_uri'])}"
+            )
 
     # contract_references: the referencing contract must belong to a PROPERTY concept and the
     # referenced contract to an ENTITY or ENUMERATION_SET concept (container namespace).
@@ -523,9 +570,8 @@ def validate_model_labels(
 def _binding_export_records(tables: dict[str, pd.DataFrame]) -> list[dict]:
     """Return one record per ACTIVE binding, joined up to its bound property concept.
 
-    Each record has keys: ``concept_uri``, ``current_label``, ``parent_label`` (``None`` if the
-    property has no instances), ``instance_label`` (``None`` for singleton bindings), and
-    ``binding_uri``.
+    Each record has keys: ``concept_uri``, ``current_label``, ``instance_tags`` (keyed by the
+    current entity label), ``runtime_path`` and ``binding_uri``.
     """
     bindings_df = tables["bindings"]
     contracts_df = tables["contracts"]
@@ -536,26 +582,29 @@ def _binding_export_records(tables: dict[str, pd.DataFrame]) -> list[dict]:
         return []
 
     merged = active_bindings.merge(contracts_df[["contract_uri", "concept_uri"]], on="contract_uri", how="left").merge(
-        concepts_df[["concept_uri", "current_label", "parent_uri"]], on="concept_uri", how="left"
+        concepts_df[["concept_uri", "current_label"]], on="concept_uri", how="left"
     )
 
     label_by_uri = concepts_df.set_index("concept_uri")["current_label"]
 
     records: list[dict] = []
     for _, row in merged.iterrows():
-        instance_label = row["instance_label"]
-        parent_uri = row["parent_uri"]
-        parent_label = label_by_uri.get(parent_uri) if pd.notna(parent_uri) else None
+        tags = {label_by_uri[uri]: dims for uri, dims in json.loads(row["instance_tags"]).items()}
         records.append(
             {
                 "concept_uri": row["concept_uri"],
                 "current_label": row["current_label"],
-                "parent_label": parent_label,
-                "instance_label": None if pd.isna(instance_label) else instance_label,
+                "instance_tags": tags,
+                "runtime_path": row["runtime_path"],
                 "binding_uri": row["binding_uri"],
             }
         )
     return records
+
+
+def canonical_tags(tags: dict[str, dict[str, str]]) -> str:
+    """Serialise instance tags to canonical JSON (sorted keys) for storage and comparison."""
+    return json.dumps(tags, sort_keys=True, separators=(",", ":"))
 
 
 def _binding_fields(binding_uri: str, complete: bool, key: str = "binding") -> dict[str, str]:
@@ -569,8 +618,8 @@ def _binding_fields(binding_uri: str, complete: bool, key: str = "binding") -> d
 def _export_bindings_json(records: list[dict], complete: bool, key: str) -> dict:
     """Group records by ``current_label`` — the abstract concept label from the concepts table.
 
-    Singleton properties (no instances) map directly to the leaf fields. Properties with
-    per-instance bindings nest one level deeper, keyed by ``instance_label``.
+    Each property maps to a list of its bindings; every item carries the binding fields plus
+    ``instance_tags`` (entity label -> dimension -> instance, empty for a singleton) and ``runtime_path``.
 
     Note: ``current_label`` uniqueness is only guaranteed among siblings sharing the same
     ``parent_uri`` (see the label-uniqueness rules in :func:`validate_ledger`), not globally.
@@ -591,63 +640,28 @@ def _export_bindings_json(records: list[dict], complete: bool, key: str) -> dict
                 f"property concepts: {sorted(concept_uris)}"
             )
 
-        if len(recs) == 1 and recs[0]["instance_label"] is None:
-            result[label] = _binding_fields(recs[0]["binding_uri"], complete, key)
-            continue
-
-        inner: dict[str, dict] = {}
-        for r in recs:
-            instance_label = r["instance_label"]
-            if instance_label is None:
-                raise LedgerValidationError(
-                    f"Property '{label}' has a mix of singleton and per-instance bindings — ledger inconsistency"
-                )
-            if instance_label in inner:
-                raise LedgerValidationError(f"Duplicate instance_label '{instance_label}' for property '{label}'")
-            inner[instance_label] = _binding_fields(r["binding_uri"], complete, key)
-        result[label] = inner
+        result[label] = [
+            {
+                **_binding_fields(r["binding_uri"], complete, key),
+                "instance_tags": r["instance_tags"],
+                "runtime_path": r["runtime_path"],
+            }
+            for r in sorted(recs, key=lambda r: r["runtime_path"])
+        ]
 
     return result
 
 
 def _export_bindings_vspec(records: list[dict], complete: bool, key: str) -> dict:
-    """Flatten records into a vspec-style mapping, splicing the instance label into the runtime path.
-
-    Singleton bindings key on ``current_label`` as-is. Per-instance bindings assume the
-    convention ``current_label == f"{parent_label}.{leaf}"`` and produce
-    ``f"{parent_label}.{instance_label}.{leaf}"``. When a property's ``current_label`` does not
-    follow this convention (e.g. after an independent rename), falls back to
-    ``f"{current_label}.{instance_label}"`` and logs a warning.
-    """
+    """Flatten records into a mapping keyed by each binding's literal ``runtime_path``."""
     result: dict = {}
     for r in records:
-        current_label = r["current_label"]
-        instance_label = r["instance_label"]
-        binding_uri = r["binding_uri"]
-
-        if instance_label is None:
-            path_key = current_label
-        else:
-            parent_label = r["parent_label"]
-            prefix = f"{parent_label}." if parent_label is not None else None
-            if prefix is not None and current_label.startswith(prefix):
-                leaf = current_label[len(prefix) :]
-                path_key = f"{parent_label}.{instance_label}.{leaf}"
-            else:
-                log.warning(
-                    "Binding %s: property label '%s' does not follow the '<parent>.<leaf>' convention "
-                    "(parent_label=%r); falling back to '<label>.<instance>' key format",
-                    binding_uri,
-                    current_label,
-                    parent_label,
-                )
-                path_key = f"{current_label}.{instance_label}"
-
+        path_key = r["runtime_path"]
         if path_key in result:
             raise LedgerValidationError(
                 f"Binding key collision while exporting: '{path_key}' is produced by more than one binding"
             )
-        result[path_key] = _binding_fields(binding_uri, complete, key)
+        result[path_key] = _binding_fields(r["binding_uri"], complete, key)
 
     return result
 
@@ -673,13 +687,10 @@ def export_bindings(
     ``format`` selects the mapping shape:
 
     - ``"json"`` (default): keyed by the property's ``current_label`` — the abstract concept
-      label. Singleton properties (no instances) map directly to the leaf fields. Properties
-      with per-instance bindings nest one level deeper, keyed by ``instance_label``. See
+      label. Each property maps to a list of its bindings carrying ``instance_tags`` (entity label ->
+      dimension -> instance) and ``runtime_path``. See
       :func:`_export_bindings_json` for a caveat on label uniqueness.
-    - ``"vspec"``: a flat mapping keyed by the realised runtime path — per-instance bindings
-      splice the instance label into the path (e.g. ``"Door.Left.IsOpen"``) to match vspec's
-      fully-qualified node naming; see :func:`_export_bindings_vspec` for the splicing rule
-      and its fallback.
+    - ``"vspec"``: a flat mapping keyed by each binding's literal ``runtime_path``.
 
     Raises LedgerValidationError if two bindings would resolve to the same key/label, since
     that would silently clobber a mapping entry.

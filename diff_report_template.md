@@ -56,11 +56,14 @@ suffixes to dodge collisions between unrelated branches and signals.
 
 ```json
 {
-  "changes": [ <event>, <event>, ... ]
+  "changes":        [ <event>, <event>, ... ],
+  "property_paths": [ <property paths>, ... ]
 }
 ```
 
 The `changes` array is an ordered list of change events. Order does not affect correctness — the sync engine processes events independently. Each event describes a change to either an **entity** or a **property**.
+
+The `property_paths` array reports, for every binding-eligible property, the literal runtime paths at which it is addressable — see [Property paths](#property-paths). It defaults to an empty list.
 
 ---
 
@@ -90,8 +93,8 @@ The `changes` array is an ordered list of change events. Order does not affect c
 
 ### Rules
 
-- **ADDED**: `aspects` carries the full snapshot. Use `instances` to carry the full list of instance labels. `content` must be absent. `renamed_from` must be absent. `previous_aspects` must be absent.
-- **MODIFIED**: `aspects` carries only the keys that actually changed, and every value must be wrapped as `{"_op": "modified", "_value": <new>, "_previous": <old>}` — plain (unwrapped) values are no longer accepted on `MODIFIED` events. For instance-list changes use `instances_added` and `instances_removed` (the directional delta — not the full list; these two keys are exempt from the wrapping requirement). `renamed_from` is set only when a rename occurred. `content` lists affected children — every item must have a corresponding standalone event in the same report, and every standalone child event must be reflected in the parent's `content`.
+- **ADDED**: `aspects` carries the full snapshot. Use `instances` to carry the full set of instances as a dimension map (`{"side": ["Left", "Right"]}`). `content` must be absent. `renamed_from` must be absent. `previous_aspects` must be absent.
+- **MODIFIED**: `aspects` carries only the keys that actually changed, and every value must be wrapped as `{"_op": "modified", "_value": <new>, "_previous": <old>}` — plain (unwrapped) values are no longer accepted on `MODIFIED` events. For instance changes use `instances_added` and `instances_removed` (the directional delta as dimension maps — not the full set; these two keys are exempt from the wrapping requirement). Every property whose bindings are tagged with this entity must be re-reported in `property_paths` in the same diff report. `renamed_from` is set only when a rename occurred. `content` lists affected children — every item must have a corresponding standalone event in the same report, and every standalone child event must be reflected in the parent's `content`.
 - **REMOVED**: `aspects` must be empty. `previous_aspects` is **mandatory and must be non-empty** — it carries the full prior-state snapshot being removed. `content` must be absent. `renamed_from` must be absent. Additionally, every existing child `PROPERTY`/`ENUM_VALUE` concept of this entity must also have an explicit `REMOVED` event in the same diff report — `modl sync` raises an error and aborts the whole sync (no ledger write) if any child concept lacks one.
 
 > **Reserved keys on entity events:** `"name"` is forbidden in `aspects` — signal renames via `renamed_from`. On `MODIFIED` events, `"instances"` is also forbidden — use `"instances_added"` / `"instances_removed"` to report the directional delta. `"instances"` is only valid on `ADDED` events (full initial snapshot).
@@ -107,7 +110,6 @@ The `changes` array is an ordered list of change events. Order does not affect c
   "kind":              "PROPERTY",
   "change_type":       "ADDED" | "REMOVED" | "MODIFIED",
   "is_leaf":           true | false,
-  "instantiate":       true | false | null,
   "binding_eligible":  true | false,
   "references":       { "<role>": "<entity or enumeration-set label>" } | null,
   "renamed_from":      "<string>" | null,
@@ -123,7 +125,6 @@ The `changes` array is an ordered list of change events. Order does not affect c
 | `kind` | always | Must be `"PROPERTY"`. |
 | `change_type` | always | `ADDED`, `REMOVED`, or `MODIFIED`. |
 | `is_leaf` | always, `PROPERTY` only | `true` when `output_type` resolves to a primitive/scalar (the property is a leaf, and thus binding-eligible); `false` when `output_type` names another entity (a reference — no bindings are ever minted for it). Required on every `PROPERTY` event, all `change_type`s. A change in `is_leaf` between snapshots always forces a new contract and a binding-lifecycle transition, independent of the breaking-change config. Not an aspect — see [Aspect keys](#aspect-keys). |
-| `instantiate` | optional, `PROPERTY` only | `false` pins the property to a single non-instantiated path — it never mirrors the parent entity's instance list, regardless of how many instances the parent declares, and receives exactly one singleton binding. Omitted or `null` (the default) means "inherit the parent's instances" — the property is expanded once per parent instance, same as if the field didn't exist. Forbidden (must be `null`/absent) on `ENUM_VALUE` events. A change in the *effective* instantiation outcome between snapshots always forces a new contract and a binding-lifecycle transition, independent of the breaking-change config — same treatment as `is_leaf`. Not an aspect — see [Aspect keys](#aspect-keys). |
 | `binding_eligible` | optional, `PROPERTY` only | Purely *additive* override — defaults to `false`. The effective binding-eligibility outcome is `is_leaf OR binding_eligible`, so this flag can never suppress a binding that `is_leaf: true` would already produce. Set `true` to mint a binding for a non-leaf property whose runtime representation is nonetheless read/written as one atomic unit — e.g. a vspec `Struct`-typed property, where each child property already receives its own binding but the struct root also needs one. Forbidden (must be `false`/absent) on `ENUM_VALUE` events. A change in the *effective* outcome (`is_leaf OR binding_eligible`) between snapshots always forces a new contract and a binding-lifecycle transition, independent of the breaking-change config — same treatment as `is_leaf`. Not an aspect — see [Aspect keys](#aspect-keys). |
 | `references` | optional, `PROPERTY` only | Declares which `ENTITY`/`ENUMERATION_SET` this property's contract depends on: a map from a role (the aspect key carrying the reference, e.g. `output_type`) to the target's current label. Lets `modl` cascade a new target contract onto this property — see [Propagating definition changes to referencing properties](#propagating-definition-changes-to-referencing-properties). `ADDED`: the full set. `MODIFIED`: omitted/`null` keeps the stored edges, `{}` clears them, a map replaces them. Forbidden on `ENUM_VALUE` and `REMOVED` events. Not an aspect — it is never classified by the breaking-change config itself; the cascade policy is the property config key named after the role. |
 | `renamed_from` | `MODIFIED` only | Previous label. Must be `null` or absent on `ADDED` and `REMOVED`. |
@@ -132,13 +133,13 @@ The `changes` array is an ordered list of change events. Order does not affect c
 
 ### Rules
 
-- **ADDED**: `aspects` carries the full snapshot; `output_type` is expected to be present for typed properties (signals, fields). Omit it for vocabulary elements such as enum values or unit definitions where no type resolution is involved. `is_leaf` is mandatory and must reflect whether `output_type` is primitive (`true`) or another entity (`false`). Set `instantiate: false` when the source model pins this property to a single non-instantiated path — otherwise omit it (default inherit-from-parent). Set `binding_eligible: true` when a non-leaf property must still receive a binding because it is read/written as one atomic unit (e.g. a struct) — otherwise omit it (default `false`). `renamed_from` and `previous_aspects` must be absent.
-- **MODIFIED**: `aspects` carries only the keys that changed, each wrapped as `{"_op": "modified", "_value": <new>, "_previous": <old>}` — plain (unwrapped) values are no longer accepted. `is_leaf` is still mandatory and must reflect the property's current state, even when it hasn't changed. `instantiate` should likewise reflect the property's current effective state, even when unchanged, so the ledger can detect a transition. `binding_eligible` should likewise reflect the property's current state, even when unchanged, so the ledger can detect a transition. `renamed_from` is set only when a rename occurred.
+- **ADDED**: `aspects` carries the full snapshot; `output_type` is expected to be present for typed properties (signals, fields). Omit it for vocabulary elements such as enum values or unit definitions where no type resolution is involved. `is_leaf` is mandatory and must reflect whether `output_type` is primitive (`true`) or another entity (`false`). Set `binding_eligible: true` when a non-leaf property must still receive a binding because it is read/written as one atomic unit (e.g. a struct) — otherwise omit it (default `false`). `renamed_from` and `previous_aspects` must be absent.
+- **MODIFIED**: `aspects` carries only the keys that changed, each wrapped as `{"_op": "modified", "_value": <new>, "_previous": <old>}` — plain (unwrapped) values are no longer accepted. `is_leaf` is still mandatory and must reflect the property's current state, even when it hasn't changed. `binding_eligible` should likewise reflect the property's current state, even when unchanged, so the ledger can detect a transition. `renamed_from` is set only when a rename occurred.
 - **REMOVED**: `aspects` must be empty. `previous_aspects` is **mandatory and must be non-empty** — it carries the full prior-state snapshot being removed. `is_leaf` is still mandatory (reflects the state being removed). `renamed_from` must be absent.
 
 > **Reserved key:** `"name"` is forbidden in `aspects` on property events — signal renames via `renamed_from`.
 
-> **`is_leaf`, `instantiate`, and `binding_eligible` are forbidden on `ENUM_VALUE` events.** Vocabulary member properties (`kind: "ENUM_VALUE"`) never receive bindings or instances regardless of shape, so all three fields must be omitted (or `null`/`false`) on those events — see [Vocabulary and governed elements](#vocabulary-and-governed-elements).
+> **`is_leaf` and `binding_eligible` are forbidden on `ENUM_VALUE` events.** Vocabulary member properties (`kind: "ENUM_VALUE"`) never receive bindings or instances regardless of shape, so both fields must be omitted (or `null`/`false`) on those events — see [Vocabulary and governed elements](#vocabulary-and-governed-elements).
 
 ### Example: struct-typed property with `binding_eligible`
 
@@ -160,13 +161,46 @@ vspec `Structs` are read and written as one atomic unit, unlike ordinary branche
 
 ---
 
+## Property paths
+
+A property's bindings cannot be derived from its parent entity: a leaf such as `Axle.Wheel.Speed` may sit under several nested instanced entities, and only the source model knows the literal runtime path of each occurrence. The adapter therefore reports them explicitly.
+
+```json
+{
+  "label":        "Wheel.Speed",
+  "parent_label": "Wheel",
+  "paths": [
+    { "tags": { "Axle": { "row": "1" }, "Wheel": { "side": "L" } }, "path": "Axle1.WheelL.Speed", "change": "unchanged" },
+    { "tags": { "Axle": { "row": "1" }, "Wheel": { "side": "R" } }, "path": "Axle1.WheelR.Speed", "change": "added" }
+  ]
+}
+```
+
+| Field | Notes |
+|---|---|
+| `label`, `parent_label` | Identify the property, exactly as in its event. |
+| `paths[].tags` | The instances this occurrence belongs to: entity label → dimension → instance value (`{}` for a property addressable once). Every entity label must be an existing `ENTITY`; every value must be an instance declared by that entity. Tags are unique within one property. |
+| `paths[].path` | The literal runtime path (the verbatim string a consumer reads or writes). Unique across all `ADDED`/`UNCHANGED` entries of the report and across `ACTIVE` bindings of the ledger. |
+| `paths[].change` | `unchanged`, `added` or `removed` (required, lowercase). |
+
+### Rules
+
+- Every `ADDED`/`MODIFIED` property event that is binding-eligible (`is_leaf OR binding_eligible`) must have an entry.
+- A property tagged with an entity that has an instance change (`instances_added` / `instances_removed`) must be re-reported, even if its own event is absent.
+- For a property that already has bindings, the `unchanged` and `removed` tags must together equal the tags of its `ACTIVE` bindings; `modl` rejects the report otherwise.
+- `added` entries mint bindings, `removed` entries retire them and `unchanged` entries only refresh the stored `runtime_path` (e.g. after an entity rename). Path-only changes write no revisions.
+- If the set of dimensions used by the tags changes (e.g. a singleton becomes instanced), the property receives a new contract and its bindings are replaced, independent of the breaking-change config.
+- Report an entity's rename through `renamed_from`; bindings keep their tags and URIs.
+- Properties with no bindings (non-leaf, not binding-eligible), `ENUM_VALUE` and `REMOVED` events must not have entries.
+
+---
+
 ## Aspect keys
 
 `aspects` is a flat `string → any` dictionary. Keys and their semantics are **adapter-defined** — `modl` stores them verbatim and compares them on future syncs to detect changes. The breaking-change config references them by their exact key name.
 
 > `is_leaf` is **not** an aspect — it is a first-class field on property events (see [Property event](#property-event)). It is never subject to the breaking-change config in the usual sense (there is no `is_leaf` config key), though a change in its value always forces `breaking = True` unconditionally. It is also not persisted as its own column anywhere in the ledger — `modl` derives the equivalent fact from whether any binding row was ever minted for the property's contract.
 
-> `instantiate` is likewise **not** an aspect — it is a first-class, optional field on property events (see [Property event](#property-event)), analogous to `is_leaf`. It is never subject to the breaking-change config (there is no `instantiate` config key), though a change in the effective instantiation outcome always forces `breaking = True` unconditionally. It is not persisted as its own column — `modl` derives the equivalent fact from whether the property concept's own `instances` column is populated.
 
 > `binding_eligible` is likewise **not** an aspect — it is a first-class, optional field on property events (see [Property event](#property-event)), analogous to `is_leaf`. It is never subject to the breaking-change config (there is no `binding_eligible` config key), though a change in the *effective* outcome (`is_leaf OR binding_eligible`) always forces `breaking = True` unconditionally. It is not persisted as its own column — `modl` derives the equivalent fact from whether any binding row was ever minted for the property's contract, same as `is_leaf`. Unlike `is_leaf`, it is purely additive: it can never cause a leaf property to lose its binding.
 
@@ -182,14 +216,14 @@ For entity `ADDED` events:
 
 | Key | Type | Meaning |
 |---|---|---|
-| `instances` | `string[]` | Full list of instance labels (initial snapshot). Each label expands every child property into a separate runtime-addressable binding. **Only valid on `ADDED` events.** |
+| `instances` | `{dimension: string[]}` | Full set of instances (initial snapshot), grouped by dimension — e.g. `{"side": ["Left", "Right"]}`, or `{"row": ["1", "2"], "side": ["L", "R"]}` for an entity indexed along two dimensions. Dimension names and values are non-empty strings; values are unique within a dimension. Instances only describe the entity: bindings are never derived from them. **Only valid on `ADDED` events.** |
 
 For entity `MODIFIED` events — use directional delta keys instead of `instances`:
 
 | Key | Type | Meaning |
 |---|---|---|
-| `instances_added` | `string[]` | Instance labels that appeared since the last sync. Values must be unique and must not overlap with the instance labels already stored in the ledger for this entity. |
-| `instances_removed` | `string[]` | Instance labels that disappeared since the last sync. |
+| `instances_added` | `{dimension: string[]}` | Instances that appeared since the last sync. Values must be unique within a dimension and must not already be stored in the ledger for this entity. |
+| `instances_removed` | `{dimension: string[]}` | Instances that disappeared since the last sync. Every value must be stored in the ledger for this entity. |
 
 All other keys are **adapter-defined**. Examples: `unit`, `min`, `max`, `accuracy`, `description`.
 
