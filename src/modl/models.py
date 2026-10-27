@@ -86,7 +86,10 @@ class BindingRow(BaseModel):
     """One row of bindings.csv — maps a property contract to a concrete runtime path.
 
     ``instance_tags`` is canonical JSON keyed by entity ``concept_uri``, each value a
-    ``{dimension: instance}`` dictionary (``{}`` for a singleton). ``runtime_path`` is opaque text.
+    ``{dimension: instance}`` dictionary (``{}`` for a singleton). ``runtime_path`` is opaque text
+    and is the unique identity of an ACTIVE binding; ``instance_tags`` are referential only and may
+    repeat across several ACTIVE bindings of the same contract (e.g. a reusable type's property
+    reached through multiple unrelated runtime paths), as long as ``runtime_path`` differs.
     """
 
     serial: int = Field(ge=0)

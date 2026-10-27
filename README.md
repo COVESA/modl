@@ -290,7 +290,7 @@ The `kind` column records the structural kind of the concept permanently. Only `
 | 25 | `http://namespace.example/bindings/p` | `http://namespace.example/contracts/14` | `{"http://namespace.example/concepts/3":{"side":"Right"}}` | `Vehicle.Door.Right.IsOpen` | ACTIVE |
 | 42 | `http://namespace.example/bindings/16` | `http://namespace.example/contracts/1e` | `{}` | `Battery.StateOfCharge` | ACTIVE |
 
-`instance_tags` is canonical JSON keyed by the concept URI of each owning `ENTITY` (stable across renames), mapping dimension → instance. The third row is a **singleton binding** with empty tags. `runtime_path` is the literal path reported by the adapter; it is unique among ACTIVE bindings, and tags are unique per contract among ACTIVE bindings.
+`instance_tags` is canonical JSON keyed by the concept URI of each owning `ENTITY` (stable across renames), mapping dimension → instance. The third row is a **singleton binding** with empty tags. `runtime_path` is the literal path reported by the adapter and is the unique identity of an ACTIVE binding; `instance_tags` are referential only and may repeat across ACTIVE bindings of the same contract (e.g. a reusable type's property reached through multiple unrelated runtime paths), as long as `runtime_path` differs.
 
 ### `revision_aspects.csv`
 

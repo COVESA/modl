@@ -1546,11 +1546,18 @@ class TestBindingValidation:
         with pytest.raises(LedgerValidationError, match="runtime_path must be unique"):
             validate_ledger(tables)
 
-    def test_duplicate_tags_per_contract_raise(self) -> None:
-        """Two ACTIVE bindings on one contract with identical tags raise LedgerValidationError."""
+    def test_duplicate_tags_per_contract_with_distinct_paths_is_allowed(self) -> None:
+        """Two ACTIVE bindings on one contract with identical tags but different runtime_path are valid."""
         tables = self._door_tables()
         tables["bindings"].loc[1, "instance_tags"] = tables["bindings"].loc[0, "instance_tags"]
-        with pytest.raises(LedgerValidationError, match="unique per contract"):
+        validate_ledger(tables)  # must not raise
+
+    def test_duplicate_tags_and_runtime_path_raises(self) -> None:
+        """Two ACTIVE bindings on one contract with identical tags AND runtime_path still raise."""
+        tables = self._door_tables()
+        tables["bindings"].loc[1, "instance_tags"] = tables["bindings"].loc[0, "instance_tags"]
+        tables["bindings"].loc[1, "runtime_path"] = tables["bindings"].loc[0, "runtime_path"]
+        with pytest.raises(LedgerValidationError, match="runtime_path must be unique"):
             validate_ledger(tables)
 
     def test_superseded_duplicate_runtime_path_is_allowed(self) -> None:

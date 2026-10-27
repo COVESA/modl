@@ -1798,6 +1798,140 @@ class TestNestedInstanceBindings:
         validate_ledger(_run(_cfg(), _axle_setup()))
 
 
+# ── Shared instance_tags across multiple bindings ──────────────────────────────
+
+
+def _shared_tag_setup(*paths: tuple[str, str]) -> DiffReport:
+    """A singleton property ('TypeA.Field') with one or more added paths, all tagged ``{}``."""
+    return _report(
+        _entity_added("TypeA"),
+        _prop_added("TypeA.Field", parent="TypeA"),
+        paths=[_paths("TypeA.Field", "TypeA", *[({}, path, change) for path, change in paths])],
+    )
+
+
+class TestSharedInstanceTags:
+    """A property may have several ACTIVE bindings sharing the same instance_tags, keyed by runtime_path."""
+
+    def test_two_added_paths_with_same_tags_mint_two_bindings(self) -> None:
+        """Two added paths with empty tags each mint a distinct ACTIVE binding on the same contract."""
+        report = _shared_tag_setup(("Root.X.Alpha.Field", "added"), ("Root.Y.Beta.Field", "added"))
+        tables = sync(empty_ledger(), report, _meta(), _cfg())
+        active = _active(tables)
+        assert len(active) == 2
+        assert active["binding_uri"].nunique() == 2
+        assert active["contract_uri"].nunique() == 1
+        assert all(json.loads(t) == {} for t in active["instance_tags"])
+        assert set(active["runtime_path"]) == {"Root.X.Alpha.Field", "Root.Y.Beta.Field"}
+
+    def test_both_unchanged_leaves_ledger_untouched(self) -> None:
+        """Reporting both existing paths as unchanged makes no changes to any table."""
+        before = sync(
+            empty_ledger(),
+            _shared_tag_setup(("Root.X.Alpha.Field", "added"), ("Root.Y.Beta.Field", "added")),
+            _meta(),
+            _cfg(),
+        )
+        step = _report(
+            paths=[
+                _paths(
+                    "TypeA.Field",
+                    "TypeA",
+                    ({}, "Root.X.Alpha.Field", "unchanged"),
+                    ({}, "Root.Y.Beta.Field", "unchanged"),
+                )
+            ]
+        )
+        after = sync(before, step, _meta(), _cfg())
+        for name, frame in before.items():
+            assert after[name].equals(frame), name
+
+    def test_one_removed_one_unchanged(self) -> None:
+        """Reporting one path removed and the other unchanged removes only that one binding."""
+        before = sync(
+            empty_ledger(),
+            _shared_tag_setup(("Root.X.Alpha.Field", "added"), ("Root.Y.Beta.Field", "added")),
+            _meta(),
+            _cfg(),
+        )
+        step = _report(
+            paths=[
+                _paths(
+                    "TypeA.Field",
+                    "TypeA",
+                    ({}, "Root.X.Alpha.Field", "removed"),
+                    ({}, "Root.Y.Beta.Field", "unchanged"),
+                )
+            ]
+        )
+        after = sync(before, step, _meta(), _cfg())
+        removed = after["bindings"][after["bindings"]["status"] == ElementStatus.REMOVED]
+        assert removed["runtime_path"].tolist() == ["Root.X.Alpha.Field"]
+        assert _active(after)["runtime_path"].tolist() == ["Root.Y.Beta.Field"]
+
+    def test_adding_a_third_path_mints_only_one_new_binding(self) -> None:
+        """A third added path with the same empty tags mints one new binding; the other two are untouched."""
+        before = sync(
+            empty_ledger(),
+            _shared_tag_setup(("Root.X.Alpha.Field", "added"), ("Root.Y.Beta.Field", "added")),
+            _meta(),
+            _cfg(),
+        )
+        before_uris = set(_active(before)["binding_uri"])
+        step = _report(
+            paths=[
+                _paths(
+                    "TypeA.Field",
+                    "TypeA",
+                    ({}, "Root.X.Alpha.Field", "unchanged"),
+                    ({}, "Root.Y.Beta.Field", "unchanged"),
+                    ({}, "Root.Z.Gamma.Field", "added"),
+                )
+            ]
+        )
+        after = sync(before, step, _meta(), _cfg())
+        active = _active(after)
+        assert len(active) == 3
+        assert before_uris <= set(active["binding_uri"])
+        assert set(active["runtime_path"]) == {"Root.X.Alpha.Field", "Root.Y.Beta.Field", "Root.Z.Gamma.Field"}
+
+    def test_same_path_twice_in_one_property_fails(self) -> None:
+        """Two entries reporting the same runtime path for one property raise SyncError."""
+        report = _report(
+            _entity_added("TypeA"),
+            _prop_added("TypeA.Field", parent="TypeA"),
+            paths=[
+                _paths(
+                    "TypeA.Field",
+                    "TypeA",
+                    ({}, "Root.X.Alpha.Field", "added"),
+                    ({}, "Root.X.Alpha.Field", "added"),
+                )
+            ],
+        )
+        with pytest.raises(SyncError, match="duplicate runtime_path"):
+            sync(empty_ledger(), report, _meta(), _cfg())
+
+    def test_same_path_across_two_properties_fails(self) -> None:
+        """The same runtime path reported for two different properties raises SyncError."""
+        report = _report(
+            _entity_added("TypeA"),
+            _prop_added("TypeA.Field", parent="TypeA"),
+            _prop_added("TypeA.Other", parent="TypeA"),
+            paths=[
+                _paths("TypeA.Field", "TypeA", ({}, "Root.Shared", "added")),
+                _paths("TypeA.Other", "TypeA", ({}, "Root.Shared", "added")),
+            ],
+        )
+        with pytest.raises(SyncError, match="also reported for"):
+            sync(empty_ledger(), report, _meta(), _cfg())
+
+    def test_ledger_validates(self) -> None:
+        """The resulting ledger with shared instance_tags passes validation."""
+        report = _shared_tag_setup(("Root.X.Alpha.Field", "added"), ("Root.Y.Beta.Field", "added"))
+        validate_ledger(sync(empty_ledger(), report, _meta(), _cfg()))
+
+
 # ── Contract references and cascade ────────────────────────────────────────────────────────
 
 

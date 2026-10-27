@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.8.1] - 2026-10-26
+### Changed
+- **Breaking:** `runtime_path`, not `instance_tags`, is now the sole unique identity of an ACTIVE binding. A property may have several ACTIVE bindings sharing identical `instance_tags` (e.g. a reusable type's property reached through multiple unrelated runtime paths), as long as each binding's `runtime_path` differs. `validate_ledger` no longer requires `instance_tags` to be unique per contract among ACTIVE bindings; only the `runtime_path` uniqueness check remains.
+- Sync's `property_paths` reconciliation now matches reported entries against the ledger by `(instance_tags, runtime_path)` instead of `instance_tags` alone, so duplicate tags within one property's paths are accepted as long as their `runtime_path` values differ. A reported path renamed while otherwise unchanged is still matched to its prior binding when its tag set maps to exactly one binding on each side; otherwise it is treated as a removed-plus-added pair.
+- Reporting the same `runtime_path` twice within one property's `property_paths` entry now raises `SyncError` (previously only duplicate tags were rejected there).
+### Tests
+- Added coverage for multiple bindings sharing `instance_tags`: minting two bindings from shared-tag added paths, no-op resync when both are unchanged, selective removal, incremental addition of a third shared-tag binding, duplicate-`runtime_path`-within-one-property and cross-property collisions, and `validate_ledger` accepting/rejecting the relevant duplicate combinations.
+
+## [0.8.0] - 2026-10-26
+
 ### Added
 - Binding paths: the diff report gains a top-level `property_paths` list. For every binding-eligible property the adapter reports the literal runtime paths and the instances (`tags`, keyed by entity label) each belongs to, with a `change` of `unchanged`, `added` or `removed`. This fixes leaf properties under nested instanced entities receiving wrong bindings, because bindings are no longer derived from the parent entity's instances.
 - `bindings.csv` stores `instance_tags` (canonical JSON keyed by the owning entity's concept URI, `{}` for a singleton) and `runtime_path`.

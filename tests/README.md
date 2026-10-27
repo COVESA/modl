@@ -91,7 +91,7 @@ Directory-level checks: must be a directory, exactly the six CSVs, nothing else.
 Round-trip write → read → validate; `next_serial()` returns `max + 1`; `b36encode()` covers 0, 1–9, a–z, multi-digit values.
 
 ### `TestBindingValidation`
-Row-level constraints on `bindings.csv`: `instance_tags` must be canonical JSON keyed by existing ENTITY concept URIs, `runtime_path` must be non-empty, and ACTIVE bindings must have unique paths and unique tags per contract.
+Row-level constraints on `bindings.csv`: `instance_tags` must be canonical JSON keyed by existing ENTITY concept URIs, `runtime_path` must be non-empty, and ACTIVE bindings must have unique `runtime_path` values (`instance_tags` may repeat across ACTIVE bindings of the same contract as long as `runtime_path` differs).
 
 ### `TestExportBindings`
 Binding export: `json` lists one item per binding (`instance_tags` by entity label, `runtime_path`) sorted by path; `vspec` is keyed by `runtime_path`; `--complete` and custom binding keys.
