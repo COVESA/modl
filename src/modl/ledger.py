@@ -369,8 +369,9 @@ def validate_ledger(tables: dict[str, pd.DataFrame]) -> None:
                         f"ENTITY, ENUMERATION_SET, and ENUM_VALUE must not: {bad}"
                     )
 
-    # bindings: instance_tags must be a JSON object keyed by existing ENTITY concept_uris; the
-    # runtime_path is unique among ACTIVE bindings, and tags are unique per contract among ACTIVE ones.
+    # bindings: instance_tags must be a JSON object keyed by existing ENTITY concept_uris, and the
+    # runtime_path is unique among ACTIVE bindings. instance_tags are referential only and may repeat
+    # across ACTIVE bindings of the same contract, as long as runtime_path differs.
     if not bindings_df.empty:
         entity_uris = set(concepts_df[concepts_df["kind"] == ElementKind.ENTITY.value]["concept_uri"])
         for _, row in bindings_df.iterrows():
@@ -403,12 +404,6 @@ def validate_ledger(tables: dict[str, pd.DataFrame]) -> None:
             raise LedgerValidationError(
                 f"[bindings] runtime_path must be unique among ACTIVE bindings: "
                 f"{sorted(set(dup_paths['runtime_path']))}"
-            )
-        dup_tags = active[active.duplicated(subset=["contract_uri", "instance_tags"], keep=False)]
-        if not dup_tags.empty:
-            raise LedgerValidationError(
-                f"[bindings] instance_tags must be unique per contract among ACTIVE bindings: "
-                f"{sorted(dup_tags['binding_uri'])}"
             )
 
     # contract_references: the referencing contract must belong to a PROPERTY concept and the

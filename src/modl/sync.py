@@ -465,17 +465,23 @@ def _property_removed(
 _PropertyKey = tuple[str, str]  # (parent_label, label)
 
 
-def _active_binding_index(tables: dict[str, pd.DataFrame]) -> dict[str, dict[str, str]]:
-    """Map each property concept_uri to ``{canonical instance_tags: binding_uri}`` of its ACTIVE bindings."""
+def _active_binding_index(tables: dict[str, pd.DataFrame]) -> dict[str, dict[tuple[str, str], str]]:
+    """Map each property concept_uri to ``{(canonical instance_tags, runtime_path): binding_uri}``
+    of its ACTIVE bindings.
+
+    The composite key is the real identity of an ACTIVE binding: ``instance_tags`` alone may repeat
+    across several bindings of the same property (e.g. a reusable type's property reached through
+    multiple unrelated runtime paths), as long as ``runtime_path`` differs.
+    """
     bindings = tables["bindings"]
     active = bindings[bindings["status"] == ElementStatus.ACTIVE]
     contracts = tables["contracts"]
     concept_by_contract = dict(zip(contracts["contract_uri"], contracts["concept_uri"], strict=True))
-    index: dict[str, dict[str, str]] = {}
-    for contract_uri, tags, binding_uri in zip(
-        active["contract_uri"], active["instance_tags"], active["binding_uri"], strict=True
+    index: dict[str, dict[tuple[str, str], str]] = {}
+    for contract_uri, tags, path, binding_uri in zip(
+        active["contract_uri"], active["instance_tags"], active["runtime_path"], active["binding_uri"], strict=True
     ):
-        index.setdefault(concept_by_contract[contract_uri], {})[tags] = binding_uri
+        index.setdefault(concept_by_contract[contract_uri], {})[(tags, path)] = binding_uri
     return index
 
 
@@ -499,8 +505,9 @@ def _validate_report_paths(report: DiffReport) -> dict[_PropertyKey, bool]:
     """Check the ``property_paths`` of a report in isolation; return binding eligibility per property event.
 
     Raises :exc:`SyncError` when a binding-eligible ADDED/MODIFIED property has no entry, an entry
-    targets a property its event declares not binding-eligible, entries or runtime paths repeat, or
-    tags repeat within an entry.
+    targets a property its event declares not binding-eligible, entries repeat, or a runtime path
+    repeats within one property's paths or across different properties. Instance tags may repeat
+    within one property's paths, as long as each entry's runtime path is distinct.
     """
     eligibility: dict[_PropertyKey, bool] = {}
     for ev in report.changes:
@@ -516,12 +523,11 @@ def _validate_report_paths(report: DiffReport) -> dict[_PropertyKey, bool]:
         seen.add(key)
         if eligibility.get(key) is False:
             raise SyncError(f"[{pp.label}] has property_paths but its event is not binding-eligible")
-        tag_sets: set[str] = set()
+        seen_paths: set[str] = set()
         for entry in pp.paths:
-            canon = canonical_tags(entry.tags)
-            if canon in tag_sets:
-                raise SyncError(f"[{pp.label}] duplicate instance tags in property_paths: {canon}")
-            tag_sets.add(canon)
+            if entry.path in seen_paths:
+                raise SyncError(f"[{pp.label}] duplicate runtime_path '{entry.path}' in property_paths")
+            seen_paths.add(entry.path)
             if entry.change != PathChange.REMOVED:
                 if entry.path in owner_by_path:
                     raise SyncError(
@@ -572,7 +578,7 @@ def _reconcile_property_paths(
     tables: dict[str, pd.DataFrame],
     metadata: ModelMetadata,
     report: DiffReport,
-    bindings_before: dict[str, dict[str, str]],
+    bindings_before: dict[str, dict[tuple[str, str], str]],
     active_before: dict[str, str],
     delta_entity_uris: set[str],
     event_eligibility: dict[_PropertyKey, bool],
@@ -588,7 +594,7 @@ def _reconcile_property_paths(
     for prop_uri, index in bindings_before.items():
         if prop_uri in reported or concepts.at[prop_uri, "status"] != ElementStatus.ACTIVE.value:
             continue
-        used = {entity for canon in index for entity in json.loads(canon)}
+        used = {entity for canon, _path in index for entity in json.loads(canon)}
         if used & delta_entity_uris:
             raise SyncError(
                 f"[{concepts.at[prop_uri, 'current_label']}] depends on an entity with an instance change "
@@ -596,11 +602,53 @@ def _reconcile_property_paths(
             )
 
 
+def _match_reported_to_ledger(
+    pp: PropertyPaths,
+    old: dict[tuple[str, str], str],
+    reported_old: set[tuple[str, str]],
+) -> dict[tuple[str, str], str]:
+    """Pair each reported UNCHANGED/REMOVED key with its ledger ``binding_uri``.
+
+    Keys are ``(canonical_tags, runtime_path)``. A reported key not present in the ledger is paired
+    by falling back to a same-tags rename match: when exactly one unmatched ledger binding and one
+    unmatched reported entry share the same canonical tags, they are treated as one binding whose
+    ``runtime_path`` changed. A tag set with several bindings on either side is left unmatched —
+    that is a removed + added pair, not a path update, and is rejected below.
+    """
+    old_keys = set(old)
+    exact_matched = reported_old & old_keys
+    unmatched_reported = reported_old - exact_matched
+    unmatched_old = old_keys - exact_matched
+
+    old_by_canon: dict[str, list[tuple[str, str]]] = {}
+    for key in unmatched_old:
+        old_by_canon.setdefault(key[0], []).append(key)
+    reported_by_canon: dict[str, list[tuple[str, str]]] = {}
+    for key in unmatched_reported:
+        reported_by_canon.setdefault(key[0], []).append(key)
+
+    match_binding_uri: dict[tuple[str, str], str] = {key: old[key] for key in exact_matched}
+    for canon, old_list in old_by_canon.items():
+        reported_list = reported_by_canon.get(canon)
+        if reported_list and len(old_list) == 1 and len(reported_list) == 1:
+            match_binding_uri[reported_list[0]] = old[old_list[0]]
+            unmatched_old.discard(old_list[0])
+            unmatched_reported.discard(reported_list[0])
+
+    if unmatched_old or unmatched_reported:
+        raise SyncError(
+            f"[{pp.label}] reported unchanged/removed paths do not match the ledger's ACTIVE bindings: "
+            f"missing from report={sorted(unmatched_old)}, "
+            f"unknown to ledger={sorted(unmatched_reported)}"
+        )
+    return match_binding_uri
+
+
 def _reconcile_one(
     tables: dict[str, pd.DataFrame],
     metadata: ModelMetadata,
     pp: PropertyPaths,
-    bindings_before: dict[str, dict[str, str]],
+    bindings_before: dict[str, dict[tuple[str, str], str]],
     active_before: dict[str, str],
     event_eligibility: dict[_PropertyKey, bool],
 ) -> str:
@@ -615,21 +663,16 @@ def _reconcile_one(
     if not old and not event_eligibility.get((pp.parent_label, pp.label), False):
         raise SyncError(f"[{pp.label}] has property_paths but is not binding-eligible")
 
-    groups: dict[PathChange, dict[str, tuple[dict[str, dict[str, str]], str]]] = {c: {} for c in PathChange}
+    groups: dict[PathChange, dict[tuple[str, str], tuple[dict[str, dict[str, str]], str]]] = {c: {} for c in PathChange}
     for entry in pp.paths:
         tags = _resolve_entry_tags(tables, entry.tags, pp.label, check_instances=entry.change != PathChange.REMOVED)
-        groups[entry.change][canonical_tags(tags)] = (tags, entry.path)
+        groups[entry.change][(canonical_tags(tags), entry.path)] = (tags, entry.path)
 
     reported_old = set(groups[PathChange.UNCHANGED]) | set(groups[PathChange.REMOVED])
-    if reported_old != set(old):
-        raise SyncError(
-            f"[{pp.label}] reported unchanged/removed paths do not match the ledger's ACTIVE bindings: "
-            f"missing from report={sorted(set(old) - reported_old)}, "
-            f"unknown to ledger={sorted(reported_old - set(old))}"
-        )
+    match_binding_uri = _match_reported_to_ledger(pp, old, reported_old)
 
     keep = {**groups[PathChange.UNCHANGED], **groups[PathChange.ADDED]}
-    old_shapes = {_shape(json.loads(c)) for c in old}
+    old_shapes = {_shape(json.loads(canon)) for canon, _path in old}
     new_shapes = {_shape(tags) for tags, _ in keep.values()}
 
     contract_uri = _active_contract_uri(tables, uri)
@@ -651,11 +694,11 @@ def _reconcile_one(
 
     for tags, path in groups[PathChange.ADDED].values():
         _mint_binding(tables, metadata, contract_uri, tags, path)
-    removed_uris = {old[canon] for canon in groups[PathChange.REMOVED]}
+    removed_uris = {match_binding_uri[key] for key in groups[PathChange.REMOVED]}
     bindings = tables["bindings"]
     bindings.loc[bindings["binding_uri"].isin(removed_uris), "status"] = ElementStatus.REMOVED.value
-    for canon, (_, path) in groups[PathChange.UNCHANGED].items():
-        mask = bindings["binding_uri"] == old[canon]
+    for key, (_, path) in groups[PathChange.UNCHANGED].items():
+        mask = bindings["binding_uri"] == match_binding_uri[key]
         if (bindings.loc[mask, "runtime_path"] != path).any():
             bindings.loc[mask, "runtime_path"] = path
     return uri
