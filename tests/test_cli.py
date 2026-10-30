@@ -1,4 +1,5 @@
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -502,3 +503,50 @@ class TestExportBindingsCli:
         (ledger_dir / "unrelated.txt").write_text("oops")
         result = CliRunner().invoke(cli, [*self._export_flags(ledger_dir, tmp_path / "out.json"), "bindings"])
         assert result.exit_code != 0
+
+
+class TestExportSqliteCli:
+    def _build_ledger(self, tmp_path: Path) -> Path:
+        return TestExportBindingsCli()._build_ledger(tmp_path)
+
+    def _flags(self, ledger_dir: Path, output: Path) -> list[str]:
+        return ["export", "-o", str(ledger_dir), "--output", str(output), "sqlite"]
+
+    def test_export_sqlite_writes_database(self, tmp_path: Path) -> None:
+        """export sqlite writes a database containing all ledger tables."""
+        ledger_dir = self._build_ledger(tmp_path)
+        db = tmp_path / "out.db"
+        result = CliRunner().invoke(cli, self._flags(ledger_dir, db))
+        assert result.exit_code == 0
+        with sqlite3.connect(db) as conn:
+            assert conn.execute("SELECT count(*) FROM bindings").fetchone()[0] == 2
+            assert conn.execute("SELECT count(*) FROM concepts").fetchone()[0] == 2
+
+    def test_export_sqlite_existing_file_errors(self, tmp_path: Path) -> None:
+        """An existing output file without --overwrite exits non-zero and is untouched."""
+        ledger_dir = self._build_ledger(tmp_path)
+        db = tmp_path / "out.db"
+        db.write_text("sentinel")
+        result = CliRunner().invoke(cli, self._flags(ledger_dir, db))
+        assert result.exit_code != 0
+        assert db.read_text() == "sentinel"
+
+    def test_export_sqlite_overwrite(self, tmp_path: Path) -> None:
+        """--overwrite replaces an existing output file."""
+        ledger_dir = self._build_ledger(tmp_path)
+        db = tmp_path / "out.db"
+        db.write_text("sentinel")
+        result = CliRunner().invoke(cli, [*self._flags(ledger_dir, db), "--overwrite"])
+        assert result.exit_code == 0
+        with sqlite3.connect(db) as conn:
+            assert conn.execute("SELECT count(*) FROM concepts").fetchone()[0] == 2
+
+    def test_export_sqlite_invalid_ledger_dir_errors(self, tmp_path: Path) -> None:
+        """A ledger directory with unrecognised files exits non-zero and writes no database."""
+        ledger_dir = tmp_path / "ledger"
+        ledger_dir.mkdir()
+        (ledger_dir / "unrelated.txt").write_text("oops")
+        db = tmp_path / "out.db"
+        result = CliRunner().invoke(cli, self._flags(ledger_dir, db))
+        assert result.exit_code != 0
+        assert not db.exists()

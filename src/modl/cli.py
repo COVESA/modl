@@ -19,7 +19,15 @@ from .adapt import (
 )
 from .config import AdaptationConfig, BreakingChangeConfig, ModelMetadata
 from .ir import DiffReport, validate_report_aspects
-from .ledger import LedgerValidationError, empty_ledger, export_bindings, read_ledger, validate_ledger_dir, write_ledger
+from .ledger import (
+    LedgerValidationError,
+    empty_ledger,
+    export_bindings,
+    export_sqlite,
+    read_ledger,
+    validate_ledger_dir,
+    write_ledger,
+)
 from .sync import SyncError
 from .sync import sync as run_sync
 
@@ -205,7 +213,7 @@ def sync(
     "--output",
     required=True,
     type=click.Path(writable=True, path_type=Path),
-    help="Path to write the exported file to (a directory when --struct-prefix is used)",
+    help="Path to write the exported file to (a directory when --struct-prefix is used; the .db file for sqlite)",
 )
 @click.pass_context
 def export_group(ctx: click.Context, ledger_dir: Path, output: Path) -> None:
@@ -294,6 +302,34 @@ def export_bindings_cmd(
     else:
         output.write_text(json.dumps(mapping, indent=2, sort_keys=True) + "\n")
     log.info("Exported %d active binding(s) to %s", len(mapping), output)
+
+
+@export_group.command("sqlite")
+@click.option(
+    "--overwrite",
+    is_flag=True,
+    default=False,
+    help="Replace the output file if it already exists",
+)
+@click.pass_context
+def export_sqlite_cmd(ctx: click.Context, overwrite: bool) -> None:
+    """Export all ledger tables into a SQLite database file (--output is the .db path)."""
+    ledger_dir: Path = ctx.obj["ledger_dir"]
+    output: Path = ctx.obj["output"]
+
+    try:
+        tables = read_ledger(ledger_dir)
+    except LedgerValidationError as exc:
+        log.error("Ledger validation error — %s", exc)
+        raise SystemExit(1) from None
+
+    try:
+        counts = export_sqlite(tables, output, overwrite=overwrite)
+    except (LedgerValidationError, OSError) as exc:
+        log.error("%s", exc)
+        raise SystemExit(1) from None
+
+    log.info("Exported %s to %s", ", ".join(f"{n} {name}" for name, n in counts.items()), output)
 
 
 @cli.command()
