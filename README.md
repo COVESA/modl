@@ -787,14 +787,15 @@ Exports ledger tables into lookup mappings for downstream tooling — e.g. feedi
 
 ```shell
 modl export --ledger-dir PATH --output PATH bindings [--format {json,vspec}] [--complete] [--binding-key KEY] [--struct-prefix PREFIX]
+modl export --ledger-dir PATH --output FILE.db sqlite [--overwrite]
 ```
 
 | Option | Description |
 |---|---|
 | `-o`, `--ledger-dir` | Directory containing the ledger CSV files. |
-| `--output` | Path to write the exported file to (a directory when `--struct-prefix` is used). |
+| `--output` | Path to write the exported file to (a directory when `--struct-prefix` is used; the database file for `sqlite`). |
 
-The `export` command is a group; `bindings` is currently its only subcommand.
+The `export` command is a group with two subcommands: `bindings` and `sqlite`.
 
 #### `modl export bindings`
 
@@ -845,6 +846,23 @@ Use `--binding-key` to rename the leaf field — for example `--binding-key valu
 `--struct-prefix` splits vspec output into two files under `--output` (treated as a directory in this mode): `overlay_tree.vspec` for domain entries, and `types_tree.vspec` for entries whose key equals or starts with the given prefix. Only valid with `--format vspec`.
 
 `modl export bindings` exits non-zero if two bindings would resolve to the same key — this would otherwise silently clobber a mapping entry.
+
+#### `modl export sqlite`
+
+Exports all six ledger tables into a SQLite database for ad-hoc querying. The ledger is validated first; the database is a full snapshot (every status, not only ACTIVE rows).
+
+| Option | Description |
+|---|---|
+| `--overwrite` | Replace the output file if it already exists. Without it, an existing file is an error. |
+
+Tables keep their ledger names and columns. `serial` is `INTEGER`, all other columns are `TEXT`, and the primary-key, unique, not-null and foreign-key constraints mirror the ledger validation rules. JSON-valued columns (`previous_labels`, `instances`, `instance_tags`, aspect values) are stored verbatim, so SQLite's `json_extract` applies:
+
+```shell
+modl export -o ledger --output ledger.db sqlite
+sqlite3 ledger.db "SELECT c.current_label, b.runtime_path FROM bindings b JOIN contracts k USING (contract_uri) JOIN concepts c USING (concept_uri) WHERE b.status = 'ACTIVE'"
+```
+
+The file is built in a temporary location and moved into place, so a failed export never leaves a partial database.
 
 ## Adoption Guide
 

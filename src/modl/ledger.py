@@ -5,9 +5,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sqlite3
 import tempfile
 from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
@@ -472,6 +474,104 @@ def write_ledger(tables: dict[str, pd.DataFrame], ledger_dir: Path) -> None:
             tables[name].to_csv(tmp_path / f"{name}.csv", index=False)
         for name in TABLES:
             os.replace(tmp_path / f"{name}.csv", ledger_dir / f"{name}.csv")
+
+
+def _sqlite_create_statement(name: str) -> str:
+    """Return the ``CREATE TABLE`` statement for one ledger table, with constraints from the schema constants."""
+    required = set(REQUIRED_COLUMNS[name])
+    unique_cols = UNIQUE_COLUMNS.get(name, [])
+    lines: list[str] = []
+    for col in EXPECTED_COLUMNS[name]:
+        sql_type = "INTEGER" if col == "serial" else "TEXT"
+        constraint = " NOT NULL" if col in required else ""
+        if col == "serial" and col in unique_cols:
+            constraint += " PRIMARY KEY"
+        elif col in unique_cols:
+            constraint += " UNIQUE"
+        lines.append(f'"{col}" {sql_type}{constraint}')
+    if name in COMPOSITE_KEY_COLUMNS:
+        cols = ", ".join(f'"{c}"' for c in COMPOSITE_KEY_COLUMNS[name])
+        lines.append(f"PRIMARY KEY ({cols})")
+    lines.extend(
+        f'FOREIGN KEY ("{col}") REFERENCES "{parent}" ("{parent_col}")'
+        for child, col, parent, parent_col in FK_CONSTRAINTS
+        if child == name
+    )
+    body = ",\n    ".join(lines)
+    return f'CREATE TABLE "{name}" (\n    {body}\n)'
+
+
+def _sqlite_value(value: Any) -> Any:
+    """Convert a DataFrame cell to a value sqlite3 accepts; missing becomes NULL, JSON-like values stay text."""
+    if isinstance(value, (list, dict)):
+        return json.dumps(value)
+    if value is None or pd.isna(value):
+        return None
+    if hasattr(value, "item"):  # numpy scalar -> Python scalar
+        value = value.item()
+    return value
+
+
+def _sqlite_row(name: str, row: tuple) -> tuple:
+    """Convert one DataFrame row to a tuple of SQLite values matching the declared column types."""
+    values = [_sqlite_value(v) for v in row]
+    for i, col in enumerate(EXPECTED_COLUMNS[name]):
+        v = values[i]
+        if v is None:
+            continue
+        if col == "serial":
+            values[i] = int(v)
+        elif isinstance(v, float) and v.is_integer():
+            values[i] = str(int(v))  # numeric JSON text (e.g. "3") that pandas parsed as a number
+        elif not isinstance(v, str):
+            values[i] = str(v)
+    return tuple(values)
+
+
+def export_sqlite(tables: dict[str, pd.DataFrame], db_path: Path, *, overwrite: bool = False) -> dict[str, int]:
+    """Export the ledger tables to a SQLite database file and return the row count per table.
+
+    Each table keeps its ledger name and columns. ``serial`` is ``INTEGER``; every other column is
+    ``TEXT`` (JSON-valued columns such as ``previous_labels``, ``instances`` and ``instance_tags`` are
+    stored verbatim, so SQLite's ``json_extract`` applies). Primary-key, unique, not-null and
+    foreign-key constraints mirror the ledger validation rules.
+
+    The database is built in a temporary file next to ``db_path`` and renamed into place, so a failure
+    leaves any pre-existing file untouched. Raises ``FileExistsError`` if ``db_path`` exists and
+    ``overwrite`` is false, and ``LedgerValidationError`` if the exported data violates a constraint.
+    """
+    if db_path.is_dir():
+        raise IsADirectoryError(f"Output path is a directory: {db_path}")
+    if db_path.exists() and not overwrite:
+        raise FileExistsError(f"Output file already exists: {db_path} (use --overwrite to replace it)")
+
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    counts: dict[str, int] = {}
+    with tempfile.TemporaryDirectory(dir=db_path.parent, prefix=".modl-tmp-") as tmp:
+        tmp_db = Path(tmp) / "ledger.db"
+        conn = sqlite3.connect(tmp_db)
+        try:
+            conn.execute("PRAGMA foreign_keys = ON")
+            # Parents may be inserted after children within one table (e.g. concepts.parent_uri),
+            # so defer FK checks to commit time.
+            conn.execute("PRAGMA defer_foreign_keys = ON")
+            for name in TABLES:
+                conn.execute(_sqlite_create_statement(name))
+            for name in TABLES:
+                cols = EXPECTED_COLUMNS[name]
+                df = tables[name][cols]
+                placeholders = ", ".join("?" for _ in cols)
+                col_list = ", ".join(f'"{c}"' for c in cols)
+                rows = [_sqlite_row(name, row) for row in df.itertuples(index=False, name=None)]
+                conn.executemany(f'INSERT INTO "{name}" ({col_list}) VALUES ({placeholders})', rows)
+                counts[name] = len(rows)
+            conn.commit()
+        except sqlite3.IntegrityError as exc:
+            raise LedgerValidationError(f"Ledger data violates a SQLite constraint: {exc}") from exc
+        finally:
+            conn.close()
+        os.replace(tmp_db, db_path)
+    return counts
 
 
 def validate_model_labels(

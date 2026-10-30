@@ -1,3 +1,5 @@
+import json
+import sqlite3
 from pathlib import Path
 
 import pandas as pd
@@ -6,11 +8,13 @@ import pytest
 from modl.config import BreakingChangeConfig, ModelMetadata
 from modl.ir import ChangeType, DiffReport, EntityChanged, PathChange, PathEntry, PropertyChanged, PropertyPaths
 from modl.ledger import (
+    TABLES,
     LedgerValidationError,
     b36decode,
     b36encode,
     empty_ledger,
     export_bindings,
+    export_sqlite,
     next_serial,
     read_ledger,
     validate_ledger,
@@ -1573,3 +1577,133 @@ class TestBindingValidation:
         tables["bindings"].loc[0, "runtime_path"] = " "
         with pytest.raises(LedgerValidationError, match="Empty runtime_path"):
             validate_ledger(tables)
+
+
+# ── export_sqlite ───────────────────────────────────────────────────────────
+
+
+def _sqlite_ledger() -> dict[str, pd.DataFrame]:
+    """A ledger with instanced bindings, a rename (previous_labels) and revision aspects."""
+    tables = sync(empty_ledger(), _door_report(), _export_meta(), _export_cfg())
+    rename = DiffReport(
+        changes=[EntityChanged(label="Hatch", change_type=ChangeType.MODIFIED, renamed_from="Door")],
+        property_paths=[
+            _paths(
+                "Door.IsOpen",
+                "Hatch",
+                ({"Hatch": {"side": "Left"}}, "Door.Left.IsOpen", "unchanged"),
+                ({"Hatch": {"side": "Right"}}, "Door.Right.IsOpen", "unchanged"),
+            )
+        ],
+    )
+    return sync(tables, rename, _export_meta(), _export_cfg())
+
+
+class TestExportSqlite:
+    def test_row_counts_and_tables(self, tmp_path: Path) -> None:
+        """Every ledger table is created and populated with its row count."""
+        tables = _sqlite_ledger()
+        db = tmp_path / "ledger.db"
+        counts = export_sqlite(tables, db)
+        assert counts == {name: len(tables[name]) for name in TABLES}
+        with sqlite3.connect(db) as conn:
+            names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            assert names == set(TABLES)
+            for name in TABLES:
+                assert conn.execute(f"SELECT count(*) FROM {name}").fetchone()[0] == len(tables[name])
+
+    def test_round_trip_values(self, tmp_path: Path) -> None:
+        """Exported rows equal the DataFrame rows, with NaN as NULL and serial as INTEGER."""
+        tables = _sqlite_ledger()
+        db = tmp_path / "ledger.db"
+        export_sqlite(tables, db)
+        with sqlite3.connect(db) as conn:
+            rows = conn.execute("SELECT * FROM concepts ORDER BY serial").fetchall()
+            assert [r[0] for r in rows] == list(tables["concepts"]["serial"])
+            assert all(isinstance(r[0], int) for r in rows)
+            assert [r[1] for r in rows] == list(tables["concepts"]["concept_uri"])
+            assert conn.execute("SELECT parent_uri FROM concepts WHERE kind='ENTITY'").fetchone()[0] is None
+
+    def test_json_columns_stored_verbatim(self, tmp_path: Path) -> None:
+        """JSON-valued columns remain text and are queryable with json_extract."""
+        tables = _sqlite_ledger()
+        db = tmp_path / "ledger.db"
+        export_sqlite(tables, db)
+        with sqlite3.connect(db) as conn:
+            prev = conn.execute("SELECT previous_labels FROM concepts WHERE current_label='Hatch'").fetchone()[0]
+            assert json.loads(prev) == ["Door"]
+            sides = conn.execute(
+                "SELECT json_extract(instances, '$.side') FROM concepts WHERE current_label='Hatch'"
+            ).fetchone()[0]
+            assert json.loads(sides) == ["Left", "Right"]
+            tags = conn.execute("SELECT instance_tags FROM bindings ORDER BY serial").fetchall()
+            assert [t[0] for t in tags] == list(tables["bindings"]["instance_tags"])
+
+    def test_constraints_enforced(self, tmp_path: Path) -> None:
+        """Primary-key, unique, and foreign-key constraints exist in the exported schema."""
+        db = tmp_path / "ledger.db"
+        export_sqlite(_sqlite_ledger(), db)
+        with sqlite3.connect(db) as conn:
+            conn.execute("PRAGMA foreign_keys = ON")
+            assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+            fks = {(r[2], r[3], r[4]) for r in conn.execute("PRAGMA foreign_key_list(bindings)")}
+            assert fks == {("contracts", "contract_uri", "contract_uri")}
+            with pytest.raises(sqlite3.IntegrityError):
+                conn.execute(
+                    "INSERT INTO bindings VALUES (999, 'u', 'no-such-contract', '{}', 'p', 'ACTIVE')",
+                )
+            with pytest.raises(sqlite3.IntegrityError):
+                conn.execute(
+                    "INSERT INTO concepts (serial, concept_uri, current_label, kind, status) "
+                    "VALUES (0, 'x', 'x', 'ENTITY', 'ACTIVE')"
+                )
+
+    def test_empty_ledger_creates_empty_tables(self, tmp_path: Path) -> None:
+        """An empty ledger exports every table with zero rows."""
+        db = tmp_path / "ledger.db"
+        counts = export_sqlite(empty_ledger(), db)
+        assert set(counts) == set(TABLES)
+        assert not any(counts.values())
+
+    def test_existing_file_refused_without_overwrite(self, tmp_path: Path) -> None:
+        """An existing output file raises FileExistsError and is left untouched."""
+        db = tmp_path / "ledger.db"
+        db.write_text("sentinel")
+        with pytest.raises(FileExistsError):
+            export_sqlite(_sqlite_ledger(), db)
+        assert db.read_text() == "sentinel"
+
+    def test_overwrite_replaces_file(self, tmp_path: Path) -> None:
+        """overwrite=True replaces an existing file with a valid database."""
+        db = tmp_path / "ledger.db"
+        db.write_text("sentinel")
+        export_sqlite(_sqlite_ledger(), db, overwrite=True)
+        with sqlite3.connect(db) as conn:
+            assert conn.execute("SELECT count(*) FROM concepts").fetchone()[0] > 0
+
+    def test_directory_output_raises(self, tmp_path: Path) -> None:
+        """Pointing the output at a directory raises IsADirectoryError."""
+        with pytest.raises(IsADirectoryError):
+            export_sqlite(empty_ledger(), tmp_path)
+
+    def test_constraint_violation_raises_and_leaves_no_file(self, tmp_path: Path) -> None:
+        """Data violating a foreign key raises LedgerValidationError and writes nothing."""
+        tables = _sqlite_ledger()
+        tables["bindings"].loc[0, "contract_uri"] = "missing-contract"
+        db = tmp_path / "ledger.db"
+        with pytest.raises(LedgerValidationError):
+            export_sqlite(tables, db)
+        assert not db.exists()
+        assert list(tmp_path.iterdir()) == []
+
+    def test_creates_parent_directory(self, tmp_path: Path) -> None:
+        """Missing parent directories of the output path are created."""
+        db = tmp_path / "nested" / "dir" / "ledger.db"
+        export_sqlite(empty_ledger(), db)
+        assert db.is_file()
+
+    def test_no_leftover_temp_files(self, tmp_path: Path) -> None:
+        """Only the database file remains in the output directory after success."""
+        db = tmp_path / "ledger.db"
+        export_sqlite(_sqlite_ledger(), db)
+        assert [p.name for p in tmp_path.iterdir()] == ["ledger.db"]

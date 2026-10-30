@@ -96,6 +96,9 @@ Row-level constraints on `bindings.csv`: `instance_tags` must be canonical JSON 
 ### `TestExportBindings`
 Binding export: `json` lists one item per binding (`instance_tags` by entity label, `runtime_path`) sorted by path; `vspec` is keyed by `runtime_path`; `--complete` and custom binding keys.
 
+### `TestExportSqlite`
+SQLite export: all tables created with matching row counts; NULL/INTEGER/JSON-text round trip and `json_extract` queries; schema constraints; empty ledger; existing file refused unless `overwrite`; directory output rejected; constraint violations raise without leaving a file or temp artefacts.
+
 ### `TestRevisionAspectsValidation`
 Row-level constraints on `revision_aspects.csv`: valid ADDED/MODIFIED/REMOVED rows pass; duplicate `(revision_uri, aspect_key)` raises; invalid `operation` raises; `modified` rows with a null `previous_value` or `newer_value` raise; `added` rows with a non-null `previous_value` raise; `removed` rows with a non-null `newer_value` raise; FK violation on `revision_uri` raises.
 

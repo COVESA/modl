@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `modl export sqlite` exports all ledger tables into a SQLite database file, with primary-key, unique, not-null and foreign-key constraints mirroring the ledger rules and JSON columns stored verbatim. Refuses to replace an existing file unless `--overwrite` is passed.
+
 ## [0.8.1] - 2026-10-26
 ### Changed
 - **Breaking:** `runtime_path`, not `instance_tags`, is now the sole unique identity of an ACTIVE binding. A property may have several ACTIVE bindings sharing identical `instance_tags` (e.g. a reusable type's property reached through multiple unrelated runtime paths), as long as each binding's `runtime_path` differs. `validate_ledger` no longer requires `instance_tags` to be unique per contract among ACTIVE bindings; only the `runtime_path` uniqueness check remains.
