@@ -1,0 +1,155 @@
+# The release commit stages every tracked file that changed (git add -u).
+# Steps that generate files must write them to untracked directories.
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  ZERO_BASED_VERSIONING: true
+
+jobs:
+  version:
+    if: github.repository_owner == 'covesa'
+    runs-on: ubuntu-latest
+    outputs:
+      bump: ${{ steps.version.outputs.bump }}
+      last_tag: ${{ steps.version.outputs.last_tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Determine version bump
+        id: version
+        run: |
+          echo "Zero-based versioning: ${ZERO_BASED_VERSIONING} (set it to false to release v1.0.0)"
+
+          # Get commits since last tag
+          LAST_TAG=$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' 2>/dev/null || echo "")
+          if [ -z "$LAST_TAG" ]; then
+            RANGE="HEAD"
+          else
+            RANGE="${LAST_TAG}..HEAD"
+          fi
+          COMMITS=$(git log --pretty=format:"%s" "$RANGE")
+          MESSAGES=$(git log --pretty=format:"%B" "$RANGE")
+          echo "last_tag=${LAST_TAG}" >> $GITHUB_OUTPUT
+
+          echo "Commits since last tag:"
+          echo "$COMMITS"
+
+          # Determine version bump based on conventional commits
+          MAJOR=false
+          MINOR=false
+          PATCH=false
+
+          while IFS= read -r commit; do
+            echo "Analyzing: $commit"
+            if echo "$commit" | grep -qE "^[a-zA-Z]+(\(.+\))?!:"; then
+              echo "Breaking change detected"
+              MAJOR=true
+            elif echo "$commit" | grep -qE "^feat(\(.+\))?:"; then
+              echo "Feature detected"
+              MINOR=true
+            elif echo "$commit" | grep -qE "^(fix|perf)(\(.+\))?:"; then
+              echo "Fix/perf detected"
+              PATCH=true
+            fi
+          done <<< "$COMMITS"
+
+          if echo "$MESSAGES" | grep -qE "^BREAKING CHANGE:"; then
+            echo "Breaking change in body detected"
+            MAJOR=true
+          fi
+
+          # Determine bump type (major > minor > patch)
+          # Use minor bump for breaking changes when zero-based versioning is enabled
+          if [ "$MAJOR" = true ]; then
+            if [ "$ZERO_BASED_VERSIONING" = "true" ]; then
+              echo "bump=minor" >> $GITHUB_OUTPUT
+              echo "Version bump: MINOR (zero-based versioning - breaking change)"
+            else
+              echo "bump=major" >> $GITHUB_OUTPUT
+              echo "Version bump: MAJOR"
+            fi
+          elif [ "$MINOR" = true ]; then
+            echo "bump=minor" >> $GITHUB_OUTPUT
+            echo "Version bump: MINOR"
+          elif [ "$PATCH" = true ]; then
+            echo "bump=patch" >> $GITHUB_OUTPUT
+            echo "Version bump: PATCH"
+          else
+            echo "bump=none" >> $GITHUB_OUTPUT
+            echo "No version bump needed"
+          fi
+
+  release:
+    needs: version
+    if: needs.version.outputs.bump != 'none'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ssh-key: ${{ secrets.DEPLOY_KEY }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Check code version matches last tag
+        run: |
+          LAST_TAG="${{ needs.version.outputs.last_tag }}"
+          CODE_VERSION="v$(uv run bump-my-version show current_version)"
+          echo "Last tag: ${LAST_TAG}"
+          echo "Code version: ${CODE_VERSION}"
+          if [ "$CODE_VERSION" != "$LAST_TAG" ]; then
+            echo "ERROR: Code version ${CODE_VERSION} does not match last tag ${LAST_TAG}"
+            exit 1
+          fi
+
+      - name: Bump version
+        id: new_version
+        run: |
+          uv run bump-my-version bump "${{ needs.version.outputs.bump }}" --no-tag --no-commit
+          NEW_VERSION="v$(uv run bump-my-version show current_version)"
+          echo "New version: ${NEW_VERSION}"
+          echo "version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Update changelog
+        run: |
+          NEW_VERSION="${{ steps.new_version.outputs.version }}"
+          uv run git-cliff --unreleased --tag "${NEW_VERSION}" --prepend CHANGELOG.md
+          uv run git-cliff --unreleased --tag "${NEW_VERSION}" --strip all --output "${RUNNER_TEMP}/release-notes.md"
+
+      - name: Commit, tag and push
+        run: |
+          NEW_VERSION="${{ steps.new_version.outputs.version }}"
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add -u
+          git commit -m "chore: release ${NEW_VERSION}"
+          git tag "${NEW_VERSION}"
+          git push origin "${{ github.ref_name }}" "${NEW_VERSION}"
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.new_version.outputs.version }}" \
+            --title "${{ steps.new_version.outputs.version }}" \
+            --notes-file "${RUNNER_TEMP}/release-notes.md"
